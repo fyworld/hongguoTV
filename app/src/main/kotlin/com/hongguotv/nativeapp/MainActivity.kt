@@ -57,6 +57,7 @@ class MainActivity: Activity() {
     private var collectionReturn: CatalogState?=null
     private var collectionFocus=""
     private var collectionBack: View?=null
+    private var homeGridFocus=false
     private val pageSize=20
     private var catalogScroll: ScrollView?=null
     private var catalogBody: LinearLayout?=null
@@ -450,7 +451,7 @@ class MainActivity: Activity() {
                 // Board switch: focus the freshly selected board button while loading.
                 if(focusType) typeButtons[library.contentType]?.requestFocus()
                 else if(tab==2) rankButtons[rankFocusBoard ?: library.rankBoard]?.requestFocus() ?: nav[tab].requestFocus()
-                else nav[tab].requestFocus()
+                else if(!homeGridFocus) nav[tab].requestFocus()
             }
             val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType; val requestBoard=library.rankBoard
             work({
@@ -550,7 +551,7 @@ class MainActivity: Activity() {
             paging.addView(text(if(localCatalog()) "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页" else if(tab==2 && ranking!=null) "第 $page / ${ranking!!.totalPages} 页" else "第 $page 页",14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==2) 135 else 95),dp(44)))
             next=addButton(paging,"下一页") { if(hasMore) { page++; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=hasMore; isFocusable=hasMore; alpha=if(hasMore) 1f else .4f }
             if(collection=="hot" && !hasMore && collectionReturn?.hasMore==true) {
-                next=addButton(paging,"下一批热门") { collection=null; collectionReturn=null; page=2; catalogFocus=""; showCatalog(true) }
+                next=addButton(paging,"下一批热门") { collection=null; collectionReturn=null; page=2; catalogFocus=""; homeGridFocus=true; showCatalog(true) }
             }
             list.addView(paging,lp(-1,dp(50)))
         }
@@ -571,6 +572,7 @@ class MainActivity: Activity() {
         else homeUpdates?.let { updates -> updates.nextFocusUpId=typeButtons[library.contentType]?.id ?: nav[0].id; updates.nextFocusDownId=cards.first().id; cards.take(count).forEach { it.nextFocusUpId=updates.id } }
         typeButtons.values.forEach { it.nextFocusDownId=collectionBack?.id ?: resumeCards.firstOrNull()?.id ?: homeUpdates?.id ?: cards.first().id }
         when {
+            homeGridFocus -> { homeGridFocus=false; cards.first().requestFocus() }
             focusType -> typeButtons[library.contentType]?.requestFocus()
             rankFocusBoard!=null -> { val board=rankFocusBoard; rankFocusBoard=null; rankButtons[board]?.requestFocus() ?: nav[tab].requestFocus() }
             focusNav -> nav[tab].requestFocus()
@@ -616,7 +618,7 @@ class MainActivity: Activity() {
         homeScreen=home; body.addView(home,lp(-1,0).apply { weight=1f })
         val hot=catalog.filterNot { it.id in library.hidden() }
         home.render(homeShelves(),catalogFocus,!focusNav && !focusType,
-            if(hasMore) { { page=2; catalogFocus=""; showCatalog(true) } } else null,homePosition)
+            if(hasMore) { { page=2; catalogFocus=""; homeGridFocus=true; showCatalog(true) } } else null,homePosition)
         home.refresh.text=if(loading) if(homeFromCache) "已显示上次内容 · 正在更新热门…" else "正在更新热门…" else "刷新热门"
         home.refresh.setOnClickListener { showCatalog(true) }
         typeButtons.values.forEach { it.nextFocusDownId=home.firstId() }
@@ -1553,7 +1555,21 @@ class MainActivity: Activity() {
                 tvResultQuery=""; catalog=emptyList(); hasMore=false; tvQuery=""; tvSuggests=emptyList()
                 showCatalog(focusNav=true)
             } else showCatalog()
-            else -> if(collection!=null) { leaveCollection(); showCatalog() } else if(nav.any { it.hasFocus() }) { if(tab!=0) { switchTab(0); nav[0].requestFocus() } else finish() } else nav.getOrNull(tab)?.requestFocus()
+            else -> if(collection!=null) { leaveCollection(); showCatalog() }
+            else if(tab==0 && page>1) {
+                // Backing out of the "更多热门" grid returns to the home shelves (page 1),
+                // focus on the top nav "首页" tab; pressing back there restores the initial home state.
+                page=1; catalogFocus=""; homePosition=null; showCatalog(focusNav=true)
+            }
+            else if(nav.any { it.hasFocus() }) {
+                if(tab!=0) { switchTab(0); nav[0].requestFocus() }
+                else {
+                    // Focus already on the home nav tab: reset to the initial home state
+                    // (接着看/热门发现 shelves, first card focused, scroll reset).
+                    catalogFocus=""; homePosition=null; scrollPositions.clear(); showCatalog(focusNav=true)
+                }
+            }
+            else nav.getOrNull(tab)?.requestFocus()
         }
     }
     @Deprecated("TV remote back is handled through the activity")
