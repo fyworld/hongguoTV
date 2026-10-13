@@ -1,4 +1,4 @@
-# 红果TV · Android TV 原生版
+# hongguoTV · Android TV 原生版
 
 红果短剧的 Android TV 非官方原生客户端。**Kotlin + Android 原生 View + Media3**，最低 Android 7.0 / API 24。安装一个 APK，联网后可直接浏览和播放，无需部署服务器。
 
