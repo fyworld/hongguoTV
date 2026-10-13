@@ -1342,7 +1342,7 @@ class MainActivity: Activity() {
         val actions=row(); controls.addView(actions)
         addButton(actions,"立即重试") { playEpisode(episodeIndex,retryPosition,retryAutoplay) }.requestFocus()
         addButton(actions,"尝试 720P") { library.maxQuality=720; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
-        addButton(actions,"返回选集") { returnToDetail(true) }
+        addButton(actions,"返回选集") { returnToDetail() }
         if(retryable && !sleepStopped) {
             addButton(controls,"停止自动重试") { cancelRecovery(); playbackText.text="自动重试已停止，观看位置已保留。" }
             autoRecovery=true; scheduleRecovery()
@@ -1536,11 +1536,12 @@ class MainActivity: Activity() {
         closeTransport(playbackHttp); playbackHttp=null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
-    private fun returnToDetail(forceDetail: Boolean=false) {
+    private fun returnToDetail() {
         sleepTimer.cancel(); sleepStopped=false; saveProgress(); library.flush(); invalidatePage(); releasePlayer()
-        if(directPlayback && !forceDetail) {
-            if(tab==1) { tvResultQuery=""; catalog=emptyList(); hasMore=false; tvQuery=""; tvSuggests=emptyList(); showCatalog(focusNav=true) } else showCatalog()
-        } else { directPlayback=false; showDetail(true) }
+        // Back from playback always lands on the episode detail page first
+        // (even when playback was entered directly via resume cards);
+        // backing out of detail then returns to the originating page.
+        directPlayback=false; showDetail(true)
     }
     private fun goBack() {
         if(!library.isLoaded) { finish(); return }
@@ -1608,7 +1609,7 @@ class MainActivity: Activity() {
                 restoreStoppedPage=false
                 when(screen) {
                     "player" -> playEpisode(episodeIndex,startPosition,autoplay=false)
-                    "detail" -> if(detail!=null) showDetail(false) else pendingDetail?.let { openDetail(it,directPlayback,autoplay=false) } ?: showCatalog()
+                    "detail" -> if(detail!=null) showDetail(false) else pendingDetail?.let { openDetail(it,resume=false,autoplay=false) } ?: showCatalog()
                     else -> showCatalog(load=!localCatalog() && catalog.isEmpty() && (tab==0 || tab==2))
                 }
             } else {
