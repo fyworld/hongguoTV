@@ -1635,11 +1635,6 @@ class MainActivity: Activity() {
         // backing out of detail then returns to the originating page.
         directPlayback=false; showDetail(true)
     }
-    /** Infinite grids: put focus back on the first card (used by the back-to-top behaviour). */
-    private fun cardsTopFocus() {
-        val first=catalogCards.values.firstOrNull() ?: return
-        first.requestFocus()
-    }
     /** Back-to-home always lands on the initial home state (page 1, no saved focus/scroll). */
     private fun resetHomeState() {
         tabState.remove(0); tabFocus.remove(0)
@@ -1665,15 +1660,15 @@ class MainActivity: Activity() {
                 if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() } else finish()
             }
             else if(tab==1 || tab==2 || tab==4) {
-                // Infinite grids: first back scrolls the list to the top and focuses the
-                // first card; when already at the top, back moves focus up to the nav bar.
-                // The condition only looks at scrollY — page stays >1 on infinite grids
-                // (pages are appended, never reset), so checking it here would loop forever.
-                if((catalogScroll?.scrollY ?: 0)>0) {
-                    catalogScroll?.smoothScrollTo(0,0)
-                    catalogFocus=catalog.firstOrNull()?.id.orEmpty()
-                    cardsTopFocus()
-                } else nav[tab].requestFocus()
+                // Infinite grids: one back press does both — scroll the page back to the
+                // top (first card row visible) and move focus up to the nav bar tab.
+                // scrollTo (not smooth) so multi-page grids snap to the top instantly;
+                // the saved scroll position is cleared so a later grid rebuild (tab
+                // switch / loadMore) does not restore the deep scroll offset again.
+                catalogScroll?.scrollTo(0,0)
+                scrollPositions.remove(catalogPageKey)
+                catalogFocus=catalog.firstOrNull()?.id.orEmpty()
+                nav[tab].requestFocus()
             }
             else if(homeResetDone) {
                 if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() } else finish()
