@@ -324,9 +324,15 @@ class MainActivity: Activity() {
         library.rankBoard=board
         rankFocusBoard=board
         tabState.remove(4); tabFocus.remove(4)
-        releaseCatalogViews()
-        page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""
-        showCatalog(load=true)
+        // Suppress the nav bar's focus-to-switch listener while the board row is being
+        // rebuilt: the focused board button is detached first, and Android would hand
+        // focus to the top nav bar in the gap.
+        rebuildingGrid=true
+        try {
+            releaseCatalogViews()
+            page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""
+            showCatalog(load=true)
+        } finally { rebuildingGrid=false }
     }
     private fun switchTab(next: Int) {
         if(next==tab) return
@@ -418,7 +424,14 @@ class MainActivity: Activity() {
             val current=library.rankBoard
             RankBoard.entries.forEach { board ->
                 rankButtons[board]=addButton(boards,board.label,current==board) { switchRankBoard(board) }
-                    .apply { isSelected=current==board; nextFocusUpId=nav[tab].id }
+                    .apply {
+                        isSelected=current==board; nextFocusUpId=nav[tab].id
+                        // Focus landing on a board button switches the board immediately,
+                        // no OK press needed — same direct-switch feel as the top nav.
+                        setOnFocusChangeListener { _,focused ->
+                            if(focused && board!=library.rankBoard && !rebuildingGrid) switchRankBoard(board)
+                        }
+                    }
             }
             container.addView(boards)
             val heading=row().apply { setPadding(0,dp(8),0,dp(6)) }
@@ -529,24 +542,24 @@ class MainActivity: Activity() {
             body.addView(heading)
         }
         // Infinite grids append pages in place, so their scroll key ignores the page number.
-        catalogPageKey=if(tab==1 || tab==2) "$tab:${collection.orEmpty()}::$query" else "$tab:${collection.orEmpty()}:$page:$query"
+        catalogPageKey=if(tab==1 || tab==2 || tab==4) "$tab:${collection.orEmpty()}::$query" else "$tab:${collection.orEmpty()}:$page:$query"
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
         // Short/comic grids show no headline until a card actually takes focus.
         if((tab==1 || tab==2) && catalogFocus.isBlank()) preview.blank()
         val scroll=ScrollView(this).apply { isFillViewport=false; isVerticalScrollBarEnabled=false; clipToPadding=false }; catalogScroll=scroll
         val list=column(); scroll.addView(list); body.addView(scroll,lp(-1,0).apply { weight=1f })
         var restoringScroll=true
-        val displayed=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize) else if(tab==1 || tab==2) catalog else if(tab==0) catalog.filterNot { it.id in library.hidden() } else catalog.take(30)
+        val displayed=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize) else if(tab==1 || tab==2 || tab==4) catalog else if(tab==0) catalog.filterNot { it.id in library.hidden() } else catalog.take(30)
         if(displayed.isEmpty()) {
             message(list,if(loading) "正在加载推荐…" else when(tab) { 3 -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关${library.contentType.label}，换个关键词试试"; 5 -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; 6 -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
-            if((tab==0 || tab==4 || localCatalog()) && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) }
-            if((tab==0 || tab==4 || localCatalog()) && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) }
+            if((tab==0 || localCatalog()) && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) }
+            if((tab==0 || localCatalog()) && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) }
             if(focusType) rankButtons[rankFocusBoard ?: library.rankBoard]?.requestFocus() ?: nav[tab].requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else nav[tab].requestFocus()
             return
         }
         val cards=mutableListOf<View>(); val count=6; val gap=dp(14); val width=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
-        // Infinite grids (short/comic tabs) append pages as focus reaches the last row.
-        val infiniteScroll=tab==1 || tab==2
+        // Infinite grids (short/comic/ranking tabs) append pages as focus reaches the last row.
+        val infiniteScroll=tab==1 || tab==2 || tab==4
         val flatIndex=mutableMapOf<View,Int>()
         displayed.chunked(count).forEach { items ->
             val line=row(); line.gravity=Gravity.TOP
@@ -576,29 +589,30 @@ class MainActivity: Activity() {
             }
             list.addView(line,lp(-1,-2).apply { bottomMargin=dp(10) })
         }
-        val paging=row(); paging.gravity=Gravity.CENTER
         var prev: View?=null; var next: View?=null
-        if(!infiniteScroll && (tab<=4 || localCatalog())) {
-            prev=addButton(paging,"上一页") { if(page>1) { page--; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=page>1; isFocusable=page>1; alpha=if(page>1) 1f else .4f }
-            paging.addView(text(if(localCatalog()) "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页" else if(tab==4 && ranking!=null) "第 $page / ${ranking!!.totalPages} 页" else "第 $page 页",14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==4) 135 else 95),dp(44)))
-            next=addButton(paging,"下一页") { if(hasMore) { page++; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=hasMore; isFocusable=hasMore; alpha=if(hasMore) 1f else .4f }
-            list.addView(paging,lp(-1,dp(50)))
-        }
-        if(infiniteScroll && hasMore) {
-            // Loading indicator at the bottom of an infinite grid; removed once the next
-            // page arrives (the grid rebuilds with the appended items).
-            message(list,"正在加载更多…")
+        if(infiniteScroll) {
+            // No paging row below: the last row keeps focus on DOWN; the next page
+            // loads automatically when focus reaches it.
+            cards.forEachIndexed { index,card -> if(index+count>=cards.size) card.nextFocusDownId=card.id }
+            if(hasMore) {
+                // Loading indicator at the bottom of an infinite grid; removed once the next
+                // page arrives (the grid rebuilds with the appended items).
+                message(list,"正在加载更多…")
+            }
+        } else {
+            val paging=row(); paging.gravity=Gravity.CENTER
+            if(tab<=4 || localCatalog()) {
+                prev=addButton(paging,"上一页") { if(page>1) { page--; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=page>1; isFocusable=page>1; alpha=if(page>1) 1f else .4f }
+                paging.addView(text(if(localCatalog()) "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页" else if(tab==4 && ranking!=null) "第 $page / ${ranking!!.totalPages} 页" else "第 $page 页",14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==4) 135 else 95),dp(44)))
+                next=addButton(paging,"下一页") { if(hasMore) { page++; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=hasMore; isFocusable=hasMore; alpha=if(hasMore) 1f else .4f }
+                list.addView(paging,lp(-1,dp(50)))
+            }
         }
         cards.forEachIndexed { index,card ->
             card.nextFocusLeftId=if(index%count==0) card.id else cards[index-1].id
             card.nextFocusRightId=if(index%count==count-1 || index==cards.lastIndex) card.id else cards[index+1].id
             card.nextFocusUpId=if(index<count) (collectionBack?.id ?: tabRefresh?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: nav[tab].id) else cards[index-count].id
             card.nextFocusDownId=if(index+count<cards.size) cards[index+count].id else if(index/count<cards.lastIndex/count) cards.last().id else next?.takeIf { it.isFocusable }?.id ?: prev?.takeIf { it.isFocusable }?.id ?: card.id
-        }
-        if(infiniteScroll) {
-            // No paging row below: the last row keeps focus on DOWN; the next page
-            // loads automatically when focus reaches it.
-            cards.forEachIndexed { index,card -> if(index+count>=cards.size) card.nextFocusDownId=card.id }
         }
         nav.forEach { it.nextFocusDownId=if(infiniteScroll) cards.first().id else tabRefresh?.id ?: rankButtons[library.rankBoard]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
         rankButtons.values.forEach { it.nextFocusDownId=rankRefresh?.id ?: cards.first().id }
@@ -644,17 +658,24 @@ class MainActivity: Activity() {
         return listOf(if(library.favorite(series.id)) "已收藏" else "",if(library.queued(series.id)) "稍后看" else "",
             if(library.watched(series.id)) "整剧已看完" else progress?.let { "上次第 ${it.episodeIndex+1} 集 · ${formatTime(it.position)}" }.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ")
     }
-    /** Infinite grids (short/comic tabs): fetch the next page and append it in place.
+    /** Infinite grids (short/comic/ranking tabs): fetch the next page and append it in place.
      *  The grid is not rebuilt — focus and scroll stay exactly where they are. */
     private fun loadMore() {
         if(!hasMore || loadingMore) return
         loadingMore=true
-        val requestTab=tab; val nextPage=page+1
+        val requestTab=tab; val requestBoard=library.rankBoard; val nextPage=page+1
         work({
-            when(requestTab) { 1 -> repository.home(nextPage,ContentType.SHORT); 2 -> repository.home(nextPage,ContentType.COMIC); else -> CatalogPage(emptyList(),false) }
+            when(requestTab) {
+                1 -> repository.home(nextPage,ContentType.SHORT)
+                2 -> repository.home(nextPage,ContentType.COMIC)
+                4 -> repository.ranking(requestBoard,nextPage)
+                else -> CatalogPage(emptyList(),false)
+            }
         }, { result ->
             loadingMore=false
             if(requestTab!=tab || screen!="catalog") return@work
+            // Board switched while the request was in flight: drop the stale result.
+            if(requestTab==4 && requestBoard!=library.rankBoard) return@work
             // Deduplicate against what is already on screen, then append.
             val known=catalog.map { it.id }.toHashSet()
             val fresh=result.items.filterNot { it.id in known }
@@ -1603,6 +1624,11 @@ class MainActivity: Activity() {
         // backing out of detail then returns to the originating page.
         directPlayback=false; showDetail(true)
     }
+    /** Infinite grids: put focus back on the first card (used by the back-to-top behaviour). */
+    private fun cardsTopFocus() {
+        val first=catalogCards.values.firstOrNull() ?: return
+        first.requestFocus()
+    }
     private fun goBack() {
         if(!library.isLoaded) { finish(); return }
         when(screen) {
@@ -1614,9 +1640,15 @@ class MainActivity: Activity() {
                 showCatalog(focusNav=true)
             } else showCatalog()
             else -> if(collection!=null) { leaveCollection(); showCatalog() }
-            else if(tab<=2 && page>1) {
-                // Backing out of a paged catalog grid (home/short/comic tab) returns to page 1.
+            else if(tab==0 && page>1) {
+                // Backing out of the home paged grid returns to page 1 (home shelves).
                 page=1; catalogFocus=""; homePosition=null; showCatalog(focusNav=true)
+            }
+            else if((tab==1 || tab==2 || tab==4) && (page>1 || (catalogScroll?.scrollY ?: 0)>0)) {
+                // Infinite grids: back scrolls to the top of the list, keeping the data.
+                catalogScroll?.smoothScrollTo(0,0)
+                catalogFocus=catalog.firstOrNull()?.id.orEmpty()
+                cardsTopFocus()
             }
             else if(nav.any { it.hasFocus() } || homeResetDone) {
                 if(tab!=0) { switchTab(0); nav[0].requestFocus() }
