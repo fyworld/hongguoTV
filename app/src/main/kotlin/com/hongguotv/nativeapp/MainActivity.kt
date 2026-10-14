@@ -184,6 +184,19 @@ class MainActivity: Activity() {
     private var tvClearHistory: View?=null
     /** Set by switchRankBoard: after the new board loads, focus stays on that board's button. */
     private var rankFocusBoard: RankBoard?=null
+    /** Session-level fetch cache (TTL 10 min): switching tabs/boards re-renders the cached
+     *  list instead of re-fetching; the manual refresh buttons clear the entry first. */
+    private val catalogCache=linkedMapOf<String,Pair<Long,CatalogState>>()
+    private var homeFetchedAt=0L
+    private val catalogTtlMs=10*60*1000L
+    private fun cacheKeyFor(requestTab: Int,board: RankBoard?=null): String?=when {
+        requestTab==1 -> "short"
+        requestTab==2 -> "comic"
+        requestTab==4 -> "rank:${(board ?: library.rankBoard).storedValue}"
+        else -> null
+    }
+    private fun catalogCacheKey(): String?=if(collection!=null) null else cacheKeyFor(tab)
+    private fun invalidateCatalogCache() { catalogCacheKey()?.let { catalogCache.remove(it) }; homeFetchedAt=0 }
     private var detail: Detail?=null
     private var episodeIndex=0
     private var group=0
@@ -334,6 +347,8 @@ class MainActivity: Activity() {
         // Focus-landing switch: defer the rebuild one frame so the focus transfer to the
         // new board button settles first; the rebuild then restores focus onto that
         // button via rankFocusBoard. No visible flicker back to the old board.
+        // showCatalog's session cache decides whether the board re-fetches (TTL 10 min)
+        // or re-renders instantly from the cached list.
         if(!rebuildingGrid && rankButtons[board]?.hasFocus()==true) {
             library.rankBoard=board
             rankFocusBoard=board
@@ -383,8 +398,23 @@ class MainActivity: Activity() {
     }
     private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
+        var fetch=load
+        // Session cache (10 min TTL): a fresh cached list renders directly without
+        // re-fetching — tab/board switching feels instant. Manual refresh clears it.
+        if(fetch && page==1 && collection==null) {
+            val key=cacheKeyFor(tab)
+            val cached=key?.let { catalogCache[it] }
+            if(cached!=null && System.currentTimeMillis()-cached.first<catalogTtlMs) {
+                page=cached.second.page; catalog=cached.second.items; hasMore=cached.second.hasMore; ranking=cached.second.ranking
+                fetch=false
+            } else if(tab==0 && homeFetchedAt>0 && System.currentTimeMillis()-homeFetchedAt<catalogTtlMs && (homeShort.isNotEmpty() || homeComic.isNotEmpty())) {
+                // Home tab: the session fetch is still fresh — render the shelves from
+                // the in-memory lists (homeShort/homeComic) without a background refresh.
+                fetch=false
+            }
+        }
         // Never cache a new page number with the previous page's results while a request is pending.
-        if(load) {
+        if(fetch) {
             val cached=if((tab==0 || tab==1 || tab==2) && page==1) library.cachedHome(tabContentType()) else null
             catalog=cached?.items ?: emptyList(); hasMore=cached?.hasMore ?: false; ranking=null; homeFromCache=cached!=null
             // Home shelves need both content types; seed them from the per-type caches.
@@ -456,9 +486,9 @@ class MainActivity: Activity() {
             val heading=row().apply { setPadding(0,dp(8),0,dp(6)) }
             rankTitle=text(library.rankBoard.label,25f).apply { setTypeface(null,Typeface.BOLD) }
             heading.addView(rankTitle,lp(0,-2).apply { weight=1f })
-            rankRefresh=addButton(heading,"刷新榜单") { page=1; catalogFocus=""; showCatalog(true) }.apply { nextFocusUpId=rankButtons[current]?.id ?: nav[tab].id }
+            rankRefresh=addButton(heading,"刷新榜单") { page=1; catalogFocus=""; invalidateCatalogCache(); showCatalog(true) }.apply { nextFocusUpId=rankButtons[current]?.id ?: nav[tab].id }
             container.addView(heading)
-            rankSubtitle=text(if(load) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { "来源：红果${library.rankBoard.label}" } ?: "来源：红果${library.rankBoard.label}",13f,muted)
+            rankSubtitle=text(if(fetch) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { "来源：红果${library.rankBoard.label}" } ?: "来源：红果${library.rankBoard.label}",13f,muted)
                 .apply { setPadding(0,0,0,dp(8)) }
             container.addView(rankSubtitle)
             nav.forEach { it.nextFocusDownId=rankButtons[current]?.id ?: rankRefresh!!.id }
@@ -486,7 +516,7 @@ class MainActivity: Activity() {
         if(localCatalog()) {
             catalog=localItems(); ranking=null; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
         }
-        if(load) {
+        if(fetch) {
             if(tab==0 || tab==1 || tab==2) catalogGrid(body,focusNav,focusType,loading=true)
             else {
                 message(body,"正在加载…")
@@ -507,6 +537,14 @@ class MainActivity: Activity() {
                 }
             }, { (shortResult,comicResult) ->
                 if(requestPage==1) {
+                    // Session cache: remember the fetched page so tab/board switches within
+                    // the TTL re-render instead of re-fetching.
+                    when(requestTab) {
+                        1 -> catalogCache["short"]=System.currentTimeMillis() to CatalogState(requestPage,shortResult.items,shortResult.hasMore,shortResult.ranking)
+                        2 -> catalogCache["comic"]=System.currentTimeMillis() to CatalogState(requestPage,comicResult.items,comicResult.hasMore,comicResult.ranking)
+                        4 -> catalogCache["rank:${requestBoard.storedValue}"]=System.currentTimeMillis() to CatalogState(requestPage,comicResult.items,comicResult.hasMore,comicResult.ranking)
+                    }
+                    if(requestTab==0) homeFetchedAt=System.currentTimeMillis()
                     when(requestTab) {
                         0 -> { library.cacheHome(ContentType.SHORT,shortResult.items,shortResult.hasMore); library.cacheHome(ContentType.COMIC,comicResult.items,comicResult.hasMore) }
                         1 -> library.cacheHome(ContentType.SHORT,shortResult.items,shortResult.hasMore)
@@ -723,7 +761,7 @@ class MainActivity: Activity() {
         homeScreen=home; body.addView(home,lp(-1,0).apply { weight=1f })
         home.render(homeShelves(),catalogFocus,!focusNav && !focusType,null,homePosition)
         home.refresh.text=if(loading) if(homeFromCache) "已显示上次内容 · 正在更新热门…" else "正在更新热门…" else "刷新热门"
-        home.refresh.setOnClickListener { showCatalog(true) }
+        home.refresh.setOnClickListener { invalidateCatalogCache(); showCatalog(true) }
         nav.forEach { it.nextFocusDownId=home.firstId() }
         if(focusNav) nav[0].requestFocus()
         if((homeShort.isNotEmpty() || homeComic.isNotEmpty()) && !homeContentLogged) {
