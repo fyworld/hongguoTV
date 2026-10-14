@@ -181,29 +181,40 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         require(page in 1..100)
         if (type == ContentType.COMIC) return comicRanking(page)
         val genre = "short_play"
-        val scene = "default"
         val cursorKey = "category:$genre"
-        val cursor = synchronized(catalogCursors) { catalogCursors[cursorKey] }
-        // The App feed is offset-based; page N maps to offset (N-1)*18.
-        val offset = (page - 1) * 18
-        val payload = JSONObject()
-            .put("req_scene", scene).put("offset", offset).put("limit", 18)
-            .put("req_type", "only_content").put("need_selector_panel", false)
-            .put("client_req_type", if (offset > 0) 2 else 3)
-            .put("session_id", cursor?.second ?: "").put("filter_ids", "")
-            .put("select_items", JSONObject()
-                .put("genre", JSONArray().put(genre)).put("sort", JSONArray().put("online_time"))
-                .put("gender", JSONArray()).put("category_dim_theme", JSONArray())
-                .put("category_dim_role", JSONArray()).put("category_dim_epoch", JSONArray())
-                .put("online_time", JSONArray()).put("creation_status", JSONArray()))
-        val data = appRequest("/reading/distribution/category/landpage/v/", payload.toString())
-        val rows = data.optJSONObject("data")?.optJSONArray("video_data") ?: throw IOException("首页数据暂不可用")
-        val items = valid(rows.objects().map(::card))
-        val hasMore = data.optJSONObject("data")?.optBoolean("has_more", false) ?: false
-        val nextOffset = data.optJSONObject("data")?.optInt("next_offset", offset + 18) ?: offset + 18
-        val session = data.optJSONObject("data")?.str("session_id") ?: ""
-        synchronized(catalogCursors) { catalogCursors[cursorKey] = nextOffset to session }
-        return CatalogPage(items, hasMore && page < 100)
+        // The App feed is cursor-based: the server returns next_offset + session_id and
+        // may return ANY number of items per call (5, 14, 23… — it used to be a fixed 18).
+        // Page 1 keeps fetching forward until a full shelf (12+) is collected, so the home
+        // shelves and the short-drama grid always open with a proper page of content.
+        var cursor = synchronized(catalogCursors) { catalogCursors[cursorKey] }
+        var offset = if (page == 1) 0 else cursor?.first ?: (page - 1) * 18
+        var sessionId = if (page == 1) "" else cursor?.second ?: ""
+        val all = mutableListOf<Series>()
+        var hasMore = false
+        var round = 0
+        while (true) {
+            val payload = JSONObject()
+                .put("req_scene", "default").put("offset", offset).put("limit", 18)
+                .put("req_type", "only_content").put("need_selector_panel", false)
+                .put("client_req_type", if (offset > 0) 2 else 3)
+                .put("session_id", sessionId).put("filter_ids", "")
+                .put("select_items", JSONObject()
+                    .put("genre", JSONArray().put(genre)).put("sort", JSONArray().put("online_time"))
+                    .put("gender", JSONArray()).put("category_dim_theme", JSONArray())
+                    .put("category_dim_role", JSONArray()).put("category_dim_epoch", JSONArray())
+                    .put("online_time", JSONArray()).put("creation_status", JSONArray()))
+            val data = appRequest("/reading/distribution/category/landpage/v/", payload.toString())
+            val rows = data.optJSONObject("data")?.optJSONArray("video_data") ?: throw IOException("首页数据暂不可用")
+            all += valid(rows.objects().map(::card))
+            hasMore = data.optJSONObject("data")?.optBoolean("has_more", false) ?: false
+            offset = data.optJSONObject("data")?.optInt("next_offset", offset + 18) ?: offset + 18
+            sessionId = data.optJSONObject("data")?.str("session_id") ?: sessionId
+            synchronized(catalogCursors) { catalogCursors[cursorKey] = offset to sessionId }
+            round++
+            // Enough content, nothing more, or a safety cap on follow-up rounds.
+            if (page != 1 || all.size >= 12 || !hasMore || round >= 3) break
+        }
+        return CatalogPage(all, hasMore && page < 100)
     }
 
     fun comicRanking(page: Int = 1): CatalogPage = ranking(RankBoard.COMIC,page)
