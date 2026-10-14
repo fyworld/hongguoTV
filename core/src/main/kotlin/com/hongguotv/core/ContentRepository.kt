@@ -137,7 +137,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             "aid" to "8662", "app_name" to "novelread", "version_code" to "73532", "version_name" to "7.3.5.32",
             "manifest_version_code" to "73532", "update_version_code" to "73532", "channel" to "update_64",
             "device_platform" to "android", "os" to "android", "ssmix" to "a", "device_type" to "25053RT47C",
-            "device_brand" to "Redmi", "language" to "zh", "os_api" to "36", "os_version" to "16",
+            "device_brand" to "Redmi", "language" to "zh", "os_api" to "28", "os_version" to "9",
             "resolution" to "1280*2772", "dpi" to "520", "ac" to "wifi",
             "device_id" to deviceId, "iid" to installId,
             "_rticket" to clock().toString())
