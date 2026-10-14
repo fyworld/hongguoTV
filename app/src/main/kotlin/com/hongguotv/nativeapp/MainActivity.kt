@@ -179,6 +179,9 @@ class MainActivity: Activity() {
     private var tvSuggestScroll: ScrollView?=null
     private var tvHistoryScroll: ScrollView?=null
     private var tvResultScroll: ScrollView?=null
+    /** 手机输入 button and the clear-history icon: focus-chain anchors on the search page. */
+    private var tvPhoneButton: TextView?=null
+    private var tvClearHistory: View?=null
     /** Set by switchRankBoard: after the new board loads, focus stays on that board's button. */
     private var rankFocusBoard: RankBoard?=null
     private var detail: Detail?=null
@@ -295,7 +298,7 @@ class MainActivity: Activity() {
         favoriteStatus=null; favoriteCheck=null; tabRefresh=null; tabSubtitle=null
         catalogCards.clear(); cardImages.clear()
         tvSuggestList=null; tvSuggestTitle=null; tvQueryView=null; tvSearchButton=null; tvBackspace=null; tvClear=null; tvFirstKey=null
-        tvSuggestScroll=null; tvHistoryScroll=null; tvResultScroll=null
+        tvSuggestScroll=null; tvHistoryScroll=null; tvResultScroll=null; tvPhoneButton=null; tvClearHistory=null
         tvMiddleColumn=null; tvRightColumn=null; tvHistoryFlow=null; tvHistoryTitle=null; tvResultPanel=null; tvResultTitle=null; tvResultList=null
         main.removeCallbacks(tvSuggestDebounce); tvSuggestJob?.cancel(true); tvSuggestJob=null; tvSuggestTicket++
     }
@@ -953,6 +956,7 @@ class MainActivity: Activity() {
         val row2=row().apply { setPadding(0,dp(8),0,dp(10)) }
         lateinit var phone: TextView
         phone=button("手机输入") { tvTools.phoneInput(phone) { tvSubmitText(it) } }.apply { gravity=Gravity.CENTER }
+        tvPhoneButton=phone
         tvBackspace=button("删除") { tvBackspace() }.apply { gravity=Gravity.CENTER }
         listOf(phone,tvBackspace!!).forEach { row2.addView(it,lp(0,dp(44)).apply { weight=1f; rightMargin=dp(8) }) }
         left.addView(row2)
@@ -962,7 +966,7 @@ class MainActivity: Activity() {
         tvMiddleColumn=column()
         tvSuggestTitle=text("匹配结果",16f,accent).apply { setTypeface(null,Typeface.BOLD); setPadding(0,0,0,dp(8)) }
         tvMiddleColumn?.addView(tvSuggestTitle)
-        val suggestScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false }
+        val suggestScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false; isFocusable=false }
         tvSuggestScroll=suggestScroll
         tvSuggestList=column(); suggestScroll.addView(tvSuggestList)
         tvMiddleColumn?.addView(suggestScroll,lp(-1,0).apply { weight=1f })
@@ -983,9 +987,13 @@ class MainActivity: Activity() {
             paint(false); setOnFocusChangeListener { _,focused -> paint(focused) }
             setOnClickListener { tvTools.confirm("清空搜索历史","清除本机保存的搜索词？",clearHistory) { library.clearSearches(); renderTvHistory() } }
         }
+        tvClearHistory=clearHistory
+        // Down from the clear icon goes to the first history entry (rewired in
+        // renderTvHistory once entries exist); up keeps the default nav-bar search.
+        clearHistory.nextFocusDownId=tvHistoryFlow?.let { flow -> if(flow.childCount>0) flow.getChildAt(0).id else View.NO_ID } ?: View.NO_ID
         historyHeading.addView(clearHistory,lp(dp(34),dp(34)).apply { leftMargin=dp(8) })
         tvRightColumn?.addView(historyHeading)
-        val historyScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false }
+        val historyScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false; isFocusable=false }
         tvHistoryScroll=historyScroll
         tvHistoryFlow=FlowLayout(this)
         historyScroll.addView(tvHistoryFlow)
@@ -995,7 +1003,7 @@ class MainActivity: Activity() {
         tvResultPanel=column().apply { visibility=View.GONE }
         tvResultTitle=text("",16f,accent).apply { setTypeface(null,Typeface.BOLD); setPadding(0,0,0,dp(8)) }
         tvResultPanel?.addView(tvResultTitle)
-        val resultScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false }
+        val resultScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false; isFocusable=false }
         tvResultScroll=resultScroll
         tvResultList=column(); resultScroll.addView(tvResultList)
         tvResultPanel?.addView(resultScroll,lp(-1,0).apply { weight=1f })
@@ -1027,10 +1035,11 @@ class MainActivity: Activity() {
             grid.addView(line,lp(-1,dp(52)))
         }
         tvFirstKey=keyViews.first()
-        // Focus wiring: top row goes up to the query box; right edge of the grid hands focus
-        // to the middle suggestion column (filled by renderTvSuggests).
+        // Focus wiring: top row goes up to the 手机输入/删除 action row (not the query
+        // box — the box is reached from that row); right edge of the grid hands focus to
+        // the middle suggestion column (filled by renderTvSuggests).
         keyViews.forEachIndexed { index,view ->
-            view.nextFocusUpId=if(index<columns) tvQueryView?.id ?: view.id else keyViews[index-columns].id
+            view.nextFocusUpId=if(index<columns) tvPhoneButton?.id ?: view.id else keyViews[index-columns].id
             view.nextFocusDownId=if(index+columns<keyViews.size) keyViews[index+columns].id else view.id
             view.nextFocusLeftId=if(index%columns==0) view.id else keyViews[index-1].id
             view.nextFocusRightId=if(index%columns==columns-1) view.id else keyViews[index+1].id
@@ -1098,15 +1107,16 @@ class MainActivity: Activity() {
                 list.addView(item,lp(-1,dp(42)).apply { bottomMargin=dp(5) }); items+=item
             }
         }
-        // Focus chain: vertical navigation, up from first goes to the query box, left to the keyboard.
+        // Focus chain: vertical navigation, up from first goes to the query box, left to the
+        // keyboard, right edge hands focus to the history column (first entry or clear icon).
         items.forEachIndexed { index,view ->
             view.nextFocusUpId=if(index==0) tvQueryView?.id ?: view.id else items[index-1].id
             view.nextFocusDownId=if(index==items.lastIndex) view.id else items[index+1].id
             view.nextFocusLeftId=tvFirstKey?.id ?: view.id
-            view.nextFocusRightId=view.id
+            view.nextFocusRightId=tvHistoryEntryFocus() ?: view.id
         }
         // The keyboard's right edge hands focus to the first suggestion (or history when empty).
-        val rightTarget=items.firstOrNull()?.id ?: tvHistoryFlow?.let { flow -> if(flow.childCount>0) flow.getChildAt(0).id else null } ?: View.NO_ID
+        val rightTarget=items.firstOrNull()?.id ?: tvHistoryEntryFocus() ?: View.NO_ID
         if(rightTarget!=View.NO_ID) wireKeyboardRightFocus(rightTarget)
     }
 
@@ -1135,11 +1145,24 @@ class MainActivity: Activity() {
             val item=button(entry.query) { tvSubmitText(entry.query) }
             flow.addView(item,ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,ViewGroup.LayoutParams.WRAP_CONTENT)); items+=item
         }
-        // Focus chain: reading order (left-to-right, top-to-bottom), left edge goes to the keyboard.
+        // Focus chain: reading order (left-to-right, top-to-bottom), left edge goes to the
+        // keyboard, up from the first row goes to the clear-history icon (then the nav bar).
         items.forEachIndexed { index,view ->
             view.nextFocusLeftId=if(index==0) tvFirstKey?.id ?: view.id else items[index-1].id
             view.nextFocusRightId=if(index==items.lastIndex) view.id else items[index+1].id
+            view.nextFocusUpId=tvClearHistory?.id ?: view.id
+            view.nextFocusDownId=view.id
         }
+        // Keep the clear icon's DOWN pointing at the (possibly rebuilt) first entry.
+        tvClearHistory?.nextFocusDownId=items.firstOrNull()?.id ?: View.NO_ID
+    }
+
+    /** Right-hand target from the suggestion list: first history entry, or the clear icon
+     *  when the history is empty (so → always lands somewhere meaningful). */
+    private fun tvHistoryEntryFocus(): Int? {
+        val flow=tvHistoryFlow ?: return null
+        if(flow.childCount>0) return flow.getChildAt(0).id
+        return tvClearHistory?.id
     }
 
     private fun renderTvResults() {
