@@ -219,10 +219,27 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
 
     fun comicRanking(page: Int = 1): CatalogPage = ranking(RankBoard.COMIC,page)
 
-    /** The four website boards: 总热播榜 / 真人剧榜 / 漫剧榜 / AI剧榜. */
+    /** The four website boards: 总热播榜 / 真人剧榜 / 漫剧榜 / AI剧榜.
+     *  Each board holds 100 entries (5 pages x 20); the whole board is fetched at once —
+     *  the TV grid renders all cards immediately and the infinite scroll simply has
+     *  nothing more to append. */
     fun ranking(board: RankBoard, page: Int = 1): CatalogPage {
         require(page in 1..100)
-        return ComicRank.parse(webText("$site/rank/${board.path}?page=$page"),page,board)
+        val first=ComicRank.parse(webText("$site/rank/${board.path}?page=$page"),page,board)
+        val totalPages=first.ranking?.totalPages ?: 1
+        if(totalPages<=page) return first
+        // Fetch the remaining pages and merge items + positions into one full board.
+        val items=first.items.toMutableList()
+        val positions=first.ranking!!.positions.toMutableMap()
+        for(next in page+1..minOf(totalPages,100)) {
+            runCatching { ComicRank.parse(webText("$site/rank/${board.path}?page=$next"),next,board) }
+                .onSuccess { part ->
+                    val known=items.map { it.id }.toHashSet()
+                    items+=part.items.filterNot { it.id in known }
+                    positions+=part.ranking?.positions.orEmpty()
+                }
+        }
+        return CatalogPage(items,false,ComicRanking(positions,totalPages,first.ranking!!.updatedText))
     }
 
     // ---------- search (website) ----------
