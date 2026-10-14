@@ -1226,7 +1226,14 @@ class MainActivity: Activity() {
         tvResultQuery=clean; library.rememberSearch(clean,library.contentType); query=clean; page=1
         tvResultTitle?.text="搜索结果 · $clean"; tvResultList?.removeAllViews()
         tvResultList?.addView(text("正在搜索…",14f,muted).apply { setPadding(0,dp(10),0,dp(10)) })
-        applyTvLayoutMode()
+        // The layout switch below hides the suggestion/history columns. Focus is usually
+        // sitting on a suggestion entry inside them — when that view disappears Android
+        // would hand focus to the top nav (首页), whose focus-to-switch listener then
+        // leaves the search tab. Park focus on the query box first and suppress the nav
+        // listener during the swap, exactly like the infinite-grid rebuild.
+        tvQueryView?.requestFocus()
+        rebuildingGrid=true
+        try { applyTvLayoutMode() } finally { rebuildingGrid=false }
         // The panel just switched from GONE to VISIBLE, so its width is not measured yet.
         // Re-layout now so renderTvResults() can read the real panel width for card sizing.
         tvResultPanel?.requestLayout()
