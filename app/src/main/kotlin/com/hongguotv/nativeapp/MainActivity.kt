@@ -79,6 +79,7 @@ class MainActivity: Activity() {
     private fun tabContentType(): ContentType = when(tab) { 1 -> ContentType.SHORT; 2 -> ContentType.COMIC; else -> library.contentType }
     private val pageSize=20
     private var catalogScroll: ScrollView?=null
+    private var settingsScroll: ScrollView?=null
     private var catalogBody: LinearLayout?=null
     private var homePosition: HomeScreen.Position?=null
     private var catalogPageKey=""
@@ -284,7 +285,7 @@ class MainActivity: Activity() {
         homeScreen?.let { homePosition=it.capturePosition() }
         catalogScroll?.let { scrollPositions[catalogPageKey]=it.scrollY }
         catalogBody=null
-        homeScreen=null; selectionPreview=null; catalogScroll=null
+        homeScreen=null; selectionPreview=null; catalogScroll=null; settingsScroll=null
         nav.clear(); rankButtons.clear(); rankTitle=null
         historyManage=null; rankRefresh=null; rankSubtitle=null; collectionBack=null; favoriteBadges.clear()
         favoriteStatus=null; favoriteCheck=null; tabRefresh=null; tabSubtitle=null
@@ -410,7 +411,8 @@ class MainActivity: Activity() {
         container.addView(top)
         container.addView(View(this).apply { setBackgroundColor(TvStyle.outline) },lp(-1,dp(1)).apply { bottomMargin=dp(6) })
         if(tab==7) {
-            val scroll=ScrollView(this); val body=column(); scroll.addView(body); container.addView(scroll,lp(-1,0).apply { weight=1f })
+            // The settings scroll is tracked so the back key can snap it to the top.
+            val scroll=ScrollView(this); settingsScroll=scroll; val body=column(); scroll.addView(body); container.addView(scroll,lp(-1,0).apply { weight=1f })
             settings(body); if(focusNav) nav[tab].requestFocus(); return
         }
         if(tab==1 || tab==2) {
@@ -1659,16 +1661,28 @@ class MainActivity: Activity() {
                 // Focus on the top nav of a non-home tab: back goes home (initial state).
                 if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() } else finish()
             }
-            else if(tab==1 || tab==2 || tab==4) {
-                // Infinite grids: one back press does both — scroll the page back to the
-                // top (first card row visible) and move focus up to the nav bar tab.
-                // scrollTo (not smooth) so multi-page grids snap to the top instantly;
-                // the saved scroll position is cleared so a later grid rebuild (tab
-                // switch / loadMore) does not restore the deep scroll offset again.
-                catalogScroll?.scrollTo(0,0)
+            else if(tab==1 || tab==2 || tab==5 || tab==6 || tab==7) {
+                // Card/settings pages: one back press does both — snap the page back to
+                // the top and move focus up to the nav bar tab. scrollTo (not smooth)
+                // so long lists jump instantly; the saved scroll position is cleared so
+                // a later grid rebuild (tab switch / loadMore) does not restore the
+                // deep scroll offset again.
+                catalogScroll?.scrollTo(0,0); settingsScroll?.scrollTo(0,0)
                 scrollPositions.remove(catalogPageKey)
                 catalogFocus=catalog.firstOrNull()?.id.orEmpty()
                 nav[tab].requestFocus()
+            }
+            else if(tab==4) {
+                // Ranking: three-step chain — cards → board bar → nav bar → home.
+                // Focus on a card (or the list scrolled): back snaps the list to the
+                // top and puts focus on the current board button; focus already on a
+                // board button: back moves focus up to the nav bar tab.
+                if(rankButtons[library.rankBoard]?.hasFocus()!=true) {
+                    catalogScroll?.scrollTo(0,0)
+                    scrollPositions.remove(catalogPageKey)
+                    catalogFocus=catalog.firstOrNull()?.id.orEmpty()
+                    rankButtons[library.rankBoard]?.requestFocus() ?: nav[tab].requestFocus()
+                } else nav[tab].requestFocus()
             }
             else if(homeResetDone) {
                 if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() } else finish()
