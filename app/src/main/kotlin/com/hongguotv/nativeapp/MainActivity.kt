@@ -354,7 +354,7 @@ class MainActivity: Activity() {
             rankFocusBoard=board
             tabState.remove(4); tabFocus.remove(4)
             page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""
-            main.post { if(tab==4 && library.rankBoard==board && screen=="catalog") showCatalog(load=true) }
+            main.post { if(tab==4 && library.rankBoard==board && screen=="catalog") showCatalog(load=true,focusType=true) }
             return
         }
         library.rankBoard=board
@@ -491,7 +491,7 @@ class MainActivity: Activity() {
             val heading=row().apply { setPadding(0,dp(8),0,dp(6)) }
             rankTitle=text(library.rankBoard.label,25f).apply { setTypeface(null,Typeface.BOLD) }
             heading.addView(rankTitle,lp(0,-2).apply { weight=1f })
-            rankRefresh=addButton(heading,"刷新榜单") { page=1; catalogFocus=""; invalidateCatalogCache(); showCatalog(true) }.apply { nextFocusUpId=rankButtons[current]?.id ?: nav[tab].id }
+            rankRefresh=addButton(heading,"刷新榜单") { page=1; catalogFocus=""; invalidateCatalogCache(); rankFocusBoard=library.rankBoard; showCatalog(true,focusType=true) }.apply { nextFocusUpId=rankButtons[current]?.id ?: nav[tab].id }
             container.addView(heading)
             rankSubtitle=text(if(fetch) "正在读取最新榜单…" else ranking?.updatedText?.ifBlank { "来源：红果${library.rankBoard.label}" } ?: "来源：红果${library.rankBoard.label}",13f,muted)
                 .apply { setPadding(0,0,0,dp(8)) }
