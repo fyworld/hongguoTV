@@ -29,6 +29,11 @@ class SeriesPreview(context: Context): LinearLayout(context) {
         if(title.text.toString()!=nextTitle) title.text=nextTitle
         if(meta.text.toString()!=nextMeta) meta.text=nextMeta
     }
+    /** Empty the fixed text slots: no headline until a card actually takes focus. */
+    fun blank() {
+        if(title.text.isNotEmpty()) title.text=""
+        if(meta.text.isNotEmpty()) meta.text=""
+    }
 }
 
 /** Bounded horizontal shelves with stable D-pad selection and per-row scroll positions. */
