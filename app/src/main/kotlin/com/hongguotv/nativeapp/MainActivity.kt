@@ -574,16 +574,11 @@ class MainActivity: Activity() {
             val line=row(); line.gravity=Gravity.TOP
             items.forEachIndexed { columnIndex,item ->
                 val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(9)); focusStyle(card); card.contentDescription=item.title; card.tag=item.id; catalogCards[item.id]=card
-                // Ranking pages (tab 4) carry rank/heat metadata in ranking.positions;
-                // the comic tab reuses the same feed but shows no rank badge.
+                // Ranking (tab 4) and comic (tab 2) pages carry heat metadata in
+                // ranking.positions; no rank badge is drawn on the artwork.
                 val position=if(tab==4 || tab==2) ranking?.positions?.get(item.id) else null
                 val artwork=FrameLayout(this); card.addView(artwork,lp(-1,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
                 val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }; artwork.addView(image,FrameLayout.LayoutParams(-1,-1)); loadCover(image,item.cover); cardImages[item.id]=image to item.cover
-                if(tab==4) {
-                    val rankLabel=position?.rank?.let { "第 $it 名" } ?: "名次暂无"
-                    artwork.addView(text(rankLabel,15f).apply { setTypeface(null,Typeface.BOLD); setPadding(dp(8),dp(5),dp(8),dp(5)); background=rounded(if((position?.rank ?: Int.MAX_VALUE)<=3) accent else Color.rgb(28,31,39)) },FrameLayout.LayoutParams(-2,-2,Gravity.TOP or Gravity.START))
-                    card.contentDescription="$rankLabel，${item.title}，${position?.heat?.ifBlank { "热度暂无" } ?: "热度暂无"}"
-                }
                 card.addView(text(item.title,14f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),dp(7),dp(3),0) },lp(-1,-2).apply { weight=1f })
                 val progress=if(tab==6 || collection=="resume") library.progress(item.id) else null
                 // Unified card badge: episode count followed by heat when available
@@ -1672,7 +1667,9 @@ class MainActivity: Activity() {
             else if(tab==1 || tab==2 || tab==4) {
                 // Infinite grids: first back scrolls the list to the top and focuses the
                 // first card; when already at the top, back moves focus up to the nav bar.
-                if((catalogScroll?.scrollY ?: 0)>0 || page>1) {
+                // The condition only looks at scrollY — page stays >1 on infinite grids
+                // (pages are appended, never reset), so checking it here would loop forever.
+                if((catalogScroll?.scrollY ?: 0)>0) {
                     catalogScroll?.smoothScrollTo(0,0)
                     catalogFocus=catalog.firstOrNull()?.id.orEmpty()
                     cardsTopFocus()
