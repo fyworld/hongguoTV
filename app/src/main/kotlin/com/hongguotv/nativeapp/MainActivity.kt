@@ -59,6 +59,15 @@ class MainActivity: Activity() {
     private var collectionBack: View?=null
     private var homeGridFocus=false
     private var homeResetDone=false
+    /** True while a tab switch was triggered by focus landing on another nav button. */
+    private var navSwitchFocus=false
+    /** Refresh button + status line for the global short/comic drama tabs. */
+    private var tabRefresh: View?=null
+    private var tabSubtitle: TextView?=null
+    /** Home shelves show both content types at once; each tab keeps its own catalog. */
+    private var homeShort=emptyList<Series>()
+    private var homeComic=emptyList<Series>()
+    private fun tabContentType(): ContentType = when(tab) { 1 -> ContentType.SHORT; 2 -> ContentType.COMIC; else -> library.contentType }
     private val pageSize=20
     private var catalogScroll: ScrollView?=null
     private var catalogBody: LinearLayout?=null
@@ -87,8 +96,6 @@ class MainActivity: Activity() {
     private val favoriteBadges=mutableMapOf<String,TextView>()
     private var favoriteStatus: TextView?=null
     private var favoriteCheck: TextView?=null
-    private var homeUpdates: TextView?=null
-    private val resumeCards=mutableListOf<View>()
     private var episodePanel: EpisodePanel?=null
     private val recovery=RecoveryBudget()
     private var retryPending=false
@@ -133,7 +140,6 @@ class MainActivity: Activity() {
     private val tabState=mutableMapOf<Int,CatalogState>()
     private val tabFocus=mutableMapOf<Int,String>()
     private val nav=mutableListOf<View>()
-    private val typeButtons=mutableMapOf<ContentType,View>()
     private val rankButtons=mutableMapOf<RankBoard,View>()
     private var rankTitle: TextView?=null
     private var historyManage: View?=null
@@ -232,10 +238,11 @@ class MainActivity: Activity() {
     }
     private fun loadLibrary() {
         libraryLoadError=null
-        library.loadAsync(onFailure={ problem ->
+        library.        loadAsync(onFailure={ problem ->
             if(!isDestroyed) { libraryLoadError=problem; if(foreground) showLibraryError(problem) }
         }) {
-            if(!isDestroyed && foreground) { showCatalog(load=true); favoriteMonitor.check() }
+            // App start: the first screen is the home tab with focus on the top nav "首页".
+            if(!isDestroyed && foreground) { showCatalog(load=true,focusNav=true); favoriteMonitor.check() }
         }
     }
     private fun base(title: String?=null): LinearLayout {
@@ -268,9 +275,9 @@ class MainActivity: Activity() {
         catalogScroll?.let { scrollPositions[catalogPageKey]=it.scrollY }
         catalogBody=null
         homeScreen=null; selectionPreview=null; catalogScroll=null
-        nav.clear(); typeButtons.clear(); rankButtons.clear(); rankTitle=null
+        nav.clear(); rankButtons.clear(); rankTitle=null
         historyManage=null; rankRefresh=null; rankSubtitle=null; collectionBack=null; favoriteBadges.clear()
-        favoriteStatus=null; favoriteCheck=null; homeUpdates=null; resumeCards.clear()
+        favoriteStatus=null; favoriteCheck=null; tabRefresh=null; tabSubtitle=null
         catalogCards.clear(); cardImages.clear()
         tvSuggestList=null; tvSuggestTitle=null; tvQueryView=null; tvSearchButton=null; tvBackspace=null; tvClear=null; tvFirstKey=null
         tvMiddleColumn=null; tvRightColumn=null; tvHistoryFlow=null; tvHistoryTitle=null; tvResultPanel=null; tvResultTitle=null; tvResultList=null
@@ -304,30 +311,25 @@ class MainActivity: Activity() {
         parent.addView(text(detail,13f,muted)); addButton(parent,"重试",onClick=retry).requestFocus()
     }
     private fun switchRankBoard(board: RankBoard) {
-        if(library.rankBoard==board || tab!=2) return
+        if(library.rankBoard==board || tab!=4) return
         library.rankBoard=board
         rankFocusBoard=board
-        tabState.remove(2); tabFocus.remove(2)
+        tabState.remove(4); tabFocus.remove(4)
         releaseCatalogViews()
         page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""
         showCatalog(load=true)
     }
     private fun switchTab(next: Int) {
+        if(next==tab) return
         leaveCollection(); homeResetDone=false
         tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
         tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty()
         // Entering the search tab always starts fresh: keep history, drop query and results.
-        if(next==1) { tvQuery=""; tvSuggests=emptyList(); tvResultQuery=""; catalog=emptyList(); hasMore=false; query="" }
-        showCatalog(load=(next!=1 && next<=2 && catalog.isEmpty()))
-    }
-    private fun switchContentType(type: ContentType) {
-        if(library.contentType==type) return
-        leaveCollection()
-        library.contentType=type
-        tabState.remove(0); tabFocus.remove(0)
-        releaseCatalogViews()
-        page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""; homePosition=null
-        showCatalog(load=(tab==0 || query.isNotBlank()),focusType=true)
+        if(next==3) { tvQuery=""; tvSuggests=emptyList(); tvResultQuery=""; catalog=emptyList(); hasMore=false; query="" }
+        // Focus arrived on another nav button (D-pad left/right): the page switches under
+        // it, focus stays on that nav button. Rebuild without stealing focus.
+        if(navSwitchFocus) { navSwitchFocus=false; showCatalog(load=(next!=3 && catalog.isEmpty() && !localCatalog())) }
+        else showCatalog(load=(next!=3 && next<=2 && catalog.isEmpty()))
     }
     private fun leaveCollection() {
         if(collection==null) return
@@ -339,21 +341,24 @@ class MainActivity: Activity() {
         collectionReturn=CatalogState(page,catalog,hasMore,ranking); collectionFocus=catalogFocus
         collection=kind; page=1; catalogFocus=""; showCatalog()
     }
-    private fun inlineHomeFilters()=tab==0 && resources.configuration.fontScale<=1.2f && widthDp()>=900
-    private fun localCatalog()=tab==3 || tab==4 || collection!=null
+    private fun localCatalog()=tab==5 || tab==6 || collection!=null
     private fun localItems(): List<Series> = when(collection) {
-        "hot" -> collectionReturn?.items.orEmpty().filterNot { it.id in library.hidden() }
         "later" -> library.later()
         "updates" -> library.favorites().filter { (library.favoriteUpdate(it.id)?.added ?: 0)>0 }
         "resume" -> library.history().filterNot { library.watched(it.series.id) }.map { it.series }
-        else -> if(tab==3) library.favorites() else library.history().map { it.series }
+        else -> if(tab==5) library.favorites() else library.history().map { it.series }
     }
     private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
         // Never cache a new page number with the previous page's results while a request is pending.
         if(load) {
-            val cached=if(tab==0 && page==1) library.cachedHome(library.contentType) else null
+            val cached=if((tab==0 || tab==1 || tab==2) && page==1) library.cachedHome(tabContentType()) else null
             catalog=cached?.items ?: emptyList(); hasMore=cached?.hasMore ?: false; ranking=null; homeFromCache=cached!=null
+            // Home shelves need both content types; seed them from the per-type caches.
+            if(tab==0 && page==1) {
+                homeShort=library.cachedHome(ContentType.SHORT)?.items ?: emptyList()
+                homeComic=library.cachedHome(ContentType.COMIC)?.items ?: emptyList()
+            }
         }
         invalidatePage(); screen="catalog"; releaseCatalogViews(); val container=base()
         if(foreground && library.isLoaded && !favoriteMonitor.running) main.post { if(foreground && screen=="catalog") favoriteMonitor.check() }
@@ -362,39 +367,38 @@ class MainActivity: Activity() {
         brand.addView(ImageView(this).apply { setImageResource(com.hongguotv.nativeapp.R.drawable.app_logo_transparent) },lp(dp(28),dp(28)).apply { rightMargin=dp(9) })
         brand.addView(text("红果",22f).apply { typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL) })
         top.addView(brand,lp(dp(120),dp(44)))
-        listOf("首页","搜索","排行榜","收藏","最近观看","设置").forEachIndexed { index,label ->
+        listOf("首页","短剧","漫剧","搜索","排行榜","收藏","最近观看","设置").forEachIndexed { index,label ->
             val item=addButton(top,label,index==tab) { switchTab(index) }
             fun paint(focused: Boolean) {
                 item.setTextColor(if(focused) bg else if(index==tab) accent else muted)
                 item.background=rounded(if(focused) white else if(index==tab) Color.rgb(48,32,29) else Color.TRANSPARENT)
                 item.setTypeface(null,if(focused || index==tab) Typeface.BOLD else Typeface.NORMAL)
             }
-            paint(false); item.setOnFocusChangeListener { _,focused -> paint(focused) }; nav+=item
+            paint(false); item.setOnFocusChangeListener { _,focused ->
+                paint(focused)
+                // D-pad left/right across the global nav switches the page immediately,
+                // no OK press needed. The focused nav button keeps focus (no jump).
+                if(focused && index!=tab) { navSwitchFocus=true; switchTab(index); navSwitchFocus=false }
+            }; nav+=item
         }
         container.addView(top)
         container.addView(View(this).apply { setBackgroundColor(TvStyle.outline) },lp(-1,dp(1)).apply { bottomMargin=dp(6) })
-        if(tab==5) {
+        if(tab==7) {
             val scroll=ScrollView(this); val body=column(); scroll.addView(body); container.addView(scroll,lp(-1,0).apply { weight=1f })
             settings(body); if(focusNav) nav[tab].requestFocus(); return
         }
-        if(tab==0) {
-            val types=row().apply { setPadding(0,dp(8),0,dp(6)) }
-            if(!inlineHomeFilters()) types.addView(text("片库",12f,muted),lp(dp(42),-2))
-            ContentType.entries.forEach { type ->
-                typeButtons[type]=addButton(types,type.label,library.contentType==type) { switchContentType(type) }
-                    .apply { isSelected=library.contentType==type; nextFocusUpId=nav[tab].id }
-            }
-            if(inlineHomeFilters()) {
-                top.addView(Space(this),lp(0,1).apply { weight=1f })
-                typeButtons.values.forEach { view -> (view as TextView).apply { textSize=12f; minHeight=dp(34); setPadding(dp(12),dp(7),dp(12),dp(7)) } }
-                types.setPadding(0,0,0,0); top.addView(types)
-            } else {
-                types.addView(text("长按确认 · 管理片单",12f,muted).apply { setPadding(dp(14),0,0,0) })
-                container.addView(types)
-            }
-            nav.forEach { it.nextFocusDownId=typeButtons.getValue(library.contentType).id }
+        if(tab==1 || tab==2) {
+            // Global short-drama / comic-drama tab: a plain card grid of that content type.
+            val heading=row().apply { setPadding(0,dp(14),0,dp(6)) }
+            heading.addView(text(if(tab==1) "热门短剧" else "热门漫剧",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
+            tabRefresh=addButton(heading,"刷新热门") { page=1; catalogFocus=""; showCatalog(true) }.apply { nextFocusUpId=nav[tab].id }
+            container.addView(heading)
+            tabSubtitle=text(if(load) "正在读取最新内容…" else "来源：红果${tabContentType().label}",13f,muted)
+                .apply { setPadding(0,0,0,dp(8)) }
+            container.addView(tabSubtitle)
+            nav.forEach { it.nextFocusDownId=tabRefresh!!.id }
         }
-        if(tab==1) {
+        if(tab==3) {
             // Global search: full-width three-column keyboard layout, no content-type filter.
             // Left ~30%: query box + search/clear + phone-input/delete + A-Z grid.
             // Middle ~30%: live suggestions. Right ~40%: history, or result cards after a search.
@@ -403,7 +407,7 @@ class MainActivity: Activity() {
             // Returning from a detail page lands on the top nav "搜索" tab in the fresh three-column layout.
             if(focusNav) nav[tab].requestFocus()
             return
-        } else if(tab==2) {
+        } else if(tab==4) {
             val boards=row().apply { setPadding(0,dp(8),0,dp(6)) }
             boards.addView(text("片库",12f,muted),lp(dp(42),-2))
             val current=library.rankBoard
@@ -422,13 +426,13 @@ class MainActivity: Activity() {
             container.addView(rankSubtitle)
             nav.forEach { it.nextFocusDownId=rankButtons[current]?.id ?: rankRefresh!!.id }
             rankButtons.values.forEach { it.nextFocusDownId=rankRefresh!!.id }
-        } else if(tab>2) {
+        } else if(tab>4) {
             val heading=row().apply { setPadding(0,dp(14),0,dp(6)) }
-            heading.addView(text(if(tab==3) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
-            if(tab==3) {
+            heading.addView(text(if(tab==5) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
+            if(tab==5) {
                 favoriteCheck=addButton(heading,"检查更新") { favoriteMonitor.check(force=true) }.apply { nextFocusUpId=nav[tab].id }
             }
-            if(tab==4 && library.history().isNotEmpty()) {
+            if(tab==6 && library.history().isNotEmpty()) {
                 historyManage=addButton(heading,"管理记录") {
                     val rows=library.history()
                     tvTools.choose("选择要管理的观看记录",rows.map { it.series.title },historyManage,{ index -> manageHistory(rows[index].series,historyManage) },"清空记录") {
@@ -437,7 +441,7 @@ class MainActivity: Activity() {
                 }.apply { nextFocusUpId=nav[tab].id }
             }
             container.addView(heading)
-            if(tab==3) {
+            if(tab==5) {
                 favoriteStatus=text(favoriteMonitor.status,13f,muted).apply { setPadding(0,0,0,dp(6)) }; container.addView(favoriteStatus)
             }
         }
@@ -446,37 +450,56 @@ class MainActivity: Activity() {
             catalog=localItems(); ranking=null; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
         }
         if(load) {
-            if(tab==0) catalogGrid(body,focusNav,focusType,loading=true)
+            if(tab==0 || tab==1 || tab==2) catalogGrid(body,focusNav,focusType,loading=true)
             else {
                 message(body,"正在加载…")
                 // Board switch: focus the freshly selected board button while loading.
-                if(focusType) typeButtons[library.contentType]?.requestFocus()
-                else if(tab==2) rankButtons[rankFocusBoard ?: library.rankBoard]?.requestFocus() ?: nav[tab].requestFocus()
-                else if(!homeGridFocus) nav[tab].requestFocus()
+                if(focusType) rankButtons[rankFocusBoard ?: library.rankBoard]?.requestFocus() ?: nav[tab].requestFocus()
+                else nav[tab].requestFocus()
             }
-            val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=library.contentType; val requestBoard=library.rankBoard
+            val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=tabContentType(); val requestBoard=library.rankBoard
             work({
-                val result=when(requestTab) { 0 -> repository.home(requestPage,requestType); 2 -> repository.ranking(requestBoard,requestPage); else -> repository.search(requestQuery,requestPage,requestType) }
-                result
-            }, { result ->
-                if(requestTab==0 && requestPage==1) library.cacheHome(requestType,result.items,result.hasMore)
-                if(requestTab==0 && requestPage==1 && (homeFromCache || tvTools.showing || updater.showing)) {
-                    homeScreen?.refresh?.text="热门已更新 · 按确认查看"
-                    homeScreen?.refresh?.setOnClickListener { catalog=result.items; hasMore=result.hasMore; ranking=result.ranking; showCatalog() }
+                // The home tab fetches both content types at once so its two shelves
+                // (热门发现·短剧 / 热门发现·漫剧) refresh together.
+                when(requestTab) {
+                    0 -> repository.home(requestPage,ContentType.SHORT) to repository.home(requestPage,ContentType.COMIC)
+                    1 -> repository.home(requestPage,ContentType.SHORT) to CatalogPage(emptyList(),false)
+                    2 -> CatalogPage(emptyList(),false) to repository.home(requestPage,ContentType.COMIC)
+                    4 -> CatalogPage(emptyList(),false) to repository.ranking(requestBoard,requestPage)
+                    else -> repository.search(requestQuery,requestPage,requestType) to CatalogPage(emptyList(),false)
+                }
+            }, { (shortResult,comicResult) ->
+                if(requestPage==1) {
+                    when(requestTab) {
+                        0 -> { library.cacheHome(ContentType.SHORT,shortResult.items,shortResult.hasMore); library.cacheHome(ContentType.COMIC,comicResult.items,comicResult.hasMore) }
+                        1 -> library.cacheHome(ContentType.SHORT,shortResult.items,shortResult.hasMore)
+                        2 -> library.cacheHome(ContentType.COMIC,comicResult.items,comicResult.hasMore)
+                    }
+                }
+                if(requestTab==0 && requestPage==1) {
+                    homeShort=shortResult.items; homeComic=comicResult.items
+                    catalog=shortResult.items+comicResult.items; hasMore=shortResult.hasMore || comicResult.hasMore; ranking=shortResult.ranking
+                    if(homeFromCache || tvTools.showing || updater.showing) {
+                        homeScreen?.refresh?.text="热门已更新 · 按确认查看"
+                        homeScreen?.refresh?.setOnClickListener { showCatalog() }
+                    } else showCatalog()
                 } else {
+                    val result=if(requestTab==1) shortResult else if(requestTab==2) comicResult else if(requestTab==4) comicResult else shortResult
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
-                    val keepNav=nav.any { it.hasFocus() }; val keepType=typeButtons.values.any { it.hasFocus() } || rankButtons.values.any { it.hasFocus() } || rankFocusBoard!=null
+                    val keepNav=nav.any { it.hasFocus() }; val keepType=rankButtons.values.any { it.hasFocus() } || rankFocusBoard!=null
                     rankTitle?.text=library.rankBoard.label
                     rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果${library.rankBoard.label}" } ?: "来源：红果${library.rankBoard.label}"
+                    tabSubtitle?.text="来源：红果${tabContentType().label}"
                     body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType)
                 }
             }, { problem ->
                 if(requestTab==0 && requestPage==1) {
-                    homeScreen?.refresh?.text=if(catalog.isNotEmpty()) "当前显示上次内容 · 联网后按确认刷新" else "热门暂时无法加载 · 按确认重试"
+                    homeScreen?.refresh?.text=if(homeShort.isNotEmpty() || homeComic.isNotEmpty()) "当前显示上次内容 · 联网后按确认刷新" else "热门暂时无法加载 · 按确认重试"
                     homeScreen?.refresh?.setOnClickListener { showCatalog(true) }
                     return@work
                 }
-                catalog=emptyList(); hasMore=false; ranking=null; rankSubtitle?.text="榜单加载失败"
+                catalog=emptyList(); hasMore=false; ranking=null
+                if(requestTab==4) rankSubtitle?.text="榜单加载失败" else tabSubtitle?.text="内容加载失败"
                 if(problem is SearchSessionExpiredException) {
                     page=1; catalogFocus=""
                     Toast.makeText(this,"搜索结果已过期，已回到第 1 页刷新",Toast.LENGTH_LONG).show()
@@ -484,23 +507,21 @@ class MainActivity: Activity() {
                 } else {
                     body.removeAllViews()
                     error(body,problem) { showCatalog(true) }
-                    if(resumeCards.isNotEmpty()) resumeCards.first().requestFocus()
                 }
             })
         } else catalogGrid(body,focusNav,focusType)
     }
     private fun catalogGrid(body: LinearLayout,focusNav: Boolean,focusType: Boolean=false,loading: Boolean=false) {
         if(tab==0 && page==1 && collection==null) { renderHome(body,focusNav,focusType,loading); return }
-        resumeCards.clear(); catalogCards.clear(); cardImages.clear(); collectionBack=null
+        catalogCards.clear(); cardImages.clear(); collectionBack=null
         if(collection!=null) {
             val heading=row()
             collectionBack=addButton(heading,"‹ 返回首页") { leaveCollection(); showCatalog() }.apply {
-                nextFocusUpId=typeButtons[library.contentType]?.id ?: nav[tab].id
+                nextFocusUpId=nav[tab].id
                 nextFocusDownId=id
             }
-            heading.addView(text(when(collection) { "later" -> "稍后看"; "updates" -> "收藏有更新"; "hot" -> "热门发现"; else -> "接着看" },22f))
+            heading.addView(text(when(collection) { "later" -> "稍后看"; "updates" -> "收藏有更新"; else -> "接着看" },22f))
             body.addView(heading)
-            typeButtons.values.forEach { it.nextFocusDownId=collectionBack!!.id }
         }
         catalogPageKey="$tab:${collection.orEmpty()}:$page:$query"
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
@@ -509,14 +530,10 @@ class MainActivity: Activity() {
         var restoringScroll=true
         val displayed=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize) else if(tab==0) catalog.filterNot { it.id in library.hidden() } else catalog.take(30)
         if(displayed.isEmpty()) {
-            message(list,if(loading) "正在加载推荐…" else when(tab) { 1 -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关${library.contentType.label}，换个关键词试试"; 3 -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; 4 -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
-            if((tab<=2 || localCatalog()) && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) }
-            if((tab<=2 || localCatalog()) && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) }
-            if(resumeCards.isNotEmpty()) {
-                typeButtons.values.forEach { it.nextFocusDownId=resumeCards.first().id }
-                resumeCards.forEach { it.nextFocusDownId=it.id }
-            }
-            if(focusType) typeButtons[library.contentType]?.requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else if(focusNav || resumeCards.isEmpty()) nav[tab].requestFocus() else resumeCards.first().requestFocus()
+            message(list,if(loading) "正在加载推荐…" else when(tab) { 3 -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关${library.contentType.label}，换个关键词试试"; 5 -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; 6 -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
+            if((tab<=4 || localCatalog()) && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) }
+            if((tab<=4 || localCatalog()) && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) }
+            if(focusType) rankButtons[rankFocusBoard ?: library.rankBoard]?.requestFocus() ?: nav[tab].requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else nav[tab].requestFocus()
             return
         }
         val cards=mutableListOf<View>(); val count=6; val gap=dp(14); val width=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
@@ -524,19 +541,19 @@ class MainActivity: Activity() {
             val line=row(); line.gravity=Gravity.TOP
             items.forEachIndexed { columnIndex,item ->
                 val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(9)); focusStyle(card); card.contentDescription=item.title; card.tag=item.id; catalogCards[item.id]=card
-                val position=if(tab==2) ranking?.positions?.get(item.id) else null
+                val position=if(tab==4) ranking?.positions?.get(item.id) else null
                 val artwork=FrameLayout(this); card.addView(artwork,lp(-1,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
                 val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }; artwork.addView(image,FrameLayout.LayoutParams(-1,-1)); loadCover(image,item.cover); cardImages[item.id]=image to item.cover
-                if(tab==2) {
+                if(tab==4) {
                     val rankLabel=position?.rank?.let { "第 $it 名" } ?: "名次暂无"
                     artwork.addView(text(rankLabel,15f).apply { setTypeface(null,Typeface.BOLD); setPadding(dp(8),dp(5),dp(8),dp(5)); background=rounded(if((position?.rank ?: Int.MAX_VALUE)<=3) accent else Color.rgb(28,31,39)) },FrameLayout.LayoutParams(-2,-2,Gravity.TOP or Gravity.START))
                     card.contentDescription="$rankLabel，${item.title}，${position?.heat?.ifBlank { "热度暂无" } ?: "热度暂无"}"
                 }
                 card.addView(text(item.title,14f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),dp(7),dp(3),0) },lp(-1,-2).apply { weight=1f })
-                val progress=if(tab==4 || collection=="resume") library.progress(item.id) else null
-                val badge=text(if(tab==3) library.favoriteLabel(item.id) else if(tab==2) position?.heat?.ifBlank { "热度暂无" } ?: "热度暂无" else if(progress!=null) if(library.watched(item.id)) "整剧已看完" else "第 ${progress.episodeIndex+1} 集 · ${formatTime(progress.position)}" else item.badge,12f,if(tab==2 || tab==3) accent else muted).apply { maxLines=1; minLines=1; minHeight=dp(19); ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) }
-                card.addView(badge,lp(-1,-2)); if(tab==3) favoriteBadges[item.id]=badge
-                card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==4 || collection=="resume" || collection=="updates") }
+                val progress=if(tab==6 || collection=="resume") library.progress(item.id) else null
+                val badge=text(if(tab==5) library.favoriteLabel(item.id) else if(tab==4) position?.heat?.ifBlank { "热度暂无" } ?: "热度暂无" else if(progress!=null) if(library.watched(item.id)) "整剧已看完" else "第 ${progress.episodeIndex+1} 集 · ${formatTime(progress.position)}" else item.badge,12f,if(tab==4 || tab==5) accent else muted).apply { maxLines=1; minLines=1; minHeight=dp(19); ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) }
+                card.addView(badge,lp(-1,-2)); if(tab==5) favoriteBadges[item.id]=badge
+                card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==6 || collection=="resume" || collection=="updates") }
                 card.setOnLongClickListener { catalogFocus=item.id; quickActions(item,card); true }
                 card.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
                 card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) { catalogFocus=item.id; loadCover(image,item.cover); preview.show(item,selectionStatus(item)); if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when { line.top<scroll.scrollY -> line.top; line.bottom>scroll.scrollY+scroll.height -> (line.bottom-scroll.height).coerceAtLeast(0); else -> scroll.scrollY }) } } }
@@ -547,37 +564,29 @@ class MainActivity: Activity() {
         }
         val paging=row(); paging.gravity=Gravity.CENTER
         var prev: View?=null; var next: View?=null
-        if(tab<=2 || localCatalog()) {
+        if(tab<=4 || localCatalog()) {
             prev=addButton(paging,"上一页") { if(page>1) { page--; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=page>1; isFocusable=page>1; alpha=if(page>1) 1f else .4f }
-            paging.addView(text(if(localCatalog()) "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页" else if(tab==2 && ranking!=null) "第 $page / ${ranking!!.totalPages} 页" else "第 $page 页",14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==2) 135 else 95),dp(44)))
+            paging.addView(text(if(localCatalog()) "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页" else if(tab==4 && ranking!=null) "第 $page / ${ranking!!.totalPages} 页" else "第 $page 页",14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==4) 135 else 95),dp(44)))
             next=addButton(paging,"下一页") { if(hasMore) { page++; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=hasMore; isFocusable=hasMore; alpha=if(hasMore) 1f else .4f }
-            if(collection=="hot" && !hasMore && collectionReturn?.hasMore==true) {
-                next=addButton(paging,"下一批热门") { collection=null; collectionReturn=null; page=2; catalogFocus=""; homeGridFocus=true; showCatalog(true) }
-            }
             list.addView(paging,lp(-1,dp(50)))
         }
         cards.forEachIndexed { index,card ->
             card.nextFocusLeftId=if(index%count==0) card.id else cards[index-1].id
             card.nextFocusRightId=if(index%count==count-1 || index==cards.lastIndex) card.id else cards[index+1].id
-            card.nextFocusUpId=if(index<count) (collectionBack?.id ?: typeButtons[library.contentType]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: resumeCards.getOrNull(minOf(index,2))?.id ?: nav[tab].id) else cards[index-count].id
+            card.nextFocusUpId=if(index<count) (collectionBack?.id ?: tabRefresh?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: nav[tab].id) else cards[index-count].id
             card.nextFocusDownId=if(index+count<cards.size) cards[index+count].id else if(index/count<cards.lastIndex/count) cards.last().id else next?.takeIf { it.isFocusable }?.id ?: prev?.takeIf { it.isFocusable }?.id ?: card.id
         }
-        nav.forEach { it.nextFocusDownId=typeButtons[library.contentType]?.id ?: rankButtons[library.rankBoard]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
+        nav.forEach { it.nextFocusDownId=tabRefresh?.id ?: rankButtons[library.rankBoard]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
         rankButtons.values.forEach { it.nextFocusDownId=rankRefresh?.id ?: cards.first().id }
         rankRefresh?.nextFocusDownId=cards.first().id
+        tabRefresh?.nextFocusDownId=cards.first().id
         historyManage?.nextFocusDownId=cards.first().id
         favoriteCheck?.nextFocusDownId=cards.first().id
         collectionBack?.nextFocusDownId=cards.first().id
-        resumeCards.forEachIndexed { index,v -> v.nextFocusDownId=cards[minOf(index,cards.lastIndex)].id }
-        if(resumeCards.isNotEmpty()) cards.take(count).forEachIndexed { index,v -> v.nextFocusUpId=resumeCards[minOf(index,resumeCards.lastIndex)].id }
-        else homeUpdates?.let { updates -> updates.nextFocusUpId=typeButtons[library.contentType]?.id ?: nav[0].id; updates.nextFocusDownId=cards.first().id; cards.take(count).forEach { it.nextFocusUpId=updates.id } }
-        typeButtons.values.forEach { it.nextFocusDownId=collectionBack?.id ?: resumeCards.firstOrNull()?.id ?: homeUpdates?.id ?: cards.first().id }
         when {
             homeGridFocus -> { homeGridFocus=false; cards.first().requestFocus() }
-            focusType -> typeButtons[library.contentType]?.requestFocus()
             rankFocusBoard!=null -> { val board=rankFocusBoard; rankFocusBoard=null; rankButtons[board]?.requestFocus() ?: nav[tab].requestFocus() }
             focusNav -> nav[tab].requestFocus()
-            resumeCards.isNotEmpty() && (catalogFocus.isEmpty() || catalogFocus.startsWith("resume:")) -> (resumeCards.firstOrNull { it.tag==catalogFocus } ?: resumeCards.first()).requestFocus()
             else -> cards[displayed.indexOfFirst { it.id==catalogFocus }.coerceAtLeast(0)].requestFocus()
         }
         val savedScroll=scrollPositions[catalogPageKey]
@@ -613,19 +622,16 @@ class MainActivity: Activity() {
     private fun renderHome(body: LinearLayout,focusNav: Boolean,focusType: Boolean,loading: Boolean) {
         homeUpdateCount=library.updatedFavorites()
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
-        val top=if(inlineHomeFilters()) nav[0] else typeButtons.getValue(library.contentType)
+        val top=nav[0]
         val home=HomeScreen(this,top,::loadCover,{ item,label -> preview.show(item,if(label.startsWith("第 ")) selectionStatus(item) else listOf(label,selectionStatus(item)).filter { it.isNotBlank() }.joinToString(" · ")) },
             { item,resume -> openDetail(item,resume) },::quickActions,{ catalogFocus=it })
         homeScreen=home; body.addView(home,lp(-1,0).apply { weight=1f })
-        val hot=catalog.filterNot { it.id in library.hidden() }
-        home.render(homeShelves(),catalogFocus,!focusNav && !focusType,
-            if(hasMore) { { page=2; catalogFocus=""; homeGridFocus=true; showCatalog(true) } } else null,homePosition)
+        home.render(homeShelves(),catalogFocus,!focusNav && !focusType,null,homePosition)
         home.refresh.text=if(loading) if(homeFromCache) "已显示上次内容 · 正在更新热门…" else "正在更新热门…" else "刷新热门"
         home.refresh.setOnClickListener { showCatalog(true) }
-        typeButtons.values.forEach { it.nextFocusDownId=home.firstId() }
-        if(inlineHomeFilters()) nav.forEach { it.nextFocusDownId=home.firstId() }
-        if(focusNav) nav[0].requestFocus() else if(focusType) typeButtons.getValue(library.contentType).requestFocus()
-        if(hot.isNotEmpty() && !homeContentLogged) {
+        nav.forEach { it.nextFocusDownId=home.firstId() }
+        if(focusNav) nav[0].requestFocus()
+        if((homeShort.isNotEmpty() || homeComic.isNotEmpty()) && !homeContentLogged) {
             homeContentLogged=true
             body.post { android.util.Log.i("HongguoTV","Home content ready cached=$homeFromCache elapsedMs=${android.os.SystemClock.elapsedRealtime()-activityStarted}") }
         }
@@ -636,19 +642,18 @@ class MainActivity: Activity() {
     }
     private fun homeShelves(): List<HomeScreen.Shelf> {
         val recent=library.history().filterNot { library.watched(it.series.id) }
-        val updates=library.favorites().filter { (library.favoriteUpdate(it.id)?.added ?: 0)>0 }
-        val later=library.later(); val hidden=library.hidden(); val hot=catalog.filterNot { it.id in hidden }
+        val hidden=library.hidden()
+        val short=homeShort.filterNot { it.id in hidden }
+        val comic=homeComic.filterNot { it.id in hidden }
         return listOf(
             HomeScreen.Shelf("resume","接着看",recent.take(8).map { p -> HomeScreen.Entry(p.series,
                 "第 ${p.episodeIndex+1} 集 · ${if(p.completed) "接着看下一集" else formatTime(p.position)}",true,
                 if(p.duration>0) (p.position*100/p.duration).toInt().coerceIn(0,100) else null) },
                 if(recent.size>8) { { showCollection("resume") } } else null),
-            HomeScreen.Shelf("updates","收藏有更新",updates.take(8).map { HomeScreen.Entry(it,library.favoriteLabel(it.id),true) },
-                if(updates.size>8) { { showCollection("updates") } } else null),
-            HomeScreen.Shelf("later","稍后看",later.take(10).map { HomeScreen.Entry(it,"稍后看 · 长按管理") },
-                if(later.size>10) { { showCollection("later") } } else null),
-            HomeScreen.Shelf("hot","热门发现 · ${library.contentType.label}",hot.take(10).map { HomeScreen.Entry(it,it.badge.ifBlank { "查看剧集" }) },
-                if(hot.size>10) { { showCollection("hot") } } else null))
+            HomeScreen.Shelf("short","热门发现 · 短剧",short.take(10).map { HomeScreen.Entry(it,it.badge.ifBlank { "查看剧集" }) },
+                if(short.size>10) { { switchTab(1) } } else null),
+            HomeScreen.Shelf("comic","热门发现 · 漫剧",comic.take(10).map { HomeScreen.Entry(it,it.badge.ifBlank { "查看剧集" }) },
+                if(comic.size>10) { { switchTab(2) } } else null))
     }
     private fun refreshLibraryCards(changedId: String,removed: Boolean=false) {
         if(screen!="catalog") return
@@ -673,15 +678,15 @@ class MainActivity: Activity() {
         val labels=mutableListOf(if(library.progress(series.id)!=null) "继续观看" else "直接播放",
             if(library.favorite(series.id)) "取消收藏" else "收藏这部剧",
             if(library.queued(series.id)) "移出稍后看" else "加入稍后看","查看剧集详情")
-        if(tab==0) labels+="不在热门推荐中显示"
-        if(tab==4) labels+="管理观看记录"
+        if(tab==0 || tab==1 || tab==2) labels+="不在热门推荐中显示"
+        if(tab==6) labels+="管理观看记录"
         tvTools.choose(series.title,labels,anchor,{ choice ->
             when(choice) {
                 0 -> openDetail(series,true)
-                1 -> { val added=library.toggle(series); Toast.makeText(this,if(added) "已收藏" else "已取消收藏",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && (tab==3 || collection=="updates")); if(added) favoriteMonitor.check() }
+                1 -> { val added=library.toggle(series); Toast.makeText(this,if(added) "已收藏" else "已取消收藏",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && (tab==5 || collection=="updates")); if(added) favoriteMonitor.check() }
                 2 -> { val added=library.toggleLater(series); Toast.makeText(this,if(added) "已加入稍后看" else "已移出稍后看",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && collection=="later") }
                 3 -> openDetail(series)
-                4 -> if(tab==4) manageHistory(series,anchor) else { library.hide(series.id); Toast.makeText(this,"已隐藏热门推荐，可在设置中恢复",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,true) }
+                4 -> if(tab==6) manageHistory(series,anchor) else { library.hide(series.id); Toast.makeText(this,"已隐藏热门推荐，可在设置中恢复",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,true) }
             }
         })
     }
@@ -690,7 +695,6 @@ class MainActivity: Activity() {
         favoriteBadges.forEach { (id,label) -> val value=library.favoriteLabel(id); if(label.text.toString()!=value) label.text=value }
         favoriteStatus?.text=favoriteMonitor.status
         favoriteCheck?.text=if(favoriteMonitor.running) "正在检查…" else "检查更新"
-        homeUpdates?.text="收藏更新 ${library.updatedFavorites()} 部"
         val home=homeScreen
         if(screen=="catalog" && tab==0 && page==1 && collection==null && home!=null && library.updatedFavorites()!=homeUpdateCount) {
             // A stable resume key can be restored without moving the user's selection.
@@ -980,7 +984,7 @@ class MainActivity: Activity() {
         tvSuggestJob?.cancel(true)
         tvSuggestJob=io.submit {
             val result=runCatching { repository.suggestions(keyword) }.getOrDefault(emptyList())
-            main.post { if(ticket==tvSuggestTicket && screen=="catalog" && tab==1) { tvSuggests=result; renderTvSuggests() } }
+            main.post { if(ticket==tvSuggestTicket && screen=="catalog" && tab==3) { tvSuggests=result; renderTvSuggests() } }
         }
     }
 
@@ -1550,16 +1554,15 @@ class MainActivity: Activity() {
         if(!library.isLoaded) { finish(); return }
         when(screen) {
             "player" -> if(hud.visibility==View.VISIBLE && !playError) hidePlaybackOverlay() else returnToDetail()
-            "detail" -> if(tab==1) {
+            "detail" -> if(tab==3) {
                 // Leaving a drama opened from search results: back to the fresh three-column
                 // search layout, focus on the top nav "搜索" tab, query text dropped.
                 tvResultQuery=""; catalog=emptyList(); hasMore=false; tvQuery=""; tvSuggests=emptyList()
                 showCatalog(focusNav=true)
             } else showCatalog()
             else -> if(collection!=null) { leaveCollection(); showCatalog() }
-            else if(tab==0 && page>1) {
-                // Backing out of the "更多热门" grid returns to the home shelves (page 1),
-                // focus on the top nav "首页" tab; pressing back there restores the initial home state.
+            else if(tab<=2 && page>1) {
+                // Backing out of a paged catalog grid (home/short/comic tab) returns to page 1.
                 page=1; catalogFocus=""; homePosition=null; showCatalog(focusNav=true)
             }
             else if(nav.any { it.hasFocus() } || homeResetDone) {
@@ -1624,13 +1627,13 @@ class MainActivity: Activity() {
         super.onResume(); foreground=true; main.removeCallbacks(tick); main.post(tick)
         updater.resume()
         if(library.isLoaded) {
-            if(initialCatalogPending) showCatalog(load=true)
+            if(initialCatalogPending) showCatalog(load=true,focusNav=true)
             else if(restoreStoppedPage) {
                 restoreStoppedPage=false
                 when(screen) {
                     "player" -> playEpisode(episodeIndex,startPosition,autoplay=false)
                     "detail" -> if(detail!=null) showDetail(false) else pendingDetail?.let { openDetail(it,resume=false,autoplay=false) } ?: showCatalog()
-                    else -> showCatalog(load=!localCatalog() && catalog.isEmpty() && (tab==0 || tab==2))
+                    else -> showCatalog(load=!localCatalog() && catalog.isEmpty() && (tab<=2 || tab==4))
                 }
             } else {
                 val waiting=deferredWork; deferredWork=null; waiting?.apply?.invoke()
