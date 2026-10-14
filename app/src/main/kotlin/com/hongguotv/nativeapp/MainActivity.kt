@@ -175,6 +175,10 @@ class MainActivity: Activity() {
     private var tvResultTitle: TextView?=null
     private var tvResultList: LinearLayout?=null
     private var tvResultQuery=""
+    /** Search-page scroll containers, tracked so the back key can snap them to the top. */
+    private var tvSuggestScroll: ScrollView?=null
+    private var tvHistoryScroll: ScrollView?=null
+    private var tvResultScroll: ScrollView?=null
     /** Set by switchRankBoard: after the new board loads, focus stays on that board's button. */
     private var rankFocusBoard: RankBoard?=null
     private var detail: Detail?=null
@@ -291,6 +295,7 @@ class MainActivity: Activity() {
         favoriteStatus=null; favoriteCheck=null; tabRefresh=null; tabSubtitle=null
         catalogCards.clear(); cardImages.clear()
         tvSuggestList=null; tvSuggestTitle=null; tvQueryView=null; tvSearchButton=null; tvBackspace=null; tvClear=null; tvFirstKey=null
+        tvSuggestScroll=null; tvHistoryScroll=null; tvResultScroll=null
         tvMiddleColumn=null; tvRightColumn=null; tvHistoryFlow=null; tvHistoryTitle=null; tvResultPanel=null; tvResultTitle=null; tvResultList=null
         main.removeCallbacks(tvSuggestDebounce); tvSuggestJob?.cancel(true); tvSuggestJob=null; tvSuggestTicket++
     }
@@ -958,6 +963,7 @@ class MainActivity: Activity() {
         tvSuggestTitle=text("匹配结果",16f,accent).apply { setTypeface(null,Typeface.BOLD); setPadding(0,0,0,dp(8)) }
         tvMiddleColumn?.addView(tvSuggestTitle)
         val suggestScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false }
+        tvSuggestScroll=suggestScroll
         tvSuggestList=column(); suggestScroll.addView(tvSuggestList)
         tvMiddleColumn?.addView(suggestScroll,lp(-1,0).apply { weight=1f })
         screen.addView(tvMiddleColumn,lp((total*.20f).toInt(),android.view.ViewGroup.LayoutParams.MATCH_PARENT).apply { rightMargin=gap })
@@ -980,6 +986,7 @@ class MainActivity: Activity() {
         historyHeading.addView(clearHistory,lp(dp(34),dp(34)).apply { leftMargin=dp(8) })
         tvRightColumn?.addView(historyHeading)
         val historyScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false }
+        tvHistoryScroll=historyScroll
         tvHistoryFlow=FlowLayout(this)
         historyScroll.addView(tvHistoryFlow)
         tvRightColumn?.addView(historyScroll,lp(-1,0).apply { weight=1f })
@@ -989,6 +996,7 @@ class MainActivity: Activity() {
         tvResultTitle=text("",16f,accent).apply { setTypeface(null,Typeface.BOLD); setPadding(0,0,0,dp(8)) }
         tvResultPanel?.addView(tvResultTitle)
         val resultScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false }
+        tvResultScroll=resultScroll
         tvResultList=column(); resultScroll.addView(tvResultList)
         tvResultPanel?.addView(resultScroll,lp(-1,0).apply { weight=1f })
         screen.addView(tvResultPanel,lp(0,android.view.ViewGroup.LayoutParams.MATCH_PARENT).apply { weight=1f })
@@ -1660,6 +1668,13 @@ class MainActivity: Activity() {
             else if(nav.any { it.hasFocus() }) {
                 // Focus on the top nav of a non-home tab: back goes home (initial state).
                 if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() } else finish()
+            }
+            else if(tab==3) {
+                // Search page: one back press snaps all three scroll columns to the top
+                // (suggestions / history / results, whichever is visible) and moves focus
+                // up to the nav bar tab. The query and results stay as they were.
+                tvSuggestScroll?.scrollTo(0,0); tvHistoryScroll?.scrollTo(0,0); tvResultScroll?.scrollTo(0,0)
+                nav[tab].requestFocus()
             }
             else if(tab==1 || tab==2 || tab==5 || tab==6 || tab==7) {
                 // Card/settings pages: one back press does both — snap the page back to
