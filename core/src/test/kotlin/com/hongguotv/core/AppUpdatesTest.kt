@@ -22,15 +22,23 @@ class AppUpdatesTest {
     }
     @Test fun onlyHigherCompatibleVersionsAreUpdates() {
         val update = update()
-        assertTrue(update.newerThan(9, 26)); assertFalse(update.newerThan(10001, 36)); assertFalse(update.newerThan(10002, 36)); assertFalse(update.newerThan(9, 25))
+        assertTrue(update.newerThan(9, 26)); assertFalse(update.newerThan(10001, 36)); assertFalse(update.newerThan(10002, 36)); assertFalse(update.newerThan(9, 23))
     }
     @Test fun downloadUrlUsesOnlyFixedRepositoryAndValidatedNames() {
         assertEquals("https://github.com/fyworld/hongguoTV/releases/download/kotlin-v0.9.0-build.1/hongguotv-kotlin-0.9.0-build.1-android8.apk", update().downloadUrl)
-        for (value in listOf("../../bad.apk", "evil.apk", "https://example.com/evil.apk", "hongguotv-kotlin-1/2-android8.apk")) {
+        for (value in listOf("../../bad.apk", "evil.apk", "https://example.com/evil.apk", "hongguotv-kotlin-1/2-android8.apk", "hongguotv-kotlin-1.0.0-android9.apk")) {
             val o = json(); o.getJSONObject("apk").put("name", value)
             assertThrows(IllegalArgumentException::class.java) { AppUpdate.parse(o.toString()) }
         }
         assertThrows(IllegalArgumentException::class.java) { AppUpdate.parse(json().put("tag", "../../other").toString()) }
+    }
+    @Test fun v1ManifestWithAndroid7NameAndMinSdk24Parses() {
+        val o = json().put("versionCode", 11).put("versionName", "1.0.1").put("minSdk", 24).put("tag", "kotlin-v1.0.1")
+        o.getJSONObject("apk").put("name", "hongguotv-kotlin-1.0.1-android7.apk")
+        val update = AppUpdate.parse(o.toString())
+        assertEquals("https://github.com/fyworld/hongguoTV/releases/download/kotlin-v1.0.1/hongguotv-kotlin-1.0.1-android7.apk", update.downloadUrl)
+        assertTrue(update.newerThan(10, 24))
+        assertThrows(IllegalArgumentException::class.java) { AppUpdate.parse(json().put("minSdk", 23).toString()) }
     }
     @Test fun rejectOtherPackageAndInvalidSchema() {
         assertThrows(IllegalArgumentException::class.java) { AppUpdate.parse(json().put("packageName", "other.app").toString()) }
