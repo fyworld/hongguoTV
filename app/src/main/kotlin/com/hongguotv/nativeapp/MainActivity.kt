@@ -220,7 +220,8 @@ class MainActivity: Activity() {
     private fun row()=LinearLayout(this).apply { orientation=LinearLayout.HORIZONTAL; gravity=Gravity.CENTER_VERTICAL }
     private fun focusStyle(view: View,selected: Boolean=false) {
         view.id=View.generateViewId(); view.isFocusable=true; view.isFocusableInTouchMode=true
-        fun paint(focused: Boolean) { view.background=rounded(if(focused) TvStyle.raised else if(selected) Color.rgb(61,39,34) else surface,if(focused) accent else Color.TRANSPARENT) }
+        // Focus ring is white across all buttons, matching the top nav's focus colour.
+        fun paint(focused: Boolean) { view.background=rounded(if(focused) TvStyle.raised else if(selected) Color.rgb(61,39,34) else surface,if(focused) white else Color.TRANSPARENT) }
         paint(false); view.setOnFocusChangeListener { _,focused -> paint(focused) }
     }
     private fun button(label: String,selected: Boolean=false,onClick: ()->Unit): TextView = text(label,15f).apply {
@@ -321,12 +322,20 @@ class MainActivity: Activity() {
     }
     private fun switchRankBoard(board: RankBoard) {
         if(library.rankBoard==board || tab!=4) return
+        // Focus-landing switch: defer the rebuild one frame so the focus transfer to the
+        // new board button settles first; the rebuild then restores focus onto that
+        // button via rankFocusBoard. No visible flicker back to the old board.
+        if(!rebuildingGrid && rankButtons[board]?.hasFocus()==true) {
+            library.rankBoard=board
+            rankFocusBoard=board
+            tabState.remove(4); tabFocus.remove(4)
+            page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""
+            main.post { if(tab==4 && library.rankBoard==board && screen=="catalog") showCatalog(load=true) }
+            return
+        }
         library.rankBoard=board
         rankFocusBoard=board
         tabState.remove(4); tabFocus.remove(4)
-        // Suppress the nav bar's focus-to-switch listener while the board row is being
-        // rebuilt: the focused board button is detached first, and Android would hand
-        // focus to the top nav bar in the gap.
         rebuildingGrid=true
         try {
             releaseCatalogViews()
@@ -565,12 +574,12 @@ class MainActivity: Activity() {
             val line=row(); line.gravity=Gravity.TOP
             items.forEachIndexed { columnIndex,item ->
                 val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(9)); focusStyle(card); card.contentDescription=item.title; card.tag=item.id; catalogCards[item.id]=card
-                // Ranking pages (tab 4) and the comic tab (comicRanking feed) both carry
-                // rank/heat metadata in ranking.positions.
+                // Ranking pages (tab 4) carry rank/heat metadata in ranking.positions;
+                // the comic tab reuses the same feed but shows no rank badge.
                 val position=if(tab==4 || tab==2) ranking?.positions?.get(item.id) else null
                 val artwork=FrameLayout(this); card.addView(artwork,lp(-1,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
                 val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }; artwork.addView(image,FrameLayout.LayoutParams(-1,-1)); loadCover(image,item.cover); cardImages[item.id]=image to item.cover
-                if(tab==4 || tab==2) {
+                if(tab==4) {
                     val rankLabel=position?.rank?.let { "第 $it 名" } ?: "名次暂无"
                     artwork.addView(text(rankLabel,15f).apply { setTypeface(null,Typeface.BOLD); setPadding(dp(8),dp(5),dp(8),dp(5)); background=rounded(if((position?.rank ?: Int.MAX_VALUE)<=3) accent else Color.rgb(28,31,39)) },FrameLayout.LayoutParams(-2,-2,Gravity.TOP or Gravity.START))
                     card.contentDescription="$rankLabel，${item.title}，${position?.heat?.ifBlank { "热度暂无" } ?: "热度暂无"}"
@@ -1636,6 +1645,11 @@ class MainActivity: Activity() {
         val first=catalogCards.values.firstOrNull() ?: return
         first.requestFocus()
     }
+    /** Back-to-home always lands on the initial home state (page 1, no saved focus/scroll). */
+    private fun resetHomeState() {
+        tabState.remove(0); tabFocus.remove(0)
+        homePosition=null; scrollPositions.clear()
+    }
     private fun goBack() {
         if(!library.isLoaded) { finish(); return }
         when(screen) {
@@ -1651,24 +1665,30 @@ class MainActivity: Activity() {
                 // Backing out of the home paged grid returns to page 1 (home shelves).
                 page=1; catalogFocus=""; homePosition=null; showCatalog(focusNav=true)
             }
-            else if((tab==1 || tab==2 || tab==4) && (page>1 || (catalogScroll?.scrollY ?: 0)>0)) {
-                // Infinite grids: back scrolls to the top of the list, keeping the data.
-                catalogScroll?.smoothScrollTo(0,0)
-                catalogFocus=catalog.firstOrNull()?.id.orEmpty()
-                cardsTopFocus()
+            else if(nav.any { it.hasFocus() }) {
+                // Focus on the top nav of a non-home tab: back goes home (initial state).
+                if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() } else finish()
             }
-            else if(nav.any { it.hasFocus() } || homeResetDone) {
-                if(tab!=0) { switchTab(0); nav[0].requestFocus() }
-                else if(nav.any { it.hasFocus() } && homeResetDone) finish()
-                else {
-                    // Focus already on the home nav tab: reset to the initial home state
-                    // (接着看/热门发现 shelves, first card focused, scroll reset).
-                    // One more back press after the reset exits the app.
-                    homeResetDone=true
-                    catalogFocus=""; homePosition=null; scrollPositions.clear(); showCatalog(focusNav=true)
-                }
+            else if(tab==1 || tab==2 || tab==4) {
+                // Infinite grids: first back scrolls the list to the top and focuses the
+                // first card; when already at the top, back moves focus up to the nav bar.
+                if((catalogScroll?.scrollY ?: 0)>0 || page>1) {
+                    catalogScroll?.smoothScrollTo(0,0)
+                    catalogFocus=catalog.firstOrNull()?.id.orEmpty()
+                    cardsTopFocus()
+                } else nav[tab].requestFocus()
             }
-            else nav.getOrNull(tab)?.requestFocus()
+            else if(homeResetDone) {
+                if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() } else finish()
+            }
+            else if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() }
+            else {
+                // Focus already on the home nav tab: reset to the initial home state
+                // (接着看/热门发现 shelves, first card focused, scroll reset).
+                // One more back press after the reset exits the app.
+                homeResetDone=true
+                catalogFocus=""; homePosition=null; scrollPositions.clear(); showCatalog(focusNav=true)
+            }
         }
     }
     @Deprecated("TV remote back is handled through the activity")

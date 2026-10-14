@@ -19,5 +19,5 @@ object TvStyle {
         setColor(color); cornerRadius=radius*context.resources.displayMetrics.density
         setStroke((2*context.resources.displayMetrics.density).toInt(),border)
     }
-    fun card(context: Context,focused: Boolean)=shape(context,if(focused) raised else surface,if(focused) accent else Color.TRANSPARENT)
+    fun card(context: Context,focused: Boolean)=shape(context,if(focused) raised else surface,if(focused) Color.WHITE else Color.TRANSPARENT)
 }
