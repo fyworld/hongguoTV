@@ -477,7 +477,12 @@ class MainActivity: Activity() {
                         isSelected=current==board; nextFocusUpId=nav[tab].id
                         // Focus landing on a board button switches the board immediately,
                         // no OK press needed — same direct-switch feel as the top nav.
+                        // The paint (white focus ring) from focusStyle must be re-applied
+                        // here: setting a new focus listener replaces the old one.
+                        fun paint(focused: Boolean) { background=rounded(if(focused) TvStyle.raised else if(isSelected) Color.rgb(61,39,34) else surface,if(focused) white else Color.TRANSPARENT) }
+                        paint(false)
                         setOnFocusChangeListener { _,focused ->
+                            paint(focused)
                             if(focused && board!=library.rankBoard && !rebuildingGrid) switchRankBoard(board)
                         }
                     }
