@@ -63,6 +63,13 @@ class MainActivity: Activity() {
     private var navSwitchFocus=false
     /** Guards against overlapping infinite-scroll page fetches. */
     private var loadingMore=false
+    /**
+     * True while an in-place grid rebuild (infinite scroll append) is swapping views.
+     * Removing the focused card makes Android hand focus to the top nav bar, whose
+     * focus-to-switch listener would then jump the app to the 首页 tab. This flag
+     * suppresses that auto-switch until the rebuild restores focus on the grid.
+     */
+    private var rebuildingGrid=false
     /** Refresh button + status line for the global short/comic drama tabs. */
     private var tabRefresh: View?=null
     private var tabSubtitle: TextView?=null
@@ -380,7 +387,9 @@ class MainActivity: Activity() {
                 paint(focused)
                 // D-pad left/right across the global nav switches the page immediately,
                 // no OK press needed. The focused nav button keeps focus (no jump).
-                if(focused && index!=tab) { navSwitchFocus=true; switchTab(index); navSwitchFocus=false }
+                // Suppressed during in-place grid rebuilds (infinite scroll): focus is
+                // only passing through the nav bar while the grid swaps its views.
+                if(focused && index!=tab && !rebuildingGrid) { navSwitchFocus=true; switchTab(index); navSwitchFocus=false }
             }; nav+=item
         }
         container.addView(top)
@@ -651,9 +660,14 @@ class MainActivity: Activity() {
             val fresh=result.items.filterNot { it.id in known }
             catalog=catalog+fresh; hasMore=result.hasMore; page=nextPage
             // Rebuild the grid with the appended items; focus/scroll are restored from
-            // catalogFocus + scrollPositions, so nothing jumps.
-            catalogScroll?.let { scrollPositions[catalogPageKey]=it.scrollY }
-            catalogBody?.let { body -> body.removeAllViews(); catalogGrid(body,false) }
+            // catalogFocus + scrollPositions, so nothing jumps. rebuildingGrid stops the
+            // nav bar's focus-to-switch listener from firing while the old focused card
+            // is detached (Android would otherwise hand focus to the 首页 nav button).
+            rebuildingGrid=true
+            try {
+                catalogScroll?.let { scrollPositions[catalogPageKey]=it.scrollY }
+                catalogBody?.let { body -> body.removeAllViews(); catalogGrid(body,false) }
+            } finally { rebuildingGrid=false }
         }, { _ ->
             loadingMore=false
         })
