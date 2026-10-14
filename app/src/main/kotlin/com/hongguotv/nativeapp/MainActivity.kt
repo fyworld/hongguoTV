@@ -58,6 +58,7 @@ class MainActivity: Activity() {
     private var collectionFocus=""
     private var collectionBack: View?=null
     private var homeGridFocus=false
+    private var homeResetDone=false
     private val pageSize=20
     private var catalogScroll: ScrollView?=null
     private var catalogBody: LinearLayout?=null
@@ -312,7 +313,7 @@ class MainActivity: Activity() {
         showCatalog(load=true)
     }
     private fun switchTab(next: Int) {
-        leaveCollection()
+        leaveCollection(); homeResetDone=false
         tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
         tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty()
         // Entering the search tab always starts fresh: keep history, drop query and results.
@@ -1561,11 +1562,14 @@ class MainActivity: Activity() {
                 // focus on the top nav "首页" tab; pressing back there restores the initial home state.
                 page=1; catalogFocus=""; homePosition=null; showCatalog(focusNav=true)
             }
-            else if(nav.any { it.hasFocus() }) {
+            else if(nav.any { it.hasFocus() } || homeResetDone) {
                 if(tab!=0) { switchTab(0); nav[0].requestFocus() }
+                else if(nav.any { it.hasFocus() } && homeResetDone) finish()
                 else {
                     // Focus already on the home nav tab: reset to the initial home state
                     // (接着看/热门发现 shelves, first card focused, scroll reset).
+                    // One more back press after the reset exits the app.
+                    homeResetDone=true
                     catalogFocus=""; homePosition=null; scrollPositions.clear(); showCatalog(focusNav=true)
                 }
             }
