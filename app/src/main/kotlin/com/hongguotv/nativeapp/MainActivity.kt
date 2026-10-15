@@ -874,12 +874,8 @@ class MainActivity: Activity() {
         card.addView(text(item.title,14f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),dp(7),dp(3),0) },lp(-1,-2).apply { weight=1f })
         val progress=if(tab==7 || collection=="resume") library.progress(item.id) else null
         // Unified card badge: episode count followed by heat when available
-        // (e.g. "全40集   100万热度" / "更新至80集   1.2万播放" / "第1集·00:10   100万热度").
-        // Rank pages (tab 5) and the comic board read heatText from ranking.positions;
-        // feed-backed grids (short/comic/ai tabs and their themes) carry the feed's play
-        // count. The comic "全部" grid reads the website category page, which carries no
-        // heat at all — its cards show the episode count only.
-        val heat=position?.heat ?: item.heat
+        // (e.g. "全40集   100万热度" / "更新至80集   100万热度" / "第1集·00:10   100万热度").
+        val heat=if(tab==5 || tab==2) position?.heat else null
         val episodeText=if(tab==6) library.favoriteLabel(item.id) else if(progress!=null) if(library.watched(item.id)) "整剧已看完" else "第${progress.episodeIndex+1}集·${formatTime(progress.position)}" else item.badge
         val badgeText=if(heat.isNullOrBlank()) episodeText else listOf(episodeText,heat).filter { it.isNotBlank() }.joinToString("   ")
         val badge=text(badgeText,12f,if(tab==5 || tab==6) accent else muted).apply { maxLines=1; minLines=1; minHeight=dp(19); ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) }
