@@ -9,3 +9,4 @@ keystore.properties
 .idea/
 *.iml
 .DS_Store
+.kotlin/
