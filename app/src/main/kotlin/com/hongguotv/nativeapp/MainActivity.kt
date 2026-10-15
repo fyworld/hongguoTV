@@ -628,7 +628,13 @@ class MainActivity: Activity() {
         }
         val body=column(); catalogBody=body; container.addView(body,lp(-1,0).apply { weight=1f })
         if(localCatalog()) {
-            catalog=localItems(); ranking=null; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
+            // Local lists (favorites / history / collections) render as one infinite
+            // grid, same as the drama tabs: no paging row, focus past the last row
+            // appends the next local page. The current page window survives tab
+            // switches (tabState restores page before this reloads the list).
+            catalog=localItems(); ranking=null
+            page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize))
+            hasMore=catalog.size>page*pageSize
         }
         if(fetch) {
             if(tab==0 || tab==1 || tab==2 || tab==3) catalogGrid(body,focusNav,focusType,loading=true)
@@ -736,7 +742,7 @@ class MainActivity: Activity() {
             body.addView(heading)
         }
         // Infinite grids append pages in place, so their scroll key ignores the page number.
-        catalogPageKey=if(tab==1 || tab==2 || tab==3 || tab==5) "$tab:${collection.orEmpty()}:$themeSlug:$query" else "$tab:${collection.orEmpty()}:$page:$query"
+        catalogPageKey=if(tab==1 || tab==2 || tab==3 || tab==5 || localCatalog()) "$tab:${collection.orEmpty()}:$themeSlug:$query" else "$tab:${collection.orEmpty()}:$page:$query"
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
         // Collapsible preview everywhere (theme tabs, ranking, favorites, history):
         // the whole bar hides until a card actually takes focus and shows its title.
@@ -744,11 +750,11 @@ class MainActivity: Activity() {
         val scroll=ScrollView(this).apply { isFillViewport=false; isVerticalScrollBarEnabled=false; clipToPadding=false }; catalogScroll=scroll
         val list=column(); scroll.addView(list); body.addView(scroll,lp(-1,0).apply { weight=1f })
         var restoringScroll=true
-        val displayed=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize) else if(tab==1 || tab==2 || tab==3 || tab==5) catalog else if(tab==0) catalog.filterNot { it.id in library.hidden() } else catalog.take(30)
+        val displayed=if(localCatalog()) catalog.take(page*pageSize) else if(tab==1 || tab==2 || tab==3 || tab==5) catalog else if(tab==0) catalog.filterNot { it.id in library.hidden() } else catalog.take(30)
         if(displayed.isEmpty()) {
             message(list,if(loading) "正在加载推荐…" else when(tab) { 4 -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关${library.contentType.label}，换个关键词试试"; 6 -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; 7 -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
-            if((tab==0 || localCatalog()) && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) }
-            if((tab==0 || localCatalog()) && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) }
+            if(tab==0 && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) }
+            if(tab==0 && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) }
             if(themeFocusSlug!=null) { val slug=themeFocusSlug; themeFocusSlug=null; themeButtons[slug]?.requestFocus() ?: nav[tab].requestFocus() }
             // Focus already sits on a theme button (empty theme result): leave it there.
             else if((tab==1 || tab==2 || tab==3) && themeButtons.values.any { it.hasFocus() }) Unit
@@ -756,8 +762,8 @@ class MainActivity: Activity() {
             return
         }
         val cards=mutableListOf<View>(); val count=6; val gap=dp(14); val width=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
-        // Infinite grids (short/comic/ai/ranking tabs) append pages as focus reaches the last row.
-        val infiniteScroll=tab==1 || tab==2 || tab==3 || tab==5
+        // Infinite grids (short/comic/ai/ranking tabs + local lists) append pages as focus reaches the last row.
+        val infiniteScroll=tab==1 || tab==2 || tab==3 || tab==5 || localCatalog()
         val flatIndex=mutableMapOf<View,Int>()
         displayed.chunked(count).forEach { items ->
             val line=row(); line.gravity=Gravity.TOP
@@ -784,7 +790,13 @@ class MainActivity: Activity() {
                     if(focused) { catalogFocus=item.id; loadCover(image,item.cover); preview.show(item,selectionStatus(item));
                     // Infinite grids: reaching the last row auto-loads the next page and appends.
                     if(infiniteScroll && hasMore && (flatIndex[card] ?: 0)+count>=cards.size) loadMore()
-                    if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when { line.top<scroll.scrollY -> line.top; line.bottom>scroll.scrollY+scroll.height -> (line.bottom-scroll.height).coerceAtLeast(0); else -> scroll.scrollY }) } }
+                    // Row-aligned scrolling: the focused row lands at the top of the viewport
+                    // (same view as the first row on entry), so the previous row never peeks
+                    // partially under the preview bar. Rows already fully visible stay put.
+                    if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when {
+                        line.top<scroll.scrollY -> line.top
+                        line.bottom>scroll.scrollY+scroll.height -> line.top.coerceAtMost((list.height-scroll.height).coerceAtLeast(0))
+                        else -> scroll.scrollY }) } }
                     // Focus left the cards (paging row / refresh button / nav bar): collapse
                     // the title preview row again. Deferred one message: a card→card move
                     // fires the old card's loss before the new card's gain.
@@ -869,10 +881,20 @@ class MainActivity: Activity() {
         return listOf(if(library.favorite(series.id)) "已收藏" else "",if(library.queued(series.id)) "稍后看" else "",
             if(library.watched(series.id)) "整剧已看完" else progress?.let { "上次第 ${it.episodeIndex+1} 集 · ${formatTime(it.position)}" }.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ")
     }
-    /** Infinite grids (short/comic/ranking tabs): fetch the next page and append it in place.
-     *  The grid is not rebuilt — focus and scroll stay exactly where they are. */
+    /** Infinite grids (short/comic/ranking tabs + local lists): fetch the next page and
+     *  append it in place. The grid is not rebuilt — focus and scroll stay exactly where they are. */
     private fun loadMore() {
         if(!hasMore || loadingMore) return
+        if(localCatalog()) {
+            // Local list: page through the in-memory catalog on the UI thread, no network.
+            page+=1; hasMore=catalog.size>page*pageSize
+            rebuildingGrid=true
+            try {
+                catalogScroll?.let { scrollPositions[catalogPageKey]=it.scrollY }
+                catalogBody?.let { body -> body.removeAllViews(); catalogGrid(body,false) }
+            } finally { rebuildingGrid=false }
+            return
+        }
         loadingMore=true
         val requestTab=tab; val requestBoard=library.rankBoard; val nextPage=page+1
         val requestType=tabContentType(); val requestTheme=themeSlug
@@ -955,9 +977,11 @@ class MainActivity: Activity() {
         if(removed && (localCatalog() || tab==0)) {
             val oldIds=catalogCards.keys.toList(); val index=oldIds.indexOf(changedId).coerceAtLeast(0)
             if(localCatalog()) {
-                catalog=localItems(); page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
+                // Local lists are one infinite grid now: reload the in-memory list and
+                // keep the current window (page*pageSize) without re-paging.
+                catalog=localItems(); page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=catalog.size>page*pageSize
             }
-            val remaining=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize) else catalog.filterNot { it.id in library.hidden() }
+            val remaining=if(localCatalog()) catalog.take(page*pageSize) else catalog.filterNot { it.id in library.hidden() }
             catalogFocus=remaining.getOrNull(index.coerceAtMost((remaining.size-1).coerceAtLeast(0)))?.id.orEmpty()
             val y=catalogScroll?.scrollY ?: 0; scrollPositions[catalogPageKey]=y
             artwork.cancelPage(); favoriteBadges.clear()

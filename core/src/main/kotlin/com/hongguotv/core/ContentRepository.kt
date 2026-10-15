@@ -88,7 +88,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(page in 1..100)
         if (type == ContentType.COMIC) return comicRanking(page)
-        val genre = "short_play"
+        // The App feed carries one channel per content type (phone-version hongguoAppGenres):
+        // short_play (real drama) and ai_series (AI drama). The AI channel needs its own
+        // req_scene as well, otherwise the server falls back to the real-drama feed and
+        // the AI tab would show the same content as the short-drama tab.
+        val genre = if (type == ContentType.AI) "ai_series" else "short_play"
+        val scene = if (type == ContentType.AI) "ai_series" else "default"
         val cursorKey = "category:$genre"
         // The App feed is cursor-based: the server returns next_offset + session_id and
         // may return ANY number of items per call (5, 14, 23… — it used to be a fixed 18).
@@ -102,7 +107,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         var round = 0
         while (true) {
             val payload = JSONObject()
-                .put("req_scene", "default").put("offset", offset).put("limit", 18)
+                .put("req_scene", scene).put("offset", offset).put("limit", 18)
                 .put("req_type", "only_content").put("need_selector_panel", false)
                 .put("client_req_type", if (offset > 0) 2 else 3)
                 .put("session_id", sessionId).put("filter_ids", "")
@@ -140,7 +145,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     private val themeTtlMs=30*60*1000L
 
     /** Theme list for a content type: read from the category root page (selectorList,
-     *  follows site changes); falls back to the built-in list when the page fails. */
+     *  follows site changes); falls back to the built-in list when the page fails.
+     *  Search-backed themes the site omits (穿越) are appended either way. */
     fun themes(type: ContentType): List<Theme> {
         val key="themes:${type.storedValue}"
         val now=System.currentTimeMillis()
@@ -150,15 +156,36 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         }
         val themes=runCatching { ThemeCategory.parseThemes(webText("$site/category/${categoryPath(type)}"),type) }
             .getOrNull()
-        val list=themes ?: ThemeCategory.fallback(type)
+        val list=themes?.let { ThemeCategory.withSearchBacked(it) } ?: ThemeCategory.fallback(type)
         if(themes!=null) synchronized(themeCache) { themeCache[key]=now+themeTtlMs to list }
         return list
     }
 
-    /** One theme's series page (24 per page, ~34 pages per theme). */
+    /** One theme's series page (24 per page, ~34 pages per theme).
+     *  Search-backed themes (no site category page) route to the website search
+     *  with a category-system filter instead. */
     fun themeCatalog(type: ContentType, theme: Theme, page: Int = 1): CatalogPage {
         require(theme.slug.matches(Regex("[a-z0-9-]{1,40}")) && page in 1..100)
+        theme.searchKeyword?.let { return searchTheme(it,page,type) }
         return ThemeCategory.parse(webText("$site/category/${categoryPath(type)}/${theme.slug}?page=$page"),page,theme,type)
+    }
+
+    /**
+     * Search-backed theme catalog: website search for the theme keyword. The site's
+     * search mixes real and AI dramas and carries no reliable per-type marker (the
+     * category_list id system differs per page, genre is always 205), so the results
+     * are shown unfiltered — same approach as the phone-version's keyword themes.
+     */
+    private fun searchTheme(keyword: String, page: Int, type: ContentType): CatalogPage {
+        val encoded = appApi.urlEscape(keyword)
+        val data = extractRouter(webText("$site/search/$encoded?page=$page"))
+        val loader = data.optJSONObject("loaderData") ?: throw IOException("${keyword}数据暂不可用")
+        val section = (loader.keys().asSequence().mapNotNull { loader.optJSONObject(it) }
+            .firstOrNull { it.length() > 0 && it.optJSONArray("searchList") != null })
+            ?: throw IOException("${keyword}数据暂不可用")
+        val rows = section.optJSONArray("searchList") ?: throw IOException("${keyword}数据结构已变化")
+        val items = valid(rows.objects().mapNotNull { it.optJSONObject("video_data")?.let(::card) })
+        return CatalogPage(items, items.isNotEmpty() && page < 100)
     }
 
     /** The four website boards: 总热播榜 / 真人剧榜 / 漫剧榜 / AI剧榜.

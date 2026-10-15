@@ -57,6 +57,26 @@ fun main(args: Array<String>) {
         }
         return
     }
+    if(args.contains("--ai")) {
+        // Live verification of the AI feed channel + the search-backed 穿越 theme.
+        try {
+            val home=repository.home(type=ContentType.AI)
+            check(home.items.isNotEmpty())
+            println("aiHome=${home.items.size}; hasMore=${home.hasMore}; top5=${home.items.take(5).joinToString(" / ") { it.title }}")
+            val themes=repository.themes(ContentType.AI)
+            println("aiThemes=${themes.size}; last=${themes.last().label}(${themes.last().slug})")
+            val chuanyue=themes.first { it.slug=="chuanyue" }
+            val page=repository.themeCatalog(ContentType.AI,chuanyue)
+            println("aiChuanyue=${page.items.size}; hasMore=${page.hasMore}; top5=${page.items.take(5).joinToString(" / ") { it.title }}")
+            val realThemes=repository.themes(ContentType.SHORT)
+            val realChuanyue=realThemes.first { it.slug=="chuanyue" }
+            val realPage=repository.themeCatalog(ContentType.SHORT,realChuanyue)
+            println("shortChuanyue=${realPage.items.size}; hasMore=${realPage.hasMore}; top5=${realPage.items.take(5).joinToString(" / ") { it.title }}")
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
     val type=if(args.contains("--comic")) ContentType.COMIC else ContentType.SHORT
     val keyword=if(type==ContentType.COMIC) "修仙" else "总裁"
     val search=repository.search(keyword,type=type); println("search=${search.items.size}; hasMore=${search.hasMore}")

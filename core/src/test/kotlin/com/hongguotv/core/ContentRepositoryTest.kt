@@ -155,6 +155,55 @@ class ContentRepositoryTest {
         assertEquals("测试结果",result.items.single().title)
     }
 
+    @Test fun aiHomeUsesItsOwnAppFeedGenre() {
+        // The AI tab must not fall into the real-drama feed: home(AI) sends
+        // genre=ai_series + req_scene=ai_series (phone-version hongguoAppGenres).
+        val requests=mutableListOf<Request>()
+        val repo=repository { request ->
+            requests+=request
+            JSONObject().put("code",0).put("data",JSONObject()
+                .put("video_data",JSONArray()).put("has_more",false).put("next_offset",18)).toString()
+        }
+        repo.home(1,ContentType.AI)
+        val payload=JSONObject(okio.Buffer().apply { requests.single().body!!.writeTo(this) }.readUtf8())
+        assertEquals(listOf("ai_series"),payload.getJSONObject("select_items").getJSONArray("genre").let { arr -> (0 until arr.length()).map { arr.optString(it) } })
+        assertEquals("ai_series",payload.getString("req_scene"))
+    }
+
+    @Test fun searchBackedThemeServesSearchResults() {
+        // 穿越 has no site category page: its catalog comes from the website search
+        // unfiltered (the search mixes real and AI dramas with no reliable marker).
+        val repo=repository { request ->
+            assertEquals("/search/%E7%A9%BF%E8%B6%8A",request.url.encodedPath)
+            """<script>_ROUTER_DATA={"loaderData":{"search_(%E7%A9%BF%E8%B6%8A)/page":{"searchList":[
+                {"video_data":{"series_id":"111","series_title":"真人穿越","category_list":[{"category_id":"5000","name":"爱情"},{"category_id":"37","name":"穿越"}]}},
+                {"video_data":{"series_id":"222","series_title":"AI穿越","category_list":[{"category_id":"316","name":"剧情"},{"category_id":"37","name":"穿越"}]}}
+            ],"totalCount":2}}}};</script>"""
+        }
+        val real=repo.themeCatalog(ContentType.SHORT,Theme("chuanyue","穿越","穿越"),1)
+        assertEquals(listOf("111","222"),real.items.map { it.id })
+        val ai=repo.themeCatalog(ContentType.AI,Theme("chuanyue","穿越","穿越"),1)
+        assertEquals(listOf("111","222"),ai.items.map { it.id })
+        assertEquals("真人穿越",ai.items.first().title)
+    }
+
+    @Test fun themesAppendSearchBackedChuanyue() {
+        // The site's parsed theme list omits 穿越; themes() appends it either way.
+        val repo=repository { request ->
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"isSuccess":true,
+                "selectorList":[{"row_id":1,"items":[
+                    {"selector_item_id":"romance","show_name":"爱情"},
+                    {"selector_item_id":"period","show_name":"年代"},
+                    {"selector_item_id":"comeback","show_name":"逆袭"},
+                    {"selector_item_id":"legend","show_name":"传奇"}]}]}}}};</script>"""
+        }
+        val themes=repo.themes(ContentType.SHORT)
+        assertTrue(themes.any { it.slug=="chuanyue" && it.label=="穿越" })
+        assertEquals("穿越",themes.last().label)
+        val aiThemes=repo.themes(ContentType.AI)
+        assertTrue(aiThemes.any { it.slug=="chuanyue" })
+    }
+
     private fun repository(clock: () -> Long = System::currentTimeMillis, respond: (Request) -> String) = ContentRepository(
         OkHttpClient.Builder().addInterceptor { chain ->
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)

@@ -5,8 +5,13 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 
-/** A website theme sub-category: slug + Chinese display name (from selectorList). */
-data class Theme(val slug: String, val label: String)
+/**
+ * A website theme sub-category: slug + Chinese display name (from selectorList).
+ * [searchKeyword] marks a search-backed theme: the site has no category page for it
+ * (e.g. 穿越/time-travel), so its catalog is served from the website search with a
+ * category-system filter instead of /category/{type}/{slug}.
+ */
+data class Theme(val slug: String, val label: String, val searchKeyword: String? = null)
 
 /**
  * Parses the website's theme sub-category pages (/category/real-drama/{theme},
@@ -24,13 +29,25 @@ internal object ThemeCategory {
         "suspense" to "悬疑", "thriller" to "惊悚", "horror" to "恐怖", "supernatural" to "志怪",
         "costume" to "古装", "fantasy" to "玄幻", "wonder" to "奇幻", "urban" to "都市",
         "youth" to "青春", "comedy" to "喜剧", "sci-fi" to "科幻", "disaster" to "灾难",
-        "action-adventure" to "动作冒险", "war" to "战争", "variety" to "综艺", "drama" to "剧情")
+        "action-adventure" to "动作冒险", "war" to "战争", "variety" to "综艺", "drama" to "剧情",
+        "chuanyue" to "穿越")
     private val fallbackComic = listOf(
         "creative" to "脑洞", "fantasy" to "玄幻", "drama" to "剧情", "apocalypse" to "末世",
         "wealthy-family" to "豪门", "wonder" to "奇幻", "sci-fi" to "科幻", "adventure" to "冒险")
     private val fallbackAi = listOf(
         "creative" to "脑洞", "fantasy" to "玄幻", "drama" to "剧情", "apocalypse" to "末世",
-        "wealthy-family" to "豪门", "wonder" to "奇幻", "sci-fi" to "科幻", "adventure" to "冒险")
+        "wealthy-family" to "豪门", "wonder" to "奇幻", "sci-fi" to "科幻", "adventure" to "冒险",
+        "chuanyue" to "穿越")
+
+    /** Search-backed themes the site does not expose as category pages (2026-10):
+     *  the official app offers 穿越 filtering, but the website selector list omits it. */
+    internal val searchBacked = listOf(Theme("chuanyue","穿越","穿越"))
+
+    /** Appends the search-backed themes that a parsed site list is missing. */
+    internal fun withSearchBacked(themes: List<Theme>): List<Theme> {
+        val known=themes.map { it.slug }.toHashSet()
+        return themes + searchBacked.filterNot { it.slug in known }
+    }
 
     fun fallback(type: ContentType): List<Theme> =
         (when(type) {
