@@ -13,8 +13,11 @@ import java.io.IOException
  * [feedThemeId] marks an App-feed-backed theme: the landpage feed accepts a numeric
  * category_dim_theme id (穿越=37) and paginates properly (the website search does
  * not — its ?page= is ignored and it only ever renders 10 rows).
+ * [feedCategory] marks a locally-filtered feed theme: the AI channel ignores the
+ * numeric theme filter, so its 穿越 walks the ai_series feed and keeps only the
+ * rows whose category_schema carries the tag name.
  */
-data class Theme(val slug: String, val label: String, val searchKeyword: String? = null, val feedThemeId: String? = null)
+data class Theme(val slug: String, val label: String, val searchKeyword: String? = null, val feedThemeId: String? = null, val feedCategory: String? = null)
 
 /**
  * Parses the website's theme sub-category pages (/category/real-drama/{theme},
@@ -45,11 +48,13 @@ internal object ThemeCategory {
     /** Themes the site does not expose as category pages (2026-10): the official app
      *  offers 穿越 filtering, but the website selector list omits it. On the real-drama
      *  and comic feeds the landpage API honours category_dim_theme=37 and paginates
-     *  properly; the AI feed IGNORES the filter (verified: it returns the comic list),
-     *  so AI keeps the search chain. */
+     *  properly; the AI feed IGNORES the numeric filter (verified: it returns the comic
+     *  list), so AI 穿越 walks the ai_series feed and filters rows locally by their
+     *  category_schema tag (穿越) — the feed carries ~1 in 6 tagged rows and paginates
+     *  indefinitely, far beyond the 10-row website search. */
     private val chuanyueSlug = "chuanyue"
     internal fun searchBacked(type: ContentType): List<Theme> = when(type) {
-        ContentType.AI -> listOf(Theme(chuanyueSlug,"穿越","穿越"))
+        ContentType.AI -> listOf(Theme(chuanyueSlug,"穿越",feedCategory = "穿越"))
         else -> listOf(Theme(chuanyueSlug,"穿越",feedThemeId = "37"))
     }
     /** Slugs that must never hit /category/{type}/{slug} (their category pages are 404s):

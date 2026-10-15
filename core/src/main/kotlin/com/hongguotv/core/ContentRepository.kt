@@ -73,7 +73,10 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     private fun card(item: JSONObject): Series {
         val o = if (item.optJSONObject("video_data") != null) item.optJSONObject("video_data")!! else item
         val count = o.optInt("episode_cnt", o.optJSONObject("series_episode_info")?.optInt("episode_cnt", 0) ?: 0)
-        val tags = o.optJSONArray("tags") ?: o.optJSONArray("category_list") ?: JSONArray()
+        // The landpage feed rows carry category_schema (a JSON string of {category_id,name}
+        // pairs) instead of tags/category_list; parse it so the card keeps its tag row.
+        val tags = o.optJSONArray("tags") ?: o.optJSONArray("category_list")
+            ?: runCatching { JSONArray(o.str("category_schema")) }.getOrDefault(JSONArray())
         return Series(
             o.str("series_id_str").ifEmpty { o.str("series_id") },
             o.str("series_title").ifEmpty { o.str("series_name").ifEmpty { o.str("title").ifEmpty { item.str("name") } } },
@@ -83,29 +86,45 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             (0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) })
     }
 
+    /** True when a feed row's category_schema contains [name] (e.g. 穿越). */
+    private fun hasCategory(item: JSONObject, name: String): Boolean {
+        val o = if (item.optJSONObject("video_data") != null) item.optJSONObject("video_data")!! else item
+        val schema = o.optJSONArray("category_schema") ?: runCatching { JSONArray(o.str("category_schema")) }.getOrNull() ?: return false
+        return (0 until schema.length()).any { schema.optJSONObject(it)?.str("name") == name }
+    }
+
     private fun valid(rows: List<Series>) = rows.filter { it.id.matches(Regex("[0-9]{1,30}")) && it.title.isNotBlank() }.distinctBy { it.id }
 
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(page in 1..100)
         // The App feed carries one channel per content type (phone-version hongguoAppGenres):
-        // short_play (real drama), comic_series (comic drama) and ai_series (AI drama).
-        // Each channel needs its own req_scene as well, otherwise the server falls back
-        // to the real-drama feed and the tabs would show the same content.
-        // (COMIC used to go through the comic ranking board here — that capped the
-        // "全部" grid at the board's 100 entries; the feed paginates without a cap.)
-        val genre = feedGenre(type)
-        val scene = feedScene(type)
-        return feedPage(page, genre, scene, emptyList())
+        // short_play (real drama) and ai_series (AI drama). Each channel needs its own
+        // req_scene as well, otherwise the server falls back to the real-drama feed and
+        // the tabs would show the same content.
+        // COMIC is different: its feed is a recommendation stream that rotates and runs
+        // dry (all duplicates) after ~6 pages (~108 entries), while the website category
+        // page is a true paginated catalog (24/page, 34 pages = 800 entries). The comic
+        // "全部" grid therefore reads the website page; the feed channel stays reserved
+        // for theme filtering (category_dim_theme).
+        if (type == ContentType.COMIC)
+            return ThemeCategory.parse(webText("$site/category/comic-drama?page=$page"),page,
+                Theme("all","全部"),ContentType.COMIC)
+        return feedPage(page, feedGenre(type), feedScene(type), emptyList())
     }
 
-    /** One landpage feed page. [themeIds] carries a numeric category_dim_theme filter
-     *  (e.g. "37" for 穿越) — honoured on the short_play and comic_series channels. */
-    private fun feedPage(page: Int, genre: String, scene: String, themeIds: List<String>): CatalogPage {
-        val cursorKey = "category:$genre${if(themeIds.isEmpty()) "" else ":theme${themeIds.joinToString(",")}"}"
+    /** One landpage feed page.
+     *  [themeIds] carries a numeric category_dim_theme filter (e.g. "37" for 穿越) —
+     *  honoured on the short_play and comic_series channels only.
+     *  [categoryFilter] filters rows locally by their category_schema name (e.g. 穿越) —
+     *  used on the ai_series channel, where the server ignores the theme filter. */
+    private fun feedPage(page: Int, genre: String, scene: String, themeIds: List<String>, categoryFilter: String? = null): CatalogPage {
+        val cursorKey = "category:$genre${if(themeIds.isEmpty() && categoryFilter==null) "" else ":theme${themeIds.joinToString(",")}${categoryFilter ?: ""}"}"
         // The App feed is cursor-based: the server returns next_offset + session_id and
         // may return ANY number of items per call (5, 14, 23… — it used to be a fixed 18).
         // Page 1 keeps fetching forward until a full shelf (12+) is collected, so the home
         // shelves and the short-drama grid always open with a proper page of content.
+        // With a local category filter the raw feed is thinned out (only ~1 in 6 rows
+        // carries 穿越), so the fill-up loop runs on every page, not just page 1.
         var cursor = synchronized(catalogCursors) { catalogCursors[cursorKey] }
         var offset = if (page == 1) 0 else cursor?.first ?: (page - 1) * 18
         var sessionId = if (page == 1) "" else cursor?.second ?: ""
@@ -125,14 +144,15 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                     .put("online_time", JSONArray()).put("creation_status", JSONArray()))
             val data = appRequest("/reading/distribution/category/landpage/v/", payload.toString())
             val rows = data.optJSONObject("data")?.optJSONArray("video_data") ?: throw IOException("首页数据暂不可用")
-            all += valid(rows.objects().map(::card))
+            all += valid(rows.objects().filter { categoryFilter==null || hasCategory(it,categoryFilter) }.map(::card))
             hasMore = data.optJSONObject("data")?.optBoolean("has_more", false) ?: false
             offset = data.optJSONObject("data")?.optInt("next_offset", offset + 18) ?: offset + 18
             sessionId = data.optJSONObject("data")?.str("session_id") ?: sessionId
             synchronized(catalogCursors) { catalogCursors[cursorKey] = offset to sessionId }
             round++
             // Enough content, nothing more, or a safety cap on follow-up rounds.
-            if (page != 1 || all.size >= 12 || !hasMore || round >= 3) break
+            val target = if (categoryFilter==null) 12 else 18
+            if ((page != 1 && categoryFilter==null) || all.size >= target || !hasMore || round >= (if (categoryFilter==null) 3 else 6)) break
         }
         return CatalogPage(all, hasMore && page < 100)
     }
@@ -172,14 +192,16 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      *  Feed-backed themes (穿越 on real/comic tabs) route to the landpage feed with a
      *  numeric category_dim_theme filter — the website search's ?page= is ignored (it
      *  only ever renders 10 rows), so the feed is the only chain that paginates.
-     *  Search-backed themes (穿越 on the AI tab, where the feed filter is ignored)
-     *  route to the website search. The slug check is defensive: a stale cached Theme
-     *  without either marker must still route away from /category/{type}/chuanyue
-     *  (a 404). */
+     *  On the AI tab the server IGNORES the theme filter (verified: it returns the
+     *  comic list), so 穿越 there walks the AI feed and filters rows locally by their
+     *  category_schema tag. The slug check is defensive: a stale cached Theme without
+     *  either marker must still route away from /category/{type}/chuanyue (a 404). */
     fun themeCatalog(type: ContentType, theme: Theme, page: Int = 1): CatalogPage {
         require(theme.slug.matches(Regex("[a-z0-9-]{1,40}")) && page in 1..100)
         if(theme.feedThemeId!=null && type!=ContentType.AI)
             return feedPage(page, feedGenre(type), feedScene(type), listOf(theme.feedThemeId))
+        if(theme.feedCategory!=null)
+            return feedPage(page, feedGenre(type), feedScene(type), emptyList(), theme.feedCategory)
         if(theme.searchKeyword!=null || theme.slug in ThemeCategory.searchBackedSlugs)
             return searchTheme(theme.searchKeyword ?: theme.label,page,type)
         return ThemeCategory.parse(webText("$site/category/${categoryPath(type)}/${theme.slug}?page=$page"),page,theme,type)

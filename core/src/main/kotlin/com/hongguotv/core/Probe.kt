@@ -58,18 +58,19 @@ fun main(args: Array<String>) {
         return
     }
     if(args.contains("--comicfeed")) {
-        // Live verification of the comic_series feed channel (unlimited pagination,
-        // replaces the 100-entry rank board) + the feed-backed 穿越 theme.
+        // Live verification: comic "全部" from the website category catalog (800
+        // entries, 34 pages), chuanyue via the landpage theme filter (real/comic)
+        // and via the locally-filtered ai_series feed (AI).
         try {
             val home=repository.home(type=ContentType.COMIC)
             check(home.items.isNotEmpty())
-            println("comicHome=${home.items.size}; hasMore=${home.hasMore}; top5=${home.items.take(5).joinToString(" / ") { it.title }}")
+            println("comicHome=${home.items.size}; hasMore=${home.hasMore}; top3=${home.items.take(3).joinToString(" / ") { it.title }}")
             val seen=home.items.map { it.id }.toMutableSet()
-            for(p in 2..7) {
+            for(p in 2..8) {
                 val next=repository.home(p,ContentType.COMIC)
                 val fresh=next.items.filterNot { it.id in seen }
                 seen+=fresh.map { it.id }
-                if(p in listOf(2,5,7)) println("comicPage$p: items=${next.items.size}; fresh=${fresh.size}; uniqueTotal=${seen.size}; hasMore=${next.hasMore}")
+                if(p in listOf(2,5,8)) println("comicPage$p: items=${next.items.size}; fresh=${fresh.size}; uniqueTotal=${seen.size}; hasMore=${next.hasMore}")
                 if(!next.hasMore) break
             }
             for(type in listOf(ContentType.SHORT,ContentType.COMIC,ContentType.AI)) {
