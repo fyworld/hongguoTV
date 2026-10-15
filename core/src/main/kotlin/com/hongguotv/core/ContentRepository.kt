@@ -87,14 +87,21 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
 
     fun home(page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(page in 1..100)
-        if (type == ContentType.COMIC) return comicRanking(page)
         // The App feed carries one channel per content type (phone-version hongguoAppGenres):
-        // short_play (real drama) and ai_series (AI drama). The AI channel needs its own
-        // req_scene as well, otherwise the server falls back to the real-drama feed and
-        // the AI tab would show the same content as the short-drama tab.
-        val genre = if (type == ContentType.AI) "ai_series" else "short_play"
-        val scene = if (type == ContentType.AI) "ai_series" else "default"
-        val cursorKey = "category:$genre"
+        // short_play (real drama), comic_series (comic drama) and ai_series (AI drama).
+        // Each channel needs its own req_scene as well, otherwise the server falls back
+        // to the real-drama feed and the tabs would show the same content.
+        // (COMIC used to go through the comic ranking board here — that capped the
+        // "全部" grid at the board's 100 entries; the feed paginates without a cap.)
+        val genre = feedGenre(type)
+        val scene = feedScene(type)
+        return feedPage(page, genre, scene, emptyList())
+    }
+
+    /** One landpage feed page. [themeIds] carries a numeric category_dim_theme filter
+     *  (e.g. "37" for 穿越) — honoured on the short_play and comic_series channels. */
+    private fun feedPage(page: Int, genre: String, scene: String, themeIds: List<String>): CatalogPage {
+        val cursorKey = "category:$genre${if(themeIds.isEmpty()) "" else ":theme${themeIds.joinToString(",")}"}"
         // The App feed is cursor-based: the server returns next_offset + session_id and
         // may return ANY number of items per call (5, 14, 23… — it used to be a fixed 18).
         // Page 1 keeps fetching forward until a full shelf (12+) is collected, so the home
@@ -113,7 +120,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                 .put("session_id", sessionId).put("filter_ids", "")
                 .put("select_items", JSONObject()
                     .put("genre", JSONArray().put(genre)).put("sort", JSONArray().put("online_time"))
-                    .put("gender", JSONArray()).put("category_dim_theme", JSONArray())
+                    .put("gender", JSONArray()).put("category_dim_theme", JSONArray(themeIds))
                     .put("category_dim_role", JSONArray()).put("category_dim_epoch", JSONArray())
                     .put("online_time", JSONArray()).put("creation_status", JSONArray()))
             val data = appRequest("/reading/distribution/category/landpage/v/", payload.toString())
@@ -156,21 +163,33 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         }
         val themes=runCatching { ThemeCategory.parseThemes(webText("$site/category/${categoryPath(type)}"),type) }
             .getOrNull()
-        val list=themes?.let { ThemeCategory.withSearchBacked(it) } ?: ThemeCategory.fallback(type)
+        val list=themes?.let { ThemeCategory.withSearchBacked(it,type) } ?: ThemeCategory.fallback(type)
         if(themes!=null) synchronized(themeCache) { themeCache[key]=now+themeTtlMs to list }
         return list
     }
 
-    /** One theme's series page (24 per page, ~34 pages per theme).
-     *  Search-backed themes (no site category page) route to the website search
-     *  with a category-system filter instead. The slug check is defensive: a stale
-     *  cached Theme without searchKeyword must still route to the search, never to
-     *  /category/{type}/chuanyue (a 404). */
+    /** One theme's series page.
+     *  Feed-backed themes (穿越 on real/comic tabs) route to the landpage feed with a
+     *  numeric category_dim_theme filter — the website search's ?page= is ignored (it
+     *  only ever renders 10 rows), so the feed is the only chain that paginates.
+     *  Search-backed themes (穿越 on the AI tab, where the feed filter is ignored)
+     *  route to the website search. The slug check is defensive: a stale cached Theme
+     *  without either marker must still route away from /category/{type}/chuanyue
+     *  (a 404). */
     fun themeCatalog(type: ContentType, theme: Theme, page: Int = 1): CatalogPage {
         require(theme.slug.matches(Regex("[a-z0-9-]{1,40}")) && page in 1..100)
+        if(theme.feedThemeId!=null && type!=ContentType.AI)
+            return feedPage(page, feedGenre(type), feedScene(type), listOf(theme.feedThemeId))
         if(theme.searchKeyword!=null || theme.slug in ThemeCategory.searchBackedSlugs)
             return searchTheme(theme.searchKeyword ?: theme.label,page,type)
         return ThemeCategory.parse(webText("$site/category/${categoryPath(type)}/${theme.slug}?page=$page"),page,theme,type)
+    }
+
+    private fun feedGenre(type: ContentType) = when(type) {
+        ContentType.COMIC -> "comic_series"; ContentType.AI -> "ai_series"; else -> "short_play"
+    }
+    private fun feedScene(type: ContentType) = when(type) {
+        ContentType.COMIC -> "comic_series"; ContentType.AI -> "ai_series"; else -> "default"
     }
 
     /**
@@ -178,6 +197,9 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      * search mixes real and AI dramas and carries no reliable per-type marker (the
      * category_list id system differs per page, genre is always 205), so the results
      * are shown unfiltered — same approach as the phone-version's keyword themes.
+     * The SSR page ignores ?page= and always renders the same first 10 rows, so there
+     * is no real pagination: hasMore is false (a second page would only re-serve
+     * duplicates and spin the infinite scroll).
      */
     private fun searchTheme(keyword: String, page: Int, type: ContentType): CatalogPage {
         val encoded = appApi.urlEscape(keyword)
@@ -188,7 +210,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             ?: throw IOException("${keyword}数据暂不可用")
         val rows = section.optJSONArray("searchList") ?: throw IOException("${keyword}数据结构已变化")
         val items = valid(rows.objects().mapNotNull { it.optJSONObject("video_data")?.let(::card) })
-        return CatalogPage(items, items.isNotEmpty() && page < 100)
+        return CatalogPage(items, false)
     }
 
     /** The four website boards: 总热播榜 / 真人剧榜 / 漫剧榜 / AI剧榜.

@@ -10,8 +10,11 @@ import java.io.IOException
  * [searchKeyword] marks a search-backed theme: the site has no category page for it
  * (e.g. 穿越/time-travel), so its catalog is served from the website search with a
  * category-system filter instead of /category/{type}/{slug}.
+ * [feedThemeId] marks an App-feed-backed theme: the landpage feed accepts a numeric
+ * category_dim_theme id (穿越=37) and paginates properly (the website search does
+ * not — its ?page= is ignored and it only ever renders 10 rows).
  */
-data class Theme(val slug: String, val label: String, val searchKeyword: String? = null)
+data class Theme(val slug: String, val label: String, val searchKeyword: String? = null, val feedThemeId: String? = null)
 
 /**
  * Parses the website's theme sub-category pages (/category/real-drama/{theme},
@@ -39,17 +42,24 @@ internal object ThemeCategory {
         "creative" to "脑洞", "fantasy" to "玄幻", "drama" to "剧情", "apocalypse" to "末世",
         "wealthy-family" to "豪门", "wonder" to "奇幻", "sci-fi" to "科幻", "adventure" to "冒险")
 
-    /** Search-backed themes the site does not expose as category pages (2026-10):
-     *  the official app offers 穿越 filtering, but the website selector list omits it. */
-    internal val searchBacked = listOf(Theme("chuanyue","穿越","穿越"))
-    /** Slugs that must route to the search chain even when a stale Theme object
-     *  carries no searchKeyword (their category pages are 404s). */
-    internal val searchBackedSlugs = searchBacked.map { it.slug }.toHashSet()
+    /** Themes the site does not expose as category pages (2026-10): the official app
+     *  offers 穿越 filtering, but the website selector list omits it. On the real-drama
+     *  and comic feeds the landpage API honours category_dim_theme=37 and paginates
+     *  properly; the AI feed IGNORES the filter (verified: it returns the comic list),
+     *  so AI keeps the search chain. */
+    private val chuanyueSlug = "chuanyue"
+    internal fun searchBacked(type: ContentType): List<Theme> = when(type) {
+        ContentType.AI -> listOf(Theme(chuanyueSlug,"穿越","穿越"))
+        else -> listOf(Theme(chuanyueSlug,"穿越",feedThemeId = "37"))
+    }
+    /** Slugs that must never hit /category/{type}/{slug} (their category pages are 404s):
+     *  they route to the feed (feedThemeId) or the search (searchKeyword) instead. */
+    internal val searchBackedSlugs = setOf(chuanyueSlug)
 
-    /** Appends the search-backed themes that a parsed site list is missing. */
-    internal fun withSearchBacked(themes: List<Theme>): List<Theme> {
+    /** Appends the search/feed-backed themes that a parsed site list is missing. */
+    internal fun withSearchBacked(themes: List<Theme>, type: ContentType): List<Theme> {
         val known=themes.map { it.slug }.toHashSet()
-        return themes + searchBacked.filterNot { it.slug in known }
+        return themes + searchBacked(type).filterNot { it.slug in known }
     }
 
     fun fallback(type: ContentType): List<Theme> =
@@ -57,7 +67,7 @@ internal object ThemeCategory {
             ContentType.COMIC -> fallbackComic
             ContentType.AI -> fallbackAi
             else -> fallbackReal
-        }).map { Theme(it.first,it.second) })
+        }).map { Theme(it.first,it.second) },type)
 
     private fun routeNode(html: String): JSONObject {
         val node=ContentRepository.extractRouter(html).optJSONObject("loaderData")

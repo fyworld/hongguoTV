@@ -916,7 +916,9 @@ class MainActivity: Activity() {
             // Deduplicate against what is already on screen, then append.
             val known=catalog.map { it.id }.toHashSet()
             val fresh=result.items.filterNot { it.id in known }
-            catalog=catalog+fresh; hasMore=result.hasMore; page=nextPage
+            // A page that adds nothing new must end the scroll: rebuilding the grid with
+            // the same items re-triggers focus-driven loading and the grid jitters forever.
+            catalog=catalog+fresh; hasMore=result.hasMore && fresh.isNotEmpty(); page=nextPage
             // Rebuild the grid with the appended items; focus/scroll are restored from
             // catalogFocus + scrollPositions, so nothing jumps. rebuildingGrid stops the
             // nav bar's focus-to-switch listener from firing while the old focused card

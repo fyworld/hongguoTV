@@ -171,8 +171,9 @@ class ContentRepositoryTest {
     }
 
     @Test fun searchBackedThemeServesSearchResults() {
-        // 穿越 has no site category page: its catalog comes from the website search
-        // unfiltered (the search mixes real and AI dramas with no reliable marker).
+        // 穿越 on the AI tab has no site category page AND the feed filter is ignored
+        // there: its catalog comes from the website search unfiltered (the search mixes
+        // real and AI dramas with no reliable marker).
         val repo=repository { request ->
             assertEquals("/search/%E7%A9%BF%E8%B6%8A",request.url.encodedPath)
             """<script>_ROUTER_DATA={"loaderData":{"search_(%E7%A9%BF%E8%B6%8A)/page":{"searchList":[
@@ -180,11 +181,35 @@ class ContentRepositoryTest {
                 {"video_data":{"series_id":"222","series_title":"AI穿越","category_list":[{"category_id":"316","name":"剧情"},{"category_id":"37","name":"穿越"}]}}
             ],"totalCount":2}}}};</script>"""
         }
-        val real=repo.themeCatalog(ContentType.SHORT,Theme("chuanyue","穿越","穿越"),1)
-        assertEquals(listOf("111","222"),real.items.map { it.id })
         val ai=repo.themeCatalog(ContentType.AI,Theme("chuanyue","穿越","穿越"),1)
         assertEquals(listOf("111","222"),ai.items.map { it.id })
         assertEquals("真人穿越",ai.items.first().title)
+        // The SSR search ignores ?page= (always the same 10 rows): no pagination.
+        assertFalse(ai.hasMore)
+    }
+
+    @Test fun feedBackedChuanyueUsesTheLandpageThemeFilter() {
+        // 穿越 on the real/comic tabs routes to the landpage feed with the numeric
+        // category_dim_theme id 37 — the only chain that paginates (the website
+        // search's ?page= is ignored).
+        val requests=mutableListOf<Request>()
+        val repo=repository { request ->
+            requests+=request
+            JSONObject().put("code",0).put("data",JSONObject()
+                .put("video_data",JSONArray().put(JSONObject()
+                    .put("series_id","111").put("title","真人穿越")))
+                .put("has_more",false).put("next_offset",18).put("session_id","s1")).toString()
+        }
+        val page=repo.themeCatalog(ContentType.SHORT,Theme("chuanyue","穿越",feedThemeId = "37"),1)
+        assertEquals(listOf("111"),page.items.map { it.id })
+        assertFalse(page.hasMore)
+        val payload=JSONObject(okio.Buffer().apply { requests.single().body!!.writeTo(this) }.readUtf8())
+        assertEquals(listOf("short_play"),payload.getJSONObject("select_items").getJSONArray("genre").let { arr -> (0 until arr.length()).map { arr.optString(it) } })
+        assertEquals(listOf("37"),payload.getJSONObject("select_items").getJSONArray("category_dim_theme").let { arr -> (0 until arr.length()).map { arr.optString(it) } })
+        val comic=repo.themeCatalog(ContentType.COMIC,Theme("chuanyue","穿越",feedThemeId = "37"),1)
+        val comicPayload=JSONObject(okio.Buffer().apply { requests.last().body!!.writeTo(this) }.readUtf8())
+        assertEquals(listOf("comic_series"),comicPayload.getJSONObject("select_items").getJSONArray("genre").let { arr -> (0 until arr.length()).map { arr.optString(it) } })
+        assertEquals(listOf("37"),comicPayload.getJSONObject("select_items").getJSONArray("category_dim_theme").let { arr -> (0 until arr.length()).map { arr.optString(it) } })
     }
 
     @Test fun themesAppendSearchBackedChuanyue() {
@@ -200,29 +225,42 @@ class ContentRepositoryTest {
         val themes=repo.themes(ContentType.SHORT)
         assertTrue(themes.any { it.slug=="chuanyue" && it.label=="穿越" })
         assertEquals("穿越",themes.last().label)
+        // On real/comic tabs the appended 穿越 is feed-backed (theme id 37);
+        // on the AI tab it stays search-backed (the feed filter is ignored there).
+        assertEquals("37",themes.last().feedThemeId)
+        assertNull(themes.last().searchKeyword)
         val aiThemes=repo.themes(ContentType.AI)
         assertTrue(aiThemes.any { it.slug=="chuanyue" })
+        assertNull(aiThemes.last().feedThemeId)
+        assertEquals("穿越",aiThemes.last().searchKeyword)
     }
 
     @Test fun fallbackChuanyueRoutesToSearchNotCategory404() {
         // Regression (v1.0.50): when themes() falls back to the built-in list, 穿越
-        // must still carry its searchKeyword — /category/{type}/chuanyue is a 404.
+        // must still route away from /category/{type}/chuanyue (a 404) — feed-backed
+        // on the real tab (theme id 37), search-backed on the AI tab.
         val repo=repository { request ->
             if(request.url.encodedPath.startsWith("/search/"))
                 """<script>_ROUTER_DATA={"loaderData":{"search_(x)/page":{"searchList":[
                     {"video_data":{"series_id":"111","series_title":"穿越剧","category_list":[{"category_id":"37","name":"穿越"}]}}
                 ],"totalCount":1}}}};</script>"""
-            else throw java.io.IOException("category page should not be requested for chuanyue")
+            else JSONObject().put("code",0).put("data",JSONObject()
+                .put("video_data",JSONArray().put(JSONObject()
+                    .put("series_id","111").put("title","穿越剧")))
+                .put("has_more",false).put("next_offset",18)).toString()
         }
         val fallbackThemes=ThemeCategory.fallback(ContentType.SHORT)
         val chuanyue=fallbackThemes.first { it.slug=="chuanyue" }
-        assertNotNull("fallback must carry searchKeyword",chuanyue.searchKeyword)
+        assertNotNull("fallback must carry feedThemeId on the real tab",chuanyue.feedThemeId)
         val page=repo.themeCatalog(ContentType.SHORT,chuanyue,1)
         assertEquals(listOf("111"),page.items.map { it.id })
-        // Defensive slug routing: even a stale Theme without searchKeyword goes to search.
+        // Defensive slug routing: even a stale Theme without any marker never hits
+        // the 404 category page — it falls through to the search chain.
         val stale=Theme("chuanyue","穿越")
         val page2=repo.themeCatalog(ContentType.SHORT,stale,1)
         assertEquals(listOf("111"),page2.items.map { it.id })
+        val aiFallback=ThemeCategory.fallback(ContentType.AI).first { it.slug=="chuanyue" }
+        assertNotNull("AI fallback must carry searchKeyword",aiFallback.searchKeyword)
     }
 
     private fun repository(clock: () -> Long = System::currentTimeMillis, respond: (Request) -> String) = ContentRepository(
@@ -301,32 +339,37 @@ class ContentRepositoryTest {
         assertFalse(result.hasMore)
     }
 
-    @Test fun comicHomeUsesDedicatedRank() {
+    @Test fun comicHomeUsesTheComicSeriesFeed() {
+        // The comic "全部" grid must come from the comic_series App feed (paginates
+        // without a cap), not from the 100-entry ranking board.
+        val requests=mutableListOf<Request>()
+        val repo=repository { request ->
+            requests+=request
+            JSONObject().put("code",0).put("data",JSONObject()
+                .put("video_data",JSONArray()).put("has_more",false).put("next_offset",18)).toString()
+        }
+        repo.home(1,ContentType.COMIC)
+        val payload=JSONObject(okio.Buffer().apply { requests.single().body!!.writeTo(this) }.readUtf8())
+        assertEquals(listOf("comic_series"),payload.getJSONObject("select_items").getJSONArray("genre").let { arr -> (0 until arr.length()).map { arr.optString(it) } })
+        assertEquals("comic_series",payload.getString("req_scene"))
+    }
+
+    @Test fun comicRankingIsStillServedByTheBoard() {
         val repo=repository { request ->
             assertEquals("/rank/hot-comic-drama",request.url.encodedPath)
             assertEquals("2",request.url.queryParameter("page"))
             currentRank(rankPayload(2,2))
         }
-        val page=repo.home(2,ContentType.COMIC)
+        val page=repo.comicRanking(2)
         assertEquals("测试漫剧",page.items.single().title)
         assertEquals("https://example.com/cover.jpg",page.items.single().cover)
         assertEquals("全 12 集",page.items.single().badge)
         assertFalse(page.hasMore)
     }
 
-    @Test fun legacyRankIsStillSupported() {
-        val repo=repository { script("r",JSONArray().put("rank_hot-comic-drama/page").put("content").put(rankPayload())) }
-        assertTrue(repo.home(1,ContentType.COMIC).hasMore)
-    }
-
-    @Test fun comicHomeDoesNotUseUnrelatedRankData() {
-        val repo=repository { script("r",JSONArray().put("rank_hot-real-drama/page").put("content").put(rankPayload())) }
-        assertThrows(IOException::class.java) { repo.home(1,ContentType.COMIC) }
-    }
-
     @Test fun rejectedComicRankRemainsAnError() {
         val repo=repository { currentRank(rankPayload().put("isSuccess",false)) }
-        assertThrows(IOException::class.java) { repo.home(1,ContentType.COMIC) }
+        assertThrows(IOException::class.java) { repo.comicRanking(1) }
     }
 
     @Test fun renderedComicRankWorksWhenStreamedPayloadIsMissing() {
@@ -336,7 +379,7 @@ class ContentRepositoryTest {
                 <h2 id="rank-title-123">测试 &amp; 漫剧</h2><p class="pc-description-example">简介</p><p class="pc-metrics-example">123万热度</p></article>
                 <nav aria-label="榜单分页"><a href="/rank/hot-comic-drama?page=1">1</a><span aria-current="page">2</span><a href="/rank/hot-comic-drama?page=3">3</a></nav>"""
         }
-        val page=repo.home(2,ContentType.COMIC)
+        val page=repo.comicRanking(2)
         assertEquals("测试 & 漫剧",page.items.single().title)
         assertEquals("https://example.com/a.jpg",page.items.single().cover)
         assertTrue(page.hasMore)
