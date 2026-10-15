@@ -48,6 +48,11 @@ object UpdateMirrors {
         "https://gh-proxy.com/https://github.com",
         "https://ghproxy.net/https://github.com"
     )
+    /** Each prefix proxies the canonical GitHub URL: strip GitHub's origin and keep the
+     *  path, so "https://github.com" + path and "https://gh-proxy.com/https://github.com"
+     *  + path both resolve to a single hostname (the old removePrefix("https://") built
+     *  doubled-host URLs like github.com/github.com/... which 404 on every channel). */
+    fun downloadUrl(update: AppUpdate, prefix: String): String = prefix + update.downloadUrl.removePrefix("https://github.com")
 }
 
 /** Streaming validation also protects a cached APK from partial downloads and stale metadata. */
@@ -126,7 +131,7 @@ class AppUpdateRepository : java.io.Closeable {
         var lastError: IOException? = null
         for (prefix in UpdateMirrors.prefixes) {
             try {
-                http.newCall(request("$prefix/${update.downloadUrl.removePrefix("https://")}")).execute().use { response ->
+                http.newCall(request(UpdateMirrors.downloadUrl(update, prefix))).execute().use { response ->
                     if (!response.isSuccessful) throw IOException("安装包下载失败，请稍后重试")
                     val body = response.body ?: throw IOException("安装包为空")
                     if (body.contentLength() >= 0 && body.contentLength() != update.size) throw IOException("安装包长度异常")

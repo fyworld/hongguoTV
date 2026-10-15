@@ -90,4 +90,16 @@ class AppUpdatesTest {
             assertTrue(prefix.endsWith("github.com") || prefix.endsWith("/https://github.com"))
         }
     }
+    @Test fun mirrorDownloadUrlsHaveASingleHostname() {
+        val update = update()
+        // The canonical GitHub URL itself.
+        assertEquals(update.downloadUrl, UpdateMirrors.downloadUrl(update, "https://github.com"))
+        for (prefix in UpdateMirrors.prefixes) {
+            val url = UpdateMirrors.downloadUrl(update, prefix)
+            // No doubled-host segment in the path: github.com/github.com/... 404s.
+            assertFalse(url.contains("github.com/github.com"))
+            assertTrue(url.startsWith(prefix))
+            assertTrue(url.endsWith("/fyworld/hongguoTV/releases/download/${update.tag}/${update.fileName}"))
+        }
+    }
 }
