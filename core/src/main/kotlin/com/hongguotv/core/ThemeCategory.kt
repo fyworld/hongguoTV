@@ -23,25 +23,28 @@ data class Theme(val slug: String, val label: String, val searchKeyword: String?
  */
 internal object ThemeCategory {
     // Fallback theme lists (verified 2026-10): real-drama 24, comic-drama 8, ai-drama 8.
+    // 穿越 is NOT listed here: it is search-backed (searchBacked below) and must never
+    // appear as a plain category-page theme — /category/{type}/chuanyue is a 404.
     private val fallbackReal = listOf(
         "romance" to "爱情", "period" to "年代", "comeback" to "逆袭", "legend" to "传奇",
         "growth" to "成长", "family" to "家庭", "clan" to "家族", "cute-kids" to "萌宝",
         "suspense" to "悬疑", "thriller" to "惊悚", "horror" to "恐怖", "supernatural" to "志怪",
         "costume" to "古装", "fantasy" to "玄幻", "wonder" to "奇幻", "urban" to "都市",
         "youth" to "青春", "comedy" to "喜剧", "sci-fi" to "科幻", "disaster" to "灾难",
-        "action-adventure" to "动作冒险", "war" to "战争", "variety" to "综艺", "drama" to "剧情",
-        "chuanyue" to "穿越")
+        "action-adventure" to "动作冒险", "war" to "战争", "variety" to "综艺", "drama" to "剧情")
     private val fallbackComic = listOf(
         "creative" to "脑洞", "fantasy" to "玄幻", "drama" to "剧情", "apocalypse" to "末世",
         "wealthy-family" to "豪门", "wonder" to "奇幻", "sci-fi" to "科幻", "adventure" to "冒险")
     private val fallbackAi = listOf(
         "creative" to "脑洞", "fantasy" to "玄幻", "drama" to "剧情", "apocalypse" to "末世",
-        "wealthy-family" to "豪门", "wonder" to "奇幻", "sci-fi" to "科幻", "adventure" to "冒险",
-        "chuanyue" to "穿越")
+        "wealthy-family" to "豪门", "wonder" to "奇幻", "sci-fi" to "科幻", "adventure" to "冒险")
 
     /** Search-backed themes the site does not expose as category pages (2026-10):
      *  the official app offers 穿越 filtering, but the website selector list omits it. */
     internal val searchBacked = listOf(Theme("chuanyue","穿越","穿越"))
+    /** Slugs that must route to the search chain even when a stale Theme object
+     *  carries no searchKeyword (their category pages are 404s). */
+    internal val searchBackedSlugs = searchBacked.map { it.slug }.toHashSet()
 
     /** Appends the search-backed themes that a parsed site list is missing. */
     internal fun withSearchBacked(themes: List<Theme>): List<Theme> {
@@ -50,11 +53,11 @@ internal object ThemeCategory {
     }
 
     fun fallback(type: ContentType): List<Theme> =
-        (when(type) {
+        withSearchBacked((when(type) {
             ContentType.COMIC -> fallbackComic
             ContentType.AI -> fallbackAi
             else -> fallbackReal
-        }).map { Theme(it.first,it.second) }
+        }).map { Theme(it.first,it.second) })
 
     private fun routeNode(html: String): JSONObject {
         val node=ContentRepository.extractRouter(html).optJSONObject("loaderData")

@@ -204,6 +204,27 @@ class ContentRepositoryTest {
         assertTrue(aiThemes.any { it.slug=="chuanyue" })
     }
 
+    @Test fun fallbackChuanyueRoutesToSearchNotCategory404() {
+        // Regression (v1.0.50): when themes() falls back to the built-in list, 穿越
+        // must still carry its searchKeyword — /category/{type}/chuanyue is a 404.
+        val repo=repository { request ->
+            if(request.url.encodedPath.startsWith("/search/"))
+                """<script>_ROUTER_DATA={"loaderData":{"search_(x)/page":{"searchList":[
+                    {"video_data":{"series_id":"111","series_title":"穿越剧","category_list":[{"category_id":"37","name":"穿越"}]}}
+                ],"totalCount":1}}}};</script>"""
+            else throw java.io.IOException("category page should not be requested for chuanyue")
+        }
+        val fallbackThemes=ThemeCategory.fallback(ContentType.SHORT)
+        val chuanyue=fallbackThemes.first { it.slug=="chuanyue" }
+        assertNotNull("fallback must carry searchKeyword",chuanyue.searchKeyword)
+        val page=repo.themeCatalog(ContentType.SHORT,chuanyue,1)
+        assertEquals(listOf("111"),page.items.map { it.id })
+        // Defensive slug routing: even a stale Theme without searchKeyword goes to search.
+        val stale=Theme("chuanyue","穿越")
+        val page2=repo.themeCatalog(ContentType.SHORT,stale,1)
+        assertEquals(listOf("111"),page2.items.map { it.id })
+    }
+
     private fun repository(clock: () -> Long = System::currentTimeMillis, respond: (Request) -> String) = ContentRepository(
         OkHttpClient.Builder().addInterceptor { chain ->
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)

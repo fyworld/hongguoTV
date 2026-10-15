@@ -163,10 +163,13 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
 
     /** One theme's series page (24 per page, ~34 pages per theme).
      *  Search-backed themes (no site category page) route to the website search
-     *  with a category-system filter instead. */
+     *  with a category-system filter instead. The slug check is defensive: a stale
+     *  cached Theme without searchKeyword must still route to the search, never to
+     *  /category/{type}/chuanyue (a 404). */
     fun themeCatalog(type: ContentType, theme: Theme, page: Int = 1): CatalogPage {
         require(theme.slug.matches(Regex("[a-z0-9-]{1,40}")) && page in 1..100)
-        theme.searchKeyword?.let { return searchTheme(it,page,type) }
+        if(theme.searchKeyword!=null || theme.slug in ThemeCategory.searchBackedSlugs)
+            return searchTheme(theme.searchKeyword ?: theme.label,page,type)
         return ThemeCategory.parse(webText("$site/category/${categoryPath(type)}/${theme.slug}?page=$page"),page,theme,type)
     }
 
