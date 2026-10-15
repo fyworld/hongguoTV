@@ -1462,7 +1462,7 @@ class MainActivity: Activity() {
         pendingDetail=series; detailAutoplay=autoplay
         invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false
         val body=base(series.title); message(body,"正在加载剧集…")
-        work({ repository.detail(series.id) }, { result ->
+        work({ repository.detail(series.id,tabContentType()) }, { result ->
             detail=result; library.observeFavorite(series.id,result.episodes.size,System.currentTimeMillis(),acknowledge=true)
             val progress=library.progress(series.id)
             val target=ResumePlayback.target(result.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true)
@@ -1570,7 +1570,7 @@ class MainActivity: Activity() {
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
-        work({ prefetched ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality)).prepare() }, { remote ->
+        work({ prefetched ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality,data.contentType)).prepare() }, { remote ->
             video=remote; quality=remote.info.quality
             val p=player ?: run {
                 val load=DefaultLoadControl.Builder().setBufferDurationsMs(15000,30000,1000,2000).setTargetBufferBytes(12*1024*1024).build()
@@ -1633,7 +1633,7 @@ class MainActivity: Activity() {
         val p=player ?: return; val data=detail ?: return
         if(!foreground || !p.isPlaying || !library.autoNext || playError || sleepStopped || episodeIndex>=data.episodes.lastIndex) return
         if(!PrefetchPolicy.nearEnd(p.currentPosition,p.duration,p.playbackParameters.speed)) return
-        val id=data.episodes[episodeIndex+1]; val quality=library.maxQuality; val key="$id:$quality"
+        val id=data.episodes[episodeIndex+1]; val quality=library.maxQuality; val key="$id:$quality"; val type=data.contentType
         if(preparedNext.isFresh(key) || prefetchJob?.isDone==false) return
         val now=android.os.SystemClock.elapsedRealtime()
         if(readySince==0L || now-readySince<3000 || p.bufferedPosition-p.currentPosition<5000) return
@@ -1647,7 +1647,7 @@ class MainActivity: Activity() {
             var remote: RemoteVideo?=null
             try {
                 val prepared=scope.run {
-                    RemoteVideo(http,source.stream(id,quality)).also { remote=it; it.warm() }
+                    RemoteVideo(http,source.stream(id,quality,type)).also { remote=it; it.warm() }
                 }
                 if(preparedNext.complete(ticket,key,prepared)) android.util.Log.i("HongguoTV","Next episode prepared near end")
             } catch(_: Exception) { remote?.close() }

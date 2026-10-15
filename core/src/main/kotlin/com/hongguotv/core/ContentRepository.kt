@@ -20,7 +20,7 @@ data class Series(val id: String, val title: String, val cover: String = "", val
     fun toJson() = JSONObject().put("id",id).put("title",title).put("cover",cover).put("description",description).put("badge",badge).put("tags",tags)
     companion object { fun fromJson(o: JSONObject) = Series(o.str("id"),o.str("title"),o.str("cover"),o.str("description"),o.str("badge"),o.str("tags")) }
 }
-data class Detail(val series: Series, val episodes: List<String>)
+data class Detail(val series: Series, val episodes: List<String>, val contentType: ContentType = ContentType.SHORT)
 data class RankPosition(val rank: Int?, val heat: String)
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
 data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null, val warning: String = "")
@@ -132,7 +132,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return out.toString()
     }
 
-    private fun appRequest(path: String, payload: String?): JSONObject {
+    private fun appRequest(path: String, payload: String?, unsigned: Boolean = false): JSONObject {
         val values = linkedMapOf(
             "aid" to "8662", "app_name" to "novelread", "version_code" to "73532", "version_name" to "7.3.5.32",
             "manifest_version_code" to "73532", "update_version_code" to "73532", "channel" to "update_64",
@@ -143,7 +143,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             "_rticket" to clock().toString())
         val query = encodeQuery(values)
         val body = payload?.toByteArray(Charsets.UTF_8)
-        val headers = appSign(query, body)
+        // Upstream 0.1.10 (8795bd04): the playback endpoint rejects the legacy X-Khronos/X-Gorgon
+        // signature with HTTP 200 + empty body. Playback requests must go unsigned; every other
+        // endpoint (landpage feed etc.) still requires the signature and works with it.
+        val headers = if (unsigned) linkedMapOf(
+            "User-Agent" to appUa, "Accept" to "application/json", "X-XS-From-Web" to "0", "Sdk-Version" to "2")
+        else appSign(query, body)
         val builder = Request.Builder().url("$appBase$path?$query")
         for ((k,v) in headers) builder.header(k,v)
         if (body != null) builder.post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
@@ -353,7 +358,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
 
     // ---------- detail (website page) ----------
 
-    fun detail(id: String): Detail {
+    fun detail(id: String, type: ContentType = ContentType.SHORT): Detail {
         require(id.matches(Regex("[0-9]{1,30}")))
         val data = extractRouter(webText("$site/detail?series_id=$id"))
         val loader = data.optJSONObject("loaderData") ?: throw IOException("剧集详情暂不可用")
@@ -373,18 +378,80 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             o.str("series_intro"),
             o.str("episode_right_text").ifEmpty { if(count>0) "全 $count 集" else "" },
             (0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) })
-        return Detail(series, episodes)
+        return Detail(series, episodes, type)
     }
 
-    // ---------- stream (website public MP4; the App video_model/v1 API now returns empty bodies) ----------
+    // ---------- stream: App API first (1080p), website public MP4 as fallback (360p) ----------
 
-    fun stream(id: String, maxQuality: Int = 1080): StreamInfo {
-        require(id.matches(Regex("[0-9]{1,30}")))
-        // The App API (/novel/player/video_model/v1/) started returning HTTP 200 with an
-        // empty body for every video id (server-side block; the signature still works for
-        // other endpoints). The website player itself falls back to a public MP4 path:
-        // /video/public/{vid}/360p.mp4 - plain, unencrypted, Range-capable, no Referer
-        // check. 360p is the only quality served there; the site's own JS hardcodes it.
+    /** App content_type for the playback request: comic dramas need 1004 (upstream 1729ef4a);
+     *  real/AI dramas use 1. The server also tolerates 1 for comics, but passing the real
+     *  value keeps the response consistent with the official app. */
+    private fun playbackContentType(type: ContentType) = if (type == ContentType.COMIC) 1004 else 1
+
+    fun stream(id: String, maxQuality: Int = 1080, type: ContentType = ContentType.SHORT): StreamInfo {
+        require(id.matches(Regex("[0-9]{1,30}"))
+        )
+        // Upstream 0.1.10: /novel/player/video_model/v1/ rejects the legacy X-Khronos/X-Gorgon
+        // signature with HTTP 200 + empty body; the endpoint must be called UNSIGNED. With the
+        // signature dropped and content_type passed per-series, the API returns the full
+        // multi-quality model (360p..1080p) with CENC spade_a keys again.
+        val appResult = runCatching { appStream(id, maxQuality, type) }
+        appResult.getOrNull()?.let { return it }
+        // Fallback: the website's public MP4 path - plain, unencrypted, Range-capable.
+        // 360p only, but immune to any future App API breakage.
+        return publicStream(id)
+    }
+
+    private fun appStream(id: String, maxQuality: Int, type: ContentType): StreamInfo {
+        val payload = JSONObject()
+            .put("video_id", id).put("content_type", playbackContentType(type))
+            .put("biz_param", JSONObject().put("need_all_video_definition", true).put("video_platform", 3))
+        val data = appRequest("/novel/player/video_model/v1/", payload.toString(), unsigned = true)
+        val map = data.optJSONObject("data") ?: throw IOException("播放信息为空")
+        var model = map.opt("video_model")
+        if (model is String) model = JSONObject(model)
+        val modelObj = model as? JSONObject ?: throw IOException("播放信息格式异常")
+        val videoList = modelObj.optJSONObject("video_list") ?: run {
+            val list = modelObj.optJSONArray("video_list")
+            if (list != null) { val obj = JSONObject(); for (i in 0 until list.length()) obj.put("$i", list.getJSONObject(i)); obj }
+            else throw IOException("没有可用清晰度")
+        }
+        // The current API flattens variant fields (definition/codec_type/vwidth/vheight/spade_a)
+        // directly on each entry; older responses nested them under video_meta/encrypt_info.
+        val rows = videoList.keys().asSequence().mapNotNull { videoList.optJSONObject(it) }
+            .map { o ->
+                val meta = o.optJSONObject("video_meta")
+                val codec = (meta?.str("codec_type") ?: o.str("codec_type")).lowercase(Locale.ROOT)
+                val definition = (meta?.str("definition") ?: o.str("definition")).substringBefore('p').toIntOrNull() ?: 0
+                val height = (meta?.str("vheight") ?: o.str("vheight")).toIntOrNull() ?: 0
+                val width = (meta?.str("vwidth") ?: o.str("vwidth")).toIntOrNull() ?: 0
+                val quality = if (definition > 0) definition else if (width > 0 && (height == 0 || width < height)) width else height
+                Triple(quality, codec, o)
+            }.sortedByDescending { it.first }.toList()
+        // ByteVC2 resources can expose playable audio but no video track in Android's MP4 extractor;
+        // never select a known incompatible variant (kept from the original kotlin-tv logic).
+        val playable = rows.filter { it.second !in setOf("bytevc2","bvc2") }
+        // Prefer h264 for TV compatibility; fall back to others.
+        val compatible = playable.filter { it.second == "h264" || it.second == "avc1" }
+        val pool = if (compatible.isNotEmpty()) compatible else playable
+        val selected = pool.firstOrNull { it.first in 1..maxQuality } ?: pool.firstOrNull()
+            ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
+        val item = selected.third
+        var url = cleanUrl(item.str("main_url"))
+        if (!url.startsWith("https://") && !url.startsWith("http://")) {
+            // main_url may be base64-encoded
+            val decoded = runCatching { String(java.util.Base64.getDecoder().decode(url), Charsets.UTF_8).trim() }.getOrNull()
+            if (decoded != null && (decoded.startsWith("https://") || decoded.startsWith("http://"))) url = decoded
+            else throw IOException("播放地址无效")
+        }
+        val encryption = item.optJSONObject("encrypt_info")
+        val spade = encryption?.str("spade_a")?.ifEmpty { item.str("spade_a") } ?: item.str("spade_a")
+        val key = if (spade.isNotEmpty()) runCatching { MediaCrypto.deriveKey(spade) }.getOrNull() else null
+        val quality = if (selected.first > 0) "${selected.first}P" + (if (selected.first > maxQuality) "（兼容资源）" else "") else "自动"
+        return StreamInfo(url, key, quality)
+    }
+
+    private fun publicStream(id: String): StreamInfo {
         val url = "$site/video/public/$id/360p.mp4"
         // Probe with a 1-byte range so a dead link fails fast instead of mid-playback.
         val probe = Request.Builder().url(url).header("User-Agent", webUa).header("Referer", "$site/")

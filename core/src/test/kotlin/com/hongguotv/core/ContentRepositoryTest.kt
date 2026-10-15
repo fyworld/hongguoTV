@@ -32,9 +32,22 @@ class ContentRepositoryTest {
         assertEquals("480P",repo.stream("123",720).quality)
     }
 
-    @Test fun entirelyIncompatibleSourceFailsBeforeStartingAudio() {
-        val repo=streamRepository(Triple(720,"ByteVC2","https://example.com/unsupported"),Triple(480,"bvc2","https://example.com/unsupported2"))
-        assertThrows(IOException::class.java) { repo.stream("123",720) }
+    @Test fun entirelyIncompatibleSourceFallsBackToPublicMp4() {
+        // With the dual-channel stream (upstream 0.1.10), an App model with only
+        // undecodable codecs falls back to the website's public MP4 path instead of
+        // failing: playback continues at 360p rather than erroring out.
+        val requests=mutableListOf<Request>()
+        val repo=repository { request ->
+            requests+=request
+            if(request.url.encodedPath=="/novel/player/video_model/v1/")
+                JSONObject().put("code",0).put("data",JSONObject().put("video_model",JSONObject().put("video_list",JSONObject()
+                    .put("v0",JSONObject().put("video_meta",JSONObject().put("vheight",720).put("codec_type","ByteVC2")).put("main_url","https://example.com/unsupported"))
+                    .put("v1",JSONObject().put("video_meta",JSONObject().put("vheight",480).put("codec_type","bvc2")).put("main_url","https://example.com/unsupported2"))))).toString()
+            else ""
+        }
+        val result=repo.stream("123",720)
+        assertEquals("360P",result.quality)
+        assertTrue(requests.any { it.url.encodedPath=="/video/public/123/360p.mp4" })
     }
 
     @Test fun legacyMissingCodecLabelKeepsQualityLimit() {
