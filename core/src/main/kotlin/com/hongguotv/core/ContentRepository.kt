@@ -3,14 +3,9 @@ package com.hongguotv.core
 
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.MediaType.Companion.toMediaType
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
-import java.security.SecureRandom
-import java.util.Locale
-import java.util.TreeMap
 import java.util.concurrent.TimeUnit
 
 internal fun JSONArray.objects() = (0 until length()).mapNotNull { optJSONObject(it) }
@@ -30,18 +25,15 @@ class SearchSessionExpiredException: IOException("搜索结果已过期，请从
 /**
  * Content repository rebuilt on the working provider chain from HongguoTV-Phone-TV-NoAds:
  *  - catalog: App landpage API with the lightweight X-Khronos/X-Gorgon signature
+ *    (transport in AppApiTransport)
  *  - detail:  website /detail page (App video_detail currently returns an empty body)
- *  - stream:  App video_model/v1 API (verified: 5 qualities + CENC spade_a keys)
+ *  - stream:  channel scheduler over StreamSource implementations
+ *    (App API unsigned video_model first, website public MP4 fallback)
  *  - search / ranking / suggestions: website pages and JSON endpoints
  * The old drpys multi_video_model chain (x-argus/x-ladon/x-helios/x-medusa) is retired.
  */
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
     private val site = "https://hongguoduanju.com"
-    private val appBase = "https://api5-normal-sinfonlineb.fqnovel.com"
-    private val random = SecureRandom()
-    private val deviceId = newDeviceId()
-    private val installId = newDeviceId()
-    private val appUa = "com.phoenix.read/73532 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
     private val webUa = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1"
 
     // ---------- shared HTTP helpers ----------
@@ -63,105 +55,16 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     private fun webText(url: String, referer: String = "$site/") = text(url, mapOf(
         "User-Agent" to webUa, "Referer" to referer, "Accept-Language" to "zh-CN,zh;q=0.9"))
 
-    // ---------- App API with the lightweight signature (from provider_hongguo_sign.go) ----------
+    // ---------- App API transport + playback channels (AppApiTransport / StreamSource) ----------
 
-    private fun newDeviceId(): String {
-        val bytes = ByteArray(8); random.nextBytes(bytes)
-        var value = 0L; for (b in bytes) value = (value shl 8) or (b.toLong() and 0xff)
-        return (1_000_000_000_000_000_000L + (value and 0x7fffffffffffffffL) % 8_000_000_000_000_000_000L).toString()
-    }
+    /** Shared App API transport: device identity, query profile, X-Khronos/X-Gorgon signature. */
+    private val appApi = AppApiTransport(http, clock)
 
-    private fun rotl8(v: Int, n: Int) = ((v shl n) or (v ushr (8 - n))) and 0xff
-    private fun rev8(v: Int): Int {
-        var r = 0
-        for (i in 0 until 8) if (v and (1 shl i) != 0) r = r or (1 shl (7 - i))
-        return r
-    }
+    /** Playback fallback chain: App API (multi-quality + CENC) -> public MP4 (360p). */
+    private val streams = StreamScheduler(StreamSource.default(appApi, http, webUa, site))
 
-    private fun appSign(query: String, body: ByteArray?): Map<String,String> {
-        val now = clock() / 1000
-        val nowMs = clock()
-        val payload = ByteArray(20)
-        val queryHash = java.security.MessageDigest.getInstance("MD5").digest(query.toByteArray())
-        System.arraycopy(queryHash, 0, payload, 0, 4)
-        if (body != null) {
-            val bodyHash = java.security.MessageDigest.getInstance("MD5").digest(body)
-            System.arraycopy(bodyHash, 0, payload, 4, 4)
-        }
-        payload[12] = 0; payload[13] = 6; payload[14] = 11; payload[15] = 28
-        val ts = now.toInt()
-        payload[16] = (ts ushr 24).toByte(); payload[17] = (ts ushr 16).toByte(); payload[18] = (ts ushr 8).toByte(); payload[19] = ts.toByte()
-        val key = byteArrayOf(0x44,0xb9.toByte(),0xb9.toByte(),0xd9.toByte(),0xa4.toByte(),0xae.toByte(),0xf9.toByte(),0xfc.toByte(),0xa4.toByte(),0x93.toByte(),0xaa.toByte(),0x75.toByte(),0x7c.toByte(),0xa3.toByte(),0xc2.toByte(),0xc4.toByte(),0xa4.toByte(),0x96.toByte(),0x93.toByte(),0x8f.toByte())
-        for (i in 0 until 20) payload[i] = (payload[i].toInt() xor key[i].toInt()).toByte()
-        for (i in 0 until 20) {
-            val mixed = rotl8(payload[i].toInt() and 0xff, 4) xor (payload[(i + 1) % 20].toInt() and 0xff)
-            payload[i] = ((rev8(mixed) xor 0xff xor 20) and 0xff).toByte()
-        }
-        val signature = byteArrayOf(0x84.toByte(), 0x04, 0x40, 0x1c, 0, 0) + payload
-        val gorgon = StringBuilder()
-        for (b in signature) gorgon.append(String.format("%02x", b))
-        val headers = linkedMapOf(
-            "User-Agent" to appUa, "Accept" to "application/json", "X-XS-From-Web" to "0", "Sdk-Version" to "2",
-            "X-Khronos" to now.toString(), "X-Gorgon" to gorgon.toString(), "X-SS-Req-Ticket" to nowMs.toString())
-        if (body != null) {
-            headers["Content-Type"] = "application/json; charset=utf-8"
-            val md = java.security.MessageDigest.getInstance("MD5").digest(body)
-            val stub = StringBuilder(); for (b in md) stub.append(String.format("%02X", b))
-            headers["X-SS-STUB"] = stub.toString()
-        }
-        return headers
-    }
-
-    /** Mirrors Go url.Values.Encode(): sorted keys + URL escaping. */
-    private fun encodeQuery(values: Map<String,String>): String {
-        val sorted = TreeMap(values)
-        return sorted.entries.joinToString("&") { (k,v) ->
-            "${urlEscape(k)}=${urlEscape(v)}"
-        }
-    }
-    private fun urlEscape(s: String): String {
-        val out = StringBuilder()
-        for (c in s) when {
-            c.isLetterOrDigit() -> out.append(c)
-            c == '-' || c == '_' || c == '.' || c == '~' -> out.append(c)
-            c == ' ' -> out.append('+')
-            else -> {
-                for (b in c.toString().toByteArray(Charsets.UTF_8)) out.append(String.format("%%%02X", b))
-            }
-        }
-        return out.toString()
-    }
-
-    private fun appRequest(path: String, payload: String?, unsigned: Boolean = false): JSONObject {
-        val values = linkedMapOf(
-            "aid" to "8662", "app_name" to "novelread", "version_code" to "73532", "version_name" to "7.3.5.32",
-            "manifest_version_code" to "73532", "update_version_code" to "73532", "channel" to "update_64",
-            "device_platform" to "android", "os" to "android", "ssmix" to "a", "device_type" to "25053RT47C",
-            "device_brand" to "Redmi", "language" to "zh", "os_api" to "28", "os_version" to "9",
-            "resolution" to "1280*2772", "dpi" to "520", "ac" to "wifi",
-            "device_id" to deviceId, "iid" to installId,
-            "_rticket" to clock().toString())
-        val query = encodeQuery(values)
-        val body = payload?.toByteArray(Charsets.UTF_8)
-        // Upstream 0.1.10 (8795bd04): the playback endpoint rejects the legacy X-Khronos/X-Gorgon
-        // signature with HTTP 200 + empty body. Playback requests must go unsigned; every other
-        // endpoint (landpage feed etc.) still requires the signature and works with it.
-        val headers = if (unsigned) linkedMapOf(
-            "User-Agent" to appUa, "Accept" to "application/json", "X-XS-From-Web" to "0", "Sdk-Version" to "2")
-        else appSign(query, body)
-        val builder = Request.Builder().url("$appBase$path?$query")
-        for ((k,v) in headers) builder.header(k,v)
-        if (body != null) builder.post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
-        return RequestScope.execute(http.newCall(builder.build())) { response ->
-            if (!response.isSuccessful) throw IOException("App 接口请求失败（HTTP ${response.code}）")
-            val text = response.body?.string() ?: throw IOException("App 接口响应为空")
-            if (text.isEmpty()) throw IOException("App 接口返回空数据")
-            val data = JSONObject(text)
-            val code = data.optInt("code", data.optInt("Code", 0))
-            if (code != 0) throw IOException("App 接口暂不可用（$code）")
-            data
-        }
-    }
+    private fun appRequest(path: String, payload: String?): JSONObject =
+        appApi.request(path, payload, signed = true)
 
     // ---------- catalog (App landpage) ----------
 
@@ -286,7 +189,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
         // The website search does not constrain content type; use it for both.
-        val encoded = urlEscape(keyword)
+        val encoded = appApi.urlEscape(keyword)
         val data = extractRouter(webText("$site/search/$encoded?page=$page"))
         val loader = data.optJSONObject("loaderData") ?: throw IOException("搜索数据暂不可用")
         val section = (loader.keys().asSequence().mapNotNull { loader.optJSONObject(it) }
@@ -312,7 +215,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             val cached = suggestionCache[keyword]
             if (cached != null && now < cached.first) return cached.second
         }
-        val encoded = urlEscape(keyword)
+        val encoded = appApi.urlEscape(keyword)
         val body = text("$site/incent_resource/suggestion?app_id=8662&query=$encoded&count=10", mapOf(
             "User-Agent" to webUa, "Referer" to "$site/", "Accept" to "application/json", "Accept-Language" to "zh-CN,zh;q=0.9"))
         val records = SearchSuggest.parseRecords(body)
@@ -349,7 +252,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
 
     /** Name-search dramas from the suggestion endpoint (mirrors fetchHongguoSearchNames, count=50). */
     private fun nameSearch(keyword: String): List<Series> {
-        val encoded = urlEscape(keyword)
+        val encoded = appApi.urlEscape(keyword)
         val body = text("$site/incent_resource/suggestion?app_id=8662&query=$encoded&count=50", mapOf(
             "User-Agent" to webUa, "Referer" to "$site/", "Accept" to "application/json", "Accept-Language" to "zh-CN,zh;q=0.9"))
         val records = SearchSuggest.parseRecords(body)
@@ -381,87 +284,14 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return Detail(series, episodes, type)
     }
 
-    // ---------- stream: App API first (1080p), website public MP4 as fallback (360p) ----------
-
-    /** App content_type for the playback request: comic dramas need 1004 (upstream 1729ef4a);
-     *  real/AI dramas use 1. The server also tolerates 1 for comics, but passing the real
-     *  value keeps the response consistent with the official app. */
-    private fun playbackContentType(type: ContentType) = if (type == ContentType.COMIC) 1004 else 1
+    // ---------- stream: channel scheduler (App API first, public MP4 fallback) ----------
 
     fun stream(id: String, maxQuality: Int = 1080, type: ContentType = ContentType.SHORT): StreamInfo {
-        require(id.matches(Regex("[0-9]{1,30}"))
-        )
-        // Upstream 0.1.10: /novel/player/video_model/v1/ rejects the legacy X-Khronos/X-Gorgon
-        // signature with HTTP 200 + empty body; the endpoint must be called UNSIGNED. With the
-        // signature dropped and content_type passed per-series, the API returns the full
-        // multi-quality model (360p..1080p) with CENC spade_a keys again.
-        val appResult = runCatching { appStream(id, maxQuality, type) }
-        appResult.getOrNull()?.let { return it }
-        // Fallback: the website's public MP4 path - plain, unencrypted, Range-capable.
-        // 360p only, but immune to any future App API breakage.
-        return publicStream(id)
-    }
-
-    private fun appStream(id: String, maxQuality: Int, type: ContentType): StreamInfo {
-        val payload = JSONObject()
-            .put("video_id", id).put("content_type", playbackContentType(type))
-            .put("biz_param", JSONObject().put("need_all_video_definition", true).put("video_platform", 3))
-        val data = appRequest("/novel/player/video_model/v1/", payload.toString(), unsigned = true)
-        val map = data.optJSONObject("data") ?: throw IOException("播放信息为空")
-        var model = map.opt("video_model")
-        if (model is String) model = JSONObject(model)
-        val modelObj = model as? JSONObject ?: throw IOException("播放信息格式异常")
-        val videoList = modelObj.optJSONObject("video_list") ?: run {
-            val list = modelObj.optJSONArray("video_list")
-            if (list != null) { val obj = JSONObject(); for (i in 0 until list.length()) obj.put("$i", list.getJSONObject(i)); obj }
-            else throw IOException("没有可用清晰度")
-        }
-        // The current API flattens variant fields (definition/codec_type/vwidth/vheight/spade_a)
-        // directly on each entry; older responses nested them under video_meta/encrypt_info.
-        val rows = videoList.keys().asSequence().mapNotNull { videoList.optJSONObject(it) }
-            .map { o ->
-                val meta = o.optJSONObject("video_meta")
-                val codec = (meta?.str("codec_type") ?: o.str("codec_type")).lowercase(Locale.ROOT)
-                val definition = (meta?.str("definition") ?: o.str("definition")).substringBefore('p').toIntOrNull() ?: 0
-                val height = (meta?.str("vheight") ?: o.str("vheight")).toIntOrNull() ?: 0
-                val width = (meta?.str("vwidth") ?: o.str("vwidth")).toIntOrNull() ?: 0
-                val quality = if (definition > 0) definition else if (width > 0 && (height == 0 || width < height)) width else height
-                Triple(quality, codec, o)
-            }.sortedByDescending { it.first }.toList()
-        // ByteVC2 resources can expose playable audio but no video track in Android's MP4 extractor;
-        // never select a known incompatible variant (kept from the original kotlin-tv logic).
-        val playable = rows.filter { it.second !in setOf("bytevc2","bvc2") }
-        // Prefer h264 for TV compatibility; fall back to others.
-        val compatible = playable.filter { it.second == "h264" || it.second == "avc1" }
-        val pool = if (compatible.isNotEmpty()) compatible else playable
-        val selected = pool.firstOrNull { it.first in 1..maxQuality } ?: pool.firstOrNull()
-            ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
-        val item = selected.third
-        var url = cleanUrl(item.str("main_url"))
-        if (!url.startsWith("https://") && !url.startsWith("http://")) {
-            // main_url may be base64-encoded
-            val decoded = runCatching { String(java.util.Base64.getDecoder().decode(url), Charsets.UTF_8).trim() }.getOrNull()
-            if (decoded != null && (decoded.startsWith("https://") || decoded.startsWith("http://"))) url = decoded
-            else throw IOException("播放地址无效")
-        }
-        val encryption = item.optJSONObject("encrypt_info")
-        val spade = encryption?.str("spade_a")?.ifEmpty { item.str("spade_a") } ?: item.str("spade_a")
-        val key = if (spade.isNotEmpty()) runCatching { MediaCrypto.deriveKey(spade) }.getOrNull() else null
-        val quality = if (selected.first > 0) "${selected.first}P" + (if (selected.first > maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(url, key, quality)
-    }
-
-    private fun publicStream(id: String): StreamInfo {
-        val url = "$site/video/public/$id/360p.mp4"
-        // Probe with a 1-byte range so a dead link fails fast instead of mid-playback.
-        val probe = Request.Builder().url(url).header("User-Agent", webUa).header("Referer", "$site/")
-            .header("Range", "bytes=0-0").header("Accept-Encoding", "identity").build()
-        RequestScope.execute(http.newCall(probe)) { response ->
-            if (response.code != 206 && response.code != 200) throw IOException("播放地址暂不可用（HTTP ${response.code}）")
-            val range = response.header("Content-Range")
-            if (range == null && response.header("Content-Length") == "0") throw IOException("播放地址暂不可用")
-        }
-        return StreamInfo(url, null, "360P")
+        require(id.matches(Regex("[0-9]{1,30}")))
+        // Channels live in StreamSource implementations; when an endpoint changes,
+        // fix the affected channel (or add a new one to StreamSource.default) - this
+        // method and the app never change.
+        return streams.stream(id, maxQuality, type)
     }
 
     companion object {
