@@ -856,35 +856,35 @@ class MainActivity: Activity() {
         return listOf(if(library.favorite(series.id)) "已收藏" else "",if(library.queued(series.id)) "稍后看" else "",
             if(library.watched(series.id)) "整剧已看完" else progress?.let { "上次第 ${it.episodeIndex+1} 集 · ${formatTime(it.position)}" }.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ")
     }
-    /** One row of catalog cards. Extracted from catalogGrid so loadMore can append new
-     *  rows incrementally instead of rebuilding the whole grid (which destroyed 100+
-     *  card views and re-created them on the UI thread on every page turn).
+    /** One catalog card. Extracted from the row builder so appendRows can drop new cards
+     *  into a trailing partial row's empty slots: pages arrive in any size (the feed
+     *  returns 5, 14, 23… rows; the local 穿越 filter thins it further), and per-page
+     *  chunking would litter the grid with 1-5 card rows. The card registers itself in
+     *  cards/flatIndex; the caller places it in a row.
      *  restoring is a supplier: catalogGrid flips it to false once the initial scroll
      *  settles, and the closures must observe that change (a Boolean parameter would
      *  freeze the build-time value forever). */
-    private fun buildCardRow(items: List<Series>,cards: MutableList<View>,flatIndex: MutableMap<View,Int>,count: Int,width: Int,gap: Int,scroll: ScrollView,list: LinearLayout,preview: SeriesPreview,infiniteScroll: Boolean,restoring: () -> Boolean): View {
-        val line=row(); line.gravity=Gravity.TOP
-        items.forEachIndexed { columnIndex,item ->
-            val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(9)); focusStyle(card); card.contentDescription=item.title; card.tag=item.id; catalogCards[item.id]=card
-            // Ranking (tab 5) and comic (tab 2) pages carry heat metadata in
-            // ranking.positions; no rank badge is drawn on the artwork.
-            val position=if(tab==5 || tab==2) ranking?.positions?.get(item.id) else null
-            val artwork=FrameLayout(this); card.addView(artwork,lp(-1,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
-            val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }; artwork.addView(image,FrameLayout.LayoutParams(-1,-1)); loadCover(image,item.cover); cardImages[item.id]=image to item.cover
-            card.addView(text(item.title,14f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),dp(7),dp(3),0) },lp(-1,-2).apply { weight=1f })
-            val progress=if(tab==7 || collection=="resume") library.progress(item.id) else null
-            // Unified card badge: episode count followed by heat when available
-            // (e.g. "全40集   100万热度" / "更新至80集   100万热度" / "第1集·00:10   100万热度").
-            val heat=if(tab==5 || tab==2) position?.heat else null
-            val episodeText=if(tab==6) library.favoriteLabel(item.id) else if(progress!=null) if(library.watched(item.id)) "整剧已看完" else "第${progress.episodeIndex+1}集·${formatTime(progress.position)}" else item.badge
-            val badgeText=if(heat.isNullOrBlank()) episodeText else listOf(episodeText,heat).filter { it.isNotBlank() }.joinToString("   ")
-            val badge=text(badgeText,12f,if(tab==5 || tab==6) accent else muted).apply { maxLines=1; minLines=1; minHeight=dp(19); ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) }
-            card.addView(badge,lp(-1,-2)); if(tab==6) favoriteBadges[item.id]=badge
-            card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==7 || collection=="resume" || collection=="updates") }
-            card.setOnLongClickListener { catalogFocus=item.id; quickActions(item,card); true }
-            card.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
-            card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused)
-                if(focused) { catalogFocus=item.id; loadCover(image,item.cover); preview.show(item,selectionStatus(item));
+    private fun buildCard(item: Series,line: LinearLayout,cards: MutableList<View>,flatIndex: MutableMap<View,Int>,count: Int,width: Int,scroll: ScrollView,list: LinearLayout,preview: SeriesPreview,infiniteScroll: Boolean,restoring: () -> Boolean): View {
+        val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(9)); focusStyle(card); card.contentDescription=item.title; card.tag=item.id; catalogCards[item.id]=card
+        // Ranking (tab 5) and comic (tab 2) pages carry heat metadata in
+        // ranking.positions; no rank badge is drawn on the artwork.
+        val position=if(tab==5 || tab==2) ranking?.positions?.get(item.id) else null
+        val artwork=FrameLayout(this); card.addView(artwork,lp(-1,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
+        val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }; artwork.addView(image,FrameLayout.LayoutParams(-1,-1)); loadCover(image,item.cover); cardImages[item.id]=image to item.cover
+        card.addView(text(item.title,14f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),dp(7),dp(3),0) },lp(-1,-2).apply { weight=1f })
+        val progress=if(tab==7 || collection=="resume") library.progress(item.id) else null
+        // Unified card badge: episode count followed by heat when available
+        // (e.g. "全40集   100万热度" / "更新至80集   100万热度" / "第1集·00:10   100万热度").
+        val heat=if(tab==5 || tab==2) position?.heat else null
+        val episodeText=if(tab==6) library.favoriteLabel(item.id) else if(progress!=null) if(library.watched(item.id)) "整剧已看完" else "第${progress.episodeIndex+1}集·${formatTime(progress.position)}" else item.badge
+        val badgeText=if(heat.isNullOrBlank()) episodeText else listOf(episodeText,heat).filter { it.isNotBlank() }.joinToString("   ")
+        val badge=text(badgeText,12f,if(tab==5 || tab==6) accent else muted).apply { maxLines=1; minLines=1; minHeight=dp(19); ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) }
+        card.addView(badge,lp(-1,-2)); if(tab==6) favoriteBadges[item.id]=badge
+        card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==7 || collection=="resume" || collection=="updates") }
+        card.setOnLongClickListener { catalogFocus=item.id; quickActions(item,card); true }
+        card.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
+        card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused)
+            if(focused) { catalogFocus=item.id; loadCover(image,item.cover); preview.show(item,selectionStatus(item));
                 // Prefetch trigger: fire one row early (when focus enters the second-to-last
                 // row), so the next page is usually in hand before focus reaches the bottom.
                 if(infiniteScroll && hasMore && (flatIndex[card] ?: 0)+count*2>=cards.size) loadMore()
@@ -895,15 +895,34 @@ class MainActivity: Activity() {
                     line.top<scroll.scrollY -> line.top
                     line.bottom>scroll.scrollY+scroll.height -> line.top.coerceAtMost((list.height-scroll.height).coerceAtLeast(0))
                     else -> scroll.scrollY }) } }
-                // Focus left the cards (paging row / refresh button / nav bar): collapse
-                // the title preview row again. Deferred one message: a card→card move
-                // fires the old card's loss before the new card's gain.
-                else if(preview.collapsible) main.post { if(!cards.any { it.hasFocus() }) preview.blank() }
-            }
-            // The row measures its tallest card, then stretches siblings to keep badges aligned.
-            line.addView(card,lp(width,-1).apply { if(columnIndex<count-1) rightMargin=gap }); cards+=card; flatIndex[card]=cards.size-1
+            // Focus left the cards (paging row / refresh button / nav bar): collapse
+            // the title preview row again. Deferred one message: a card→card move
+            // fires the old card's loss before the new card's gain.
+            else if(preview.collapsible) main.post { if(!cards.any { it.hasFocus() }) preview.blank() }
+        }
+        cards+=card; flatIndex[card]=cards.size-1
+        return card
+    }
+    /** One row of catalog cards, each stretched to the row's measured height so badges
+     *  stay aligned. Extracted from catalogGrid so loadMore can append new rows
+     *  incrementally instead of rebuilding the whole grid. */
+    private fun buildCardRow(items: List<Series>,cards: MutableList<View>,flatIndex: MutableMap<View,Int>,count: Int,width: Int,gap: Int,scroll: ScrollView,list: LinearLayout,preview: SeriesPreview,infiniteScroll: Boolean,restoring: () -> Boolean): View {
+        val line=row(); line.gravity=Gravity.TOP
+        items.forEachIndexed { columnIndex,item ->
+            line.addView(buildCard(item,line,cards,flatIndex,count,width,scroll,list,preview,infiniteScroll,restoring),lp(width,-1).apply { if(columnIndex<count-1) rightMargin=gap })
         }
         return line
+    }
+    /** Focus navigation for an infinite grid's cards: left/right within the row, up to
+     *  the row above (or the header bar), down to the row below (self-loop on the last
+     *  row — no paging row exists below an infinite grid). Runs after every append. */
+    private fun patchCardNavigation(cards: List<View>,count: Int) {
+        cards.forEachIndexed { index,card ->
+            card.nextFocusLeftId=if(index%count==0) card.id else cards[index-1].id
+            card.nextFocusRightId=if(index%count==count-1 || index==cards.lastIndex) card.id else cards[index+1].id
+            card.nextFocusUpId=if(index<count) (collectionBack?.id ?: themeButtons[themeSlug]?.id ?: tabRefresh?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: nav[tab].id) else cards[index-count].id
+            card.nextFocusDownId=if(index+count<cards.size) cards[index+count].id else card.id
+        }
     }
     /** Infinite grids (short/comic/ranking tabs + local lists): fetch the next page and
      *  append it in place. The grid is not rebuilt — focus and scroll stay exactly where they are. */
@@ -944,12 +963,13 @@ class MainActivity: Activity() {
             loadingMore=false
         })
     }
-    /** Append one page of items to the infinite grid in place: new rows are added below
-     *  the existing ones and focus navigation is patched. No view is destroyed, so the
-     *  focused card keeps focus, the scroll position never jumps, and in-flight cover
-     *  downloads for existing cards are not cancelled and restarted. New covers start
-     *  loading the moment the page arrives (buildCardRow → loadCover), one row before
-     *  focus can possibly reach them. */
+    /** Append one page of items to the infinite grid in place. New cards first fill the
+     *  trailing partial row's empty slots (the feed returns any number of items per
+     *  page — 5, 14, 23… — and the local 穿越 filter thins it further, so per-page
+     *  chunking would litter the grid with 1-5 card rows), then new rows are appended
+     *  below. No view is destroyed, so the focused card keeps focus, the scroll
+     *  position never jumps, and in-flight cover downloads for existing cards are not
+     *  cancelled. New covers start loading the moment the page arrives. */
     private fun appendRows(items: List<Series>) {
         val list=gridList ?: return
         val scroll=gridScroll ?: return
@@ -959,15 +979,32 @@ class MainActivity: Activity() {
         val preview=selectionPreview ?: return
         gridLoadingRow?.let { loading -> list.removeView(loading) }; gridLoadingRow=null
         val oldSize=cards.size
-        items.chunked(count).forEach { chunk ->
+        // Fill the trailing partial row first: its empty slots take as many new cards
+        // as they hold, added straight into the existing row view (no view moves).
+        var pending=items
+        val lastRow=list.getChildAt(list.childCount-1) as? LinearLayout
+        if(lastRow!=null && lastRow.childCount<count && pending.isNotEmpty()) {
+            // The card that used to end the row has no right gap; restore it now that
+            // siblings follow it.
+            (lastRow.getChildAt(lastRow.childCount-1).layoutParams as? LinearLayout.LayoutParams)?.rightMargin=gap
+            val slot=count-lastRow.childCount
+            pending.take(slot).forEach { item ->
+                val card=buildCard(item,lastRow,cards,flatIndex,count,width,scroll,list,preview,true,{ false })
+                // The row stretches siblings to a common height: the newcomer joins as
+                // a stretched sibling (MATCH_PARENT height), with the standard gap.
+                lastRow.addView(card,lp(width,-1).apply { rightMargin=gap })
+            }
+            pending=pending.drop(slot)
+        }
+        // Remaining cards form new rows below (the last one may be partial — the next
+        // page will fill it the same way).
+        pending.chunked(count).forEach { chunk ->
             val line=buildCardRow(chunk,cards,flatIndex,count,width,gap,scroll,list,preview,true,{ false })
             list.addView(line,lp(-1,-2).apply { bottomMargin=dp(10) })
         }
-        // Patch DOWN navigation for every card: rows above the new last row lead down,
+        // Patch focus navigation for every card: rows above the new last row lead down,
         // the last row keeps focus on DOWN (no paging row exists below an infinite grid).
-        cards.forEachIndexed { index,card ->
-            card.nextFocusDownId=if(index+count<cards.size) cards[index+count].id else card.id
-        }
+        patchCardNavigation(cards,count)
         if(hasMore) {
             gridLoadingRow=text("正在加载更多…",17f,muted).apply { setPadding(0,dp(28),0,dp(18)) }
             list.addView(gridLoadingRow)
