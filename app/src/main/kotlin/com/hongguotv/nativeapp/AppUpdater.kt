@@ -46,8 +46,21 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
     var extraAction: Pair<String, () -> Unit>? = null
     private var status = "当前版本 ${BuildConfig.VERSION_NAME}"
     private var retryAfter = 0L
-    private var promptedCode = 0L
+    /** VersionName of the update already prompted this session; every build ships the
+     *  same fixed versionCode 999, so the code can no longer tell versions apart. */
+    private var promptedName: String? = null
     private val auto get() = preferences.getBoolean("automatic", true)
+
+    init {
+        // Replace-installs keep SharedPreferences: a fresh build must not inherit the
+        // previous version's 6h check throttle or "later" deferral, otherwise the
+        // update prompt never fires after upgrading (seen on 1.0.42-test: the old
+        // build had just checked, so the new one stayed silent for hours).
+        if (preferences.getString("installed_version", null) != BuildConfig.VERSION_NAME) {
+            preferences.edit().putString("installed_version", BuildConfig.VERSION_NAME)
+                .remove("last_attempt").remove("deferred_code").remove("deferred_name").remove("deferred_until").apply()
+        }
+    }
     private val poll = object : Runnable {
         override fun run() {
             if (!active) return
@@ -56,7 +69,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
                 val last = preferences.getLong("last_attempt", 0)
                 val update = available
                 when {
-                    ready && update != null && promptedCode != update.versionCode && !deferred(update) -> { promptedCode = update.versionCode; show(activity.currentFocus) }
+                    ready && update != null && promptedName != update.versionName && !deferred(update) -> { promptedName = update.versionName; show(activity.currentFocus) }
                     update != null && !ready && now >= retryAfter -> download(false)
                     now < last || now - last >= 6 * 60 * 60 * 1000L -> check(false)
                 }
@@ -85,7 +98,9 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         Thread({ repository.close() }, "hongguotv-update-cleanup").start()
     }
     private fun updateStatus(text: String) { status = text; statusView?.text = text }
-    private fun deferred(update: AppUpdate) = preferences.getLong("deferred_code", 0) == update.versionCode && preferences.getLong("deferred_until", 0) > System.currentTimeMillis()
+    /** "Later" defers by versionName (unique per build), not the fixed versionCode 999. */
+    private fun deferred(update: AppUpdate) = (preferences.getString("deferred_name", null) == update.versionName
+        && preferences.getLong("deferred_until", 0) > System.currentTimeMillis())
     private fun renderActions() {
         dialog?.getButton(AlertDialog.BUTTON_POSITIVE)?.apply {
             text = when { busy -> "处理中…"; ready -> "安装新版"; available != null -> "下载新版"; else -> "检查更新" }
@@ -126,7 +141,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         next.show()
         next.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { when { ready -> install(); available != null -> download(true); else -> check(true) } }
         next.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
-            available?.let { preferences.edit().putLong("deferred_code", it.versionCode).putLong("deferred_until", System.currentTimeMillis()+24*60*60*1000L).apply() }
+            available?.let { preferences.edit().putString("deferred_name", it.versionName).putLong("deferred_until", System.currentTimeMillis()+24*60*60*1000L).apply() }
             next.dismiss()
         }
         // Neutral (feedback) keeps the dialog open so the QR popup stacks on top of it.
@@ -173,7 +188,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
             validateApk(update)
         }) {
             ready = true; updateStatus("${update.versionName} 已下载并校验\n${update.notes}\n\n确认后由系统覆盖安装，保留本机记录。")
-            if (idle() && dialog == null && (manual || !deferred(update))) { promptedCode = update.versionCode; show(activity.currentFocus) }
+            if (idle() && dialog == null && (manual || !deferred(update))) { promptedName = update.versionName; show(activity.currentFocus) }
         }
     }
     /** The download is already guarded byte-for-byte by the SHA-256 check in
