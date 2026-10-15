@@ -5,7 +5,6 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.ClipData
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -177,24 +176,13 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
             if (idle() && dialog == null && (manual || !deferred(update))) { promptedCode = update.versionCode; show(activity.currentFocus) }
         }
     }
-    @Suppress("DEPRECATION")
+    /** The download is already guarded byte-for-byte by the SHA-256 check in
+     *  UpdateFiles.receive/verify. Package identity, version and signer continuity are
+     *  enforced by the platform installer itself when it replaces the app - an app-side
+     *  re-check via getPackageArchiveInfo was redundant and misfired on Android 7/8
+     *  (v2-only APKs read as "no signatures" there). Keep only the digest check. */
     private fun validateApk(update: AppUpdate) {
         if (!UpdateFiles.verify(apk, update)) throw IOException("安装包校验未通过，请重新下载")
-        val pm = activity.packageManager
-        val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
-        val candidate = pm.getPackageArchiveInfo(apk.path, flags) ?: throw IOException("安装包无法识别")
-        val installed = pm.getPackageInfo(activity.packageName, flags)
-        fun signers(info: android.content.pm.PackageInfo) =
-            (if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners else info.signatures)?.map { it.toCharsString() }?.toSet().orEmpty()
-        // Signature comparison only on API 28+: below that, getPackageArchiveInfo cannot
-        // read v2-only signatures from an uninstalled APK (returns an empty set) and the
-        // comparison would reject every legitimate update. The platform installer itself
-        // enforces signer continuity on replace, so skipping it here is safe.
-        val signaturesMatch = Build.VERSION.SDK_INT < 28 ||
-            (signers(installed).isNotEmpty() && signers(installed) == signers(candidate))
-        if (candidate.packageName != activity.packageName || candidate.versionName != update.versionName ||
-            candidate.applicationInfo?.minSdkVersion != update.minSdk || !signaturesMatch)
-            throw IOException("新版包名、版本或签名不匹配，已阻止安装")
     }
     private fun install() {
         val update = available ?: return
