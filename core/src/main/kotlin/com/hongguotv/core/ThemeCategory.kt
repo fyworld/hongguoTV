@@ -17,7 +17,7 @@ data class Theme(val slug: String, val label: String)
  * built-in fallback below only serves when the site is unreachable or re-shaped.
  */
 internal object ThemeCategory {
-    // Fallback theme lists (verified 2026-10): real-drama 24, comic-drama 8.
+    // Fallback theme lists (verified 2026-10): real-drama 24, comic-drama 8, ai-drama 8.
     private val fallbackReal = listOf(
         "romance" to "爱情", "period" to "年代", "comeback" to "逆袭", "legend" to "传奇",
         "growth" to "成长", "family" to "家庭", "clan" to "家族", "cute-kids" to "萌宝",
@@ -28,9 +28,16 @@ internal object ThemeCategory {
     private val fallbackComic = listOf(
         "creative" to "脑洞", "fantasy" to "玄幻", "drama" to "剧情", "apocalypse" to "末世",
         "wealthy-family" to "豪门", "wonder" to "奇幻", "sci-fi" to "科幻", "adventure" to "冒险")
+    private val fallbackAi = listOf(
+        "creative" to "脑洞", "fantasy" to "玄幻", "drama" to "剧情", "apocalypse" to "末世",
+        "wealthy-family" to "豪门", "wonder" to "奇幻", "sci-fi" to "科幻", "adventure" to "冒险")
 
     fun fallback(type: ContentType): List<Theme> =
-        (if(type==ContentType.COMIC) fallbackComic else fallbackReal).map { Theme(it.first,it.second) }
+        (when(type) {
+            ContentType.COMIC -> fallbackComic
+            ContentType.AI -> fallbackAi
+            else -> fallbackReal
+        }).map { Theme(it.first,it.second) }
 
     private fun routeNode(html: String): JSONObject {
         val node=ContentRepository.extractRouter(html).optJSONObject("loaderData")

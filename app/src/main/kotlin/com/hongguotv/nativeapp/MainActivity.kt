@@ -87,7 +87,7 @@ class MainActivity: Activity() {
     /** Home shelves show both content types at once; each tab keeps its own catalog. */
     private var homeShort=emptyList<Series>()
     private var homeComic=emptyList<Series>()
-    private fun tabContentType(): ContentType = when(tab) { 1 -> ContentType.SHORT; 2 -> ContentType.COMIC; else -> library.contentType }
+    private fun tabContentType(): ContentType = when(tab) { 1 -> ContentType.SHORT; 2 -> ContentType.COMIC; 3 -> ContentType.AI; else -> library.contentType }
     private val pageSize=20
     private var catalogScroll: ScrollView?=null
     private var settingsScroll: ScrollView?=null
@@ -203,7 +203,8 @@ class MainActivity: Activity() {
     private fun cacheKeyFor(requestTab: Int,board: RankBoard?=null): String?=when {
         requestTab==1 -> if(themeSlug.isBlank()) "short" else "theme:short:${themeSlug}"
         requestTab==2 -> if(themeSlug.isBlank()) "comic" else "theme:comic:${themeSlug}"
-        requestTab==4 -> "rank:${(board ?: library.rankBoard).storedValue}"
+        requestTab==3 -> if(themeSlug.isBlank()) "ai" else "theme:ai:${themeSlug}"
+        requestTab==5 -> "rank:${(board ?: library.rankBoard).storedValue}"
         else -> null
     }
     private fun catalogCacheKey(): String?=if(collection!=null) null else cacheKeyFor(tab)
@@ -364,7 +365,7 @@ class MainActivity: Activity() {
         return themes
     }
     private fun switchTheme(slug: String) {
-        if(themeSlug==slug || (tab!=1 && tab!=2)) return
+        if(themeSlug==slug || (tab!=1 && tab!=2 && tab!=3)) return
         // Focus-landing switch: defer the rebuild one frame so the focus transfer to the
         // new theme button settles first (same as switchRankBoard's direct-switch path);
         // rebuilding synchronously inside onFocusChange would detach the just-focused
@@ -375,7 +376,7 @@ class MainActivity: Activity() {
             themeFocusSlug=slug
             tabState.remove(tab); tabFocus.remove(tab)
             page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""
-            main.post { if((tab==1 || tab==2) && themeSlug==slug && screen=="catalog") showCatalog(load=true) }
+            main.post { if((tab==1 || tab==2 || tab==3) && themeSlug==slug && screen=="catalog") showCatalog(load=true) }
             return
         }
         themeSlug=slug
@@ -397,14 +398,14 @@ class MainActivity: Activity() {
         if(!rebuildingGrid && rankButtons[board]?.hasFocus()==true) {
             library.rankBoard=board
             rankFocusBoard=board
-            tabState.remove(4); tabFocus.remove(4)
+            tabState.remove(5); tabFocus.remove(5)
             page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""
-            main.post { if(tab==4 && library.rankBoard==board && screen=="catalog") showCatalog(load=true,focusType=true) }
+            main.post { if(tab==5 && library.rankBoard==board && screen=="catalog") showCatalog(load=true,focusType=true) }
             return
         }
         library.rankBoard=board
         rankFocusBoard=board
-        tabState.remove(4); tabFocus.remove(4)
+        tabState.remove(5); tabFocus.remove(5)
         rebuildingGrid=true
         try {
             releaseCatalogViews()
@@ -417,15 +418,15 @@ class MainActivity: Activity() {
         leaveCollection(); homeResetDone=false
         tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
         // Theme selection is per-tab: remember the leaving tab's theme, restore the entering one.
-        if(tab==1 || tab==2) tabTheme[tab]=themeSlug
+        if(tab==1 || tab==2 || tab==3) tabTheme[tab]=themeSlug
         tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty()
-        if(next==1 || next==2) themeSlug=tabTheme[next].orEmpty()
+        if(next==1 || next==2 || next==3) themeSlug=tabTheme[next].orEmpty()
         // Entering the search tab always starts fresh: keep history, drop query and results.
-        if(next==3) { tvQuery=""; tvSuggests=emptyList(); tvResultQuery=""; catalog=emptyList(); hasMore=false; query="" }
+        if(next==4) { tvQuery=""; tvSuggests=emptyList(); tvResultQuery=""; catalog=emptyList(); hasMore=false; query="" }
         // Focus arrived on another nav button (D-pad left/right): the page switches under
         // it, focus stays on that nav button. focusNav keeps the grid from stealing focus.
-        if(navSwitchFocus) { navSwitchFocus=false; showCatalog(load=(next!=3 && catalog.isEmpty() && !localCatalog()),focusNav=true) }
-        else showCatalog(load=(next!=3 && next<=2 && catalog.isEmpty()))
+        if(navSwitchFocus) { navSwitchFocus=false; showCatalog(load=(next!=4 && catalog.isEmpty() && !localCatalog()),focusNav=true) }
+        else showCatalog(load=(next!=4 && next<=3 && catalog.isEmpty()))
     }
     private fun leaveCollection() {
         if(collection==null) return
@@ -437,12 +438,12 @@ class MainActivity: Activity() {
         collectionReturn=CatalogState(page,catalog,hasMore,ranking); collectionFocus=catalogFocus
         collection=kind; page=1; catalogFocus=""; showCatalog()
     }
-    private fun localCatalog()=tab==5 || tab==6 || collection!=null
+    private fun localCatalog()=tab==6 || tab==7 || collection!=null
     private fun localItems(): List<Series> = when(collection) {
         "later" -> library.later()
         "updates" -> library.favorites().filter { (library.favoriteUpdate(it.id)?.added ?: 0)>0 }
         "resume" -> library.history().filterNot { library.watched(it.series.id) }.map { it.series }
-        else -> if(tab==5) library.favorites() else library.history().map { it.series }
+        else -> if(tab==6) library.favorites() else library.history().map { it.series }
     }
     private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
@@ -465,7 +466,7 @@ class MainActivity: Activity() {
         if(fetch) {
             // Theme mode: the persistent home cache holds the 全部 feed, not the theme's
             // list — showing it while loading would look like the filter is not applied.
-            val cached=if((tab==0 || tab==1 || tab==2) && page==1 && themeSlug.isBlank()) library.cachedHome(tabContentType()) else null
+            val cached=if((tab==0 || tab==1 || tab==2 || tab==3) && page==1 && themeSlug.isBlank()) library.cachedHome(tabContentType()) else null
             catalog=cached?.items ?: emptyList(); hasMore=cached?.hasMore ?: false; ranking=null; homeFromCache=cached!=null
             // Home shelves need both content types; seed them from the per-type caches.
             if(tab==0 && page==1) {
@@ -480,7 +481,7 @@ class MainActivity: Activity() {
         brand.addView(ImageView(this).apply { setImageResource(com.hongguotv.nativeapp.R.drawable.app_logo_transparent) },lp(dp(28),dp(28)).apply { rightMargin=dp(9) })
         brand.addView(text("红果",22f).apply { typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL) })
         top.addView(brand,lp(dp(120),dp(44)))
-        listOf("首页","短剧","漫剧","搜索","排行榜","收藏","最近观看","设置").forEachIndexed { index,label ->
+        listOf("首页","短剧","漫剧","AI剧","搜索","排行榜","收藏","最近观看","设置").forEachIndexed { index,label ->
             val item=addButton(top,label,index==tab) { switchTab(index) }
             fun paint(focused: Boolean) {
                 item.setTextColor(if(focused) bg else if(index==tab) accent else muted)
@@ -501,12 +502,12 @@ class MainActivity: Activity() {
         }
         container.addView(top)
         container.addView(View(this).apply { setBackgroundColor(TvStyle.outline) },lp(-1,dp(1)).apply { bottomMargin=dp(6) })
-        if(tab==7) {
+        if(tab==8) {
             // The settings scroll is tracked so the back key can snap it to the top.
             val scroll=ScrollView(this); settingsScroll=scroll; val body=column(); scroll.addView(body); container.addView(scroll,lp(-1,0).apply { weight=1f })
             settings(body); if(focusNav) nav[tab].requestFocus(); return
         }
-        if(tab==1 || tab==2) {
+        if(tab==1 || tab==2 || tab==3) {
             // Global short-drama / comic-drama tab: a plain card grid of that content type.
             // Theme bar right below the nav: 全部 (default feed) + the site's theme list.
             val themes=themesFor(tabContentType())
@@ -562,7 +563,7 @@ class MainActivity: Activity() {
                 nav.forEach { it.nextFocusDownId=themeButtons[current]?.id ?: themeButtons[""]!!.id }
             } else nav.forEach { it.nextFocusDownId=View.NO_ID }
         }
-        if(tab==3) {
+        if(tab==4) {
             // Global search: full-width three-column keyboard layout, no content-type filter.
             // Left ~30%: query box + search/clear + phone-input/delete + A-Z grid.
             // Middle ~30%: live suggestions. Right ~40%: history, or result cards after a search.
@@ -571,7 +572,7 @@ class MainActivity: Activity() {
             // Returning from a detail page lands on the top nav "搜索" tab in the fresh three-column layout.
             if(focusNav) nav[tab].requestFocus()
             return
-        } else if(tab==4) {
+        } else if(tab==5) {
             val boards=row().apply { setPadding(0,dp(8),0,dp(6)) }
             boards.addView(text("片库",12f,muted),lp(dp(42),-2))
             val current=library.rankBoard
@@ -606,13 +607,13 @@ class MainActivity: Activity() {
             container.addView(rankSubtitle)
             nav.forEach { it.nextFocusDownId=rankButtons[current]?.id ?: rankRefresh!!.id }
             rankButtons.values.forEach { it.nextFocusDownId=rankRefresh!!.id }
-        } else if(tab>4) {
+        } else if(tab>5) {
             val heading=row().apply { setPadding(0,dp(14),0,dp(6)) }
-            heading.addView(text(if(tab==5) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
-            if(tab==5) {
+            heading.addView(text(if(tab==6) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
+            if(tab==6) {
                 favoriteCheck=addButton(heading,"检查更新") { favoriteMonitor.check(force=true) }.apply { nextFocusUpId=nav[tab].id }
             }
-            if(tab==6 && library.history().isNotEmpty()) {
+            if(tab==7 && library.history().isNotEmpty()) {
                 historyManage=addButton(heading,"管理记录") {
                     val rows=library.history()
                     tvTools.choose("选择要管理的观看记录",rows.map { it.series.title },historyManage,{ index -> manageHistory(rows[index].series,historyManage) },"清空记录") {
@@ -621,7 +622,7 @@ class MainActivity: Activity() {
                 }.apply { nextFocusUpId=nav[tab].id }
             }
             container.addView(heading)
-            if(tab==5) {
+            if(tab==6) {
                 favoriteStatus=text(favoriteMonitor.status,13f,muted).apply { setPadding(0,0,0,dp(6)) }; container.addView(favoriteStatus)
             }
         }
@@ -630,7 +631,7 @@ class MainActivity: Activity() {
             catalog=localItems(); ranking=null; page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=page*pageSize<catalog.size
         }
         if(fetch) {
-            if(tab==0 || tab==1 || tab==2) catalogGrid(body,focusNav,focusType,loading=true)
+            if(tab==0 || tab==1 || tab==2 || tab==3) catalogGrid(body,focusNav,focusType,loading=true)
             else {
                 message(body,"正在加载…")
                 // Board switch: focus the freshly selected board button while loading.
@@ -650,7 +651,9 @@ class MainActivity: Activity() {
                     // a comic theme's list must go there, not into the first.
                     2 -> if(requestThemeObj!=null) CatalogPage(emptyList(),false) to repository.themeCatalog(ContentType.COMIC,requestThemeObj,requestPage)
                         else CatalogPage(emptyList(),false) to repository.home(requestPage,ContentType.COMIC)
-                    4 -> CatalogPage(emptyList(),false) to repository.ranking(requestBoard,requestPage)
+                    3 -> if(requestThemeObj!=null) repository.themeCatalog(ContentType.AI,requestThemeObj,requestPage) to CatalogPage(emptyList(),false)
+                        else repository.home(requestPage,ContentType.AI) to CatalogPage(emptyList(),false)
+                    5 -> CatalogPage(emptyList(),false) to repository.ranking(requestBoard,requestPage)
                     else -> repository.search(requestQuery,requestPage,requestType) to CatalogPage(emptyList(),false)
                 }
             }, { (shortResult,comicResult) ->
@@ -660,22 +663,25 @@ class MainActivity: Activity() {
                     val cacheKey=when {
                         requestTab==1 && requestThemeObj!=null -> "theme:short:${requestTheme}"
                         requestTab==2 && requestThemeObj!=null -> "theme:comic:${requestTheme}"
+                        requestTab==3 && requestThemeObj!=null -> "theme:ai:${requestTheme}"
                         else -> null
                     }
                     if(cacheKey!=null) {
-                        val themeResult=if(requestTab==1) shortResult else comicResult
+                        val themeResult=if(requestTab==1 || requestTab==3) shortResult else comicResult
                         catalogCache[cacheKey]=System.currentTimeMillis() to CatalogState(requestPage,themeResult.items,themeResult.hasMore,null)
                     }
                     when(requestTab) {
                         1 -> if(requestThemeObj==null) catalogCache["short"]=System.currentTimeMillis() to CatalogState(requestPage,shortResult.items,shortResult.hasMore,shortResult.ranking)
                         2 -> if(requestThemeObj==null) catalogCache["comic"]=System.currentTimeMillis() to CatalogState(requestPage,comicResult.items,comicResult.hasMore,comicResult.ranking)
-                        4 -> catalogCache["rank:${requestBoard.storedValue}"]=System.currentTimeMillis() to CatalogState(requestPage,comicResult.items,comicResult.hasMore,comicResult.ranking)
+                        3 -> if(requestThemeObj==null) catalogCache["ai"]=System.currentTimeMillis() to CatalogState(requestPage,shortResult.items,shortResult.hasMore,shortResult.ranking)
+                        5 -> catalogCache["rank:${requestBoard.storedValue}"]=System.currentTimeMillis() to CatalogState(requestPage,comicResult.items,comicResult.hasMore,comicResult.ranking)
                     }
                     if(requestTab==0) homeFetchedAt=System.currentTimeMillis()
                     when(requestTab) {
                         0 -> { library.cacheHome(ContentType.SHORT,shortResult.items,shortResult.hasMore); library.cacheHome(ContentType.COMIC,comicResult.items,comicResult.hasMore) }
                         1 -> if(requestThemeObj==null) library.cacheHome(ContentType.SHORT,shortResult.items,shortResult.hasMore)
                         2 -> if(requestThemeObj==null) library.cacheHome(ContentType.COMIC,comicResult.items,comicResult.hasMore)
+                        3 -> if(requestThemeObj==null) library.cacheHome(ContentType.AI,shortResult.items,shortResult.hasMore)
                     }
                 }
                 if(requestTab==0 && requestPage==1) {
@@ -686,7 +692,7 @@ class MainActivity: Activity() {
                         homeScreen?.refresh?.setOnClickListener { showCatalog() }
                     } else showCatalog()
                 } else {
-                    val result=if(requestTab==1) shortResult else if(requestTab==2) comicResult else if(requestTab==4) comicResult else shortResult
+                    val result=if(requestTab==1 || requestTab==3) shortResult else if(requestTab==2) comicResult else if(requestTab==5) comicResult else shortResult
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
                     val keepNav=nav.any { it.hasFocus() }; val keepType=rankButtons.values.any { it.hasFocus() } || rankFocusBoard!=null
                     // Theme switch: focus is sitting on a theme button (the bar lives above
@@ -705,7 +711,7 @@ class MainActivity: Activity() {
                     return@work
                 }
                 catalog=emptyList(); hasMore=false; ranking=null
-                if(requestTab==4) rankSubtitle?.text="榜单加载失败" else tabSubtitle?.text="内容加载失败"
+                if(requestTab==5) rankSubtitle?.text="榜单加载失败" else tabSubtitle?.text="内容加载失败"
                 if(problem is SearchSessionExpiredException) {
                     page=1; catalogFocus=""
                     Toast.makeText(this,"搜索结果已过期，已回到第 1 页刷新",Toast.LENGTH_LONG).show()
@@ -730,7 +736,7 @@ class MainActivity: Activity() {
             body.addView(heading)
         }
         // Infinite grids append pages in place, so their scroll key ignores the page number.
-        catalogPageKey=if(tab==1 || tab==2 || tab==4) "$tab:${collection.orEmpty()}:$themeSlug:$query" else "$tab:${collection.orEmpty()}:$page:$query"
+        catalogPageKey=if(tab==1 || tab==2 || tab==3 || tab==5) "$tab:${collection.orEmpty()}:$themeSlug:$query" else "$tab:${collection.orEmpty()}:$page:$query"
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
         // Collapsible preview everywhere (theme tabs, ranking, favorites, history):
         // the whole bar hides until a card actually takes focus and shows its title.
@@ -738,40 +744,40 @@ class MainActivity: Activity() {
         val scroll=ScrollView(this).apply { isFillViewport=false; isVerticalScrollBarEnabled=false; clipToPadding=false }; catalogScroll=scroll
         val list=column(); scroll.addView(list); body.addView(scroll,lp(-1,0).apply { weight=1f })
         var restoringScroll=true
-        val displayed=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize) else if(tab==1 || tab==2 || tab==4) catalog else if(tab==0) catalog.filterNot { it.id in library.hidden() } else catalog.take(30)
+        val displayed=if(localCatalog()) catalog.drop((page-1)*pageSize).take(pageSize) else if(tab==1 || tab==2 || tab==3 || tab==5) catalog else if(tab==0) catalog.filterNot { it.id in library.hidden() } else catalog.take(30)
         if(displayed.isEmpty()) {
-            message(list,if(loading) "正在加载推荐…" else when(tab) { 3 -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关${library.contentType.label}，换个关键词试试"; 5 -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; 6 -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
+            message(list,if(loading) "正在加载推荐…" else when(tab) { 4 -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关${library.contentType.label}，换个关键词试试"; 6 -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; 7 -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
             if((tab==0 || localCatalog()) && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) }
             if((tab==0 || localCatalog()) && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) }
             if(themeFocusSlug!=null) { val slug=themeFocusSlug; themeFocusSlug=null; themeButtons[slug]?.requestFocus() ?: nav[tab].requestFocus() }
             // Focus already sits on a theme button (empty theme result): leave it there.
-            else if((tab==1 || tab==2) && themeButtons.values.any { it.hasFocus() }) Unit
+            else if((tab==1 || tab==2 || tab==3) && themeButtons.values.any { it.hasFocus() }) Unit
             else if(focusType) rankButtons[rankFocusBoard ?: library.rankBoard]?.requestFocus() ?: nav[tab].requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else nav[tab].requestFocus()
             return
         }
         val cards=mutableListOf<View>(); val count=6; val gap=dp(14); val width=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
-        // Infinite grids (short/comic/ranking tabs) append pages as focus reaches the last row.
-        val infiniteScroll=tab==1 || tab==2 || tab==4
+        // Infinite grids (short/comic/ai/ranking tabs) append pages as focus reaches the last row.
+        val infiniteScroll=tab==1 || tab==2 || tab==3 || tab==5
         val flatIndex=mutableMapOf<View,Int>()
         displayed.chunked(count).forEach { items ->
             val line=row(); line.gravity=Gravity.TOP
             items.forEachIndexed { columnIndex,item ->
                 val card=column(); card.setPadding(dp(4),dp(4),dp(4),dp(9)); focusStyle(card); card.contentDescription=item.title; card.tag=item.id; catalogCards[item.id]=card
-                // Ranking (tab 4) and comic (tab 2) pages carry heat metadata in
+                // Ranking (tab 5) and comic (tab 2) pages carry heat metadata in
                 // ranking.positions; no rank badge is drawn on the artwork.
-                val position=if(tab==4 || tab==2) ranking?.positions?.get(item.id) else null
+                val position=if(tab==5 || tab==2) ranking?.positions?.get(item.id) else null
                 val artwork=FrameLayout(this); card.addView(artwork,lp(-1,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
                 val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }; artwork.addView(image,FrameLayout.LayoutParams(-1,-1)); loadCover(image,item.cover); cardImages[item.id]=image to item.cover
                 card.addView(text(item.title,14f).apply { maxLines=2; minLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),dp(7),dp(3),0) },lp(-1,-2).apply { weight=1f })
-                val progress=if(tab==6 || collection=="resume") library.progress(item.id) else null
+                val progress=if(tab==7 || collection=="resume") library.progress(item.id) else null
                 // Unified card badge: episode count followed by heat when available
                 // (e.g. "全40集   100万热度" / "更新至80集   100万热度" / "第1集·00:10   100万热度").
-                val heat=if(tab==4 || tab==2) position?.heat else null
-                val episodeText=if(tab==5) library.favoriteLabel(item.id) else if(progress!=null) if(library.watched(item.id)) "整剧已看完" else "第${progress.episodeIndex+1}集·${formatTime(progress.position)}" else item.badge
+                val heat=if(tab==5 || tab==2) position?.heat else null
+                val episodeText=if(tab==6) library.favoriteLabel(item.id) else if(progress!=null) if(library.watched(item.id)) "整剧已看完" else "第${progress.episodeIndex+1}集·${formatTime(progress.position)}" else item.badge
                 val badgeText=if(heat.isNullOrBlank()) episodeText else listOf(episodeText,heat).filter { it.isNotBlank() }.joinToString("   ")
-                val badge=text(badgeText,12f,if(tab==4 || tab==5) accent else muted).apply { maxLines=1; minLines=1; minHeight=dp(19); ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) }
-                card.addView(badge,lp(-1,-2)); if(tab==5) favoriteBadges[item.id]=badge
-                card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==6 || collection=="resume" || collection=="updates") }
+                val badge=text(badgeText,12f,if(tab==5 || tab==6) accent else muted).apply { maxLines=1; minLines=1; minHeight=dp(19); ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),0,0,0) }
+                card.addView(badge,lp(-1,-2)); if(tab==6) favoriteBadges[item.id]=badge
+                card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==7 || collection=="resume" || collection=="updates") }
                 card.setOnLongClickListener { catalogFocus=item.id; quickActions(item,card); true }
                 card.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
                 card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused)
@@ -801,9 +807,9 @@ class MainActivity: Activity() {
             }
         } else {
             val paging=row(); paging.gravity=Gravity.CENTER
-            if(tab<=4 || localCatalog()) {
+            if(tab<=5 || localCatalog()) {
                 prev=addButton(paging,"上一页") { if(page>1) { page--; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=page>1; isFocusable=page>1; alpha=if(page>1) 1f else .4f }
-                paging.addView(text(if(localCatalog()) "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页" else if(tab==4 && ranking!=null) "第 $page / ${ranking!!.totalPages} 页" else "第 $page 页",14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==4) 135 else 95),dp(44)))
+                paging.addView(text(if(localCatalog()) "第 $page / ${maxOf(1,(catalog.size+pageSize-1)/pageSize)} 页" else if(tab==5 && ranking!=null) "第 $page / ${ranking!!.totalPages} 页" else "第 $page 页",14f,muted).apply { gravity=Gravity.CENTER },lp(dp(if(tab==5) 135 else 95),dp(44)))
                 next=addButton(paging,"下一页") { if(hasMore) { page++; catalogFocus=""; showCatalog(!localCatalog()) } }.apply { isEnabled=hasMore; isFocusable=hasMore; alpha=if(hasMore) 1f else .4f }
                 list.addView(paging,lp(-1,dp(50)))
             }
@@ -814,7 +820,7 @@ class MainActivity: Activity() {
             card.nextFocusUpId=if(index<count) (collectionBack?.id ?: themeButtons[themeSlug]?.id ?: tabRefresh?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: nav[tab].id) else cards[index-count].id
             card.nextFocusDownId=if(index+count<cards.size) cards[index+count].id else if(index/count<cards.lastIndex/count) cards.last().id else next?.takeIf { it.isFocusable }?.id ?: prev?.takeIf { it.isFocusable }?.id ?: card.id
         }
-        nav.forEach { it.nextFocusDownId=if(infiniteScroll && tab!=4) (themeButtons[themeSlug]?.id ?: cards.first().id) else tabRefresh?.id ?: rankButtons[library.rankBoard]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
+        nav.forEach { it.nextFocusDownId=if(infiniteScroll && tab!=5) (themeButtons[themeSlug]?.id ?: cards.first().id) else tabRefresh?.id ?: rankButtons[library.rankBoard]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
         themeButtons.values.forEach { it.nextFocusDownId=cards.first().id }
         rankButtons.values.forEach { it.nextFocusDownId=rankRefresh?.id ?: cards.first().id }
         rankRefresh?.nextFocusDownId=cards.first().id
@@ -828,9 +834,9 @@ class MainActivity: Activity() {
             themeFocusSlug!=null -> { val slug=themeFocusSlug; themeFocusSlug=null; themeButtons[slug]?.requestFocus() ?: nav[tab].requestFocus() }
             // Focus already sits on a theme button (data arrived after a theme switch):
             // leave it alone — do not hand focus to the nav.
-            (tab==1 || tab==2) && themeButtons.values.any { it.hasFocus() } -> Unit
+            (tab==1 || tab==2 || tab==3) && themeButtons.values.any { it.hasFocus() } -> Unit
             focusNav -> nav[tab].requestFocus()
-            (tab==1 || tab==2) && catalogFocus.isBlank() -> nav[tab].requestFocus()
+            (tab==1 || tab==2 || tab==3) && catalogFocus.isBlank() -> nav[tab].requestFocus()
             else -> cards[displayed.indexOfFirst { it.id==catalogFocus }.coerceAtLeast(0)].requestFocus()
         }
         val savedScroll=scrollPositions[catalogPageKey]
@@ -870,20 +876,21 @@ class MainActivity: Activity() {
         loadingMore=true
         val requestTab=tab; val requestBoard=library.rankBoard; val nextPage=page+1
         val requestType=tabContentType(); val requestTheme=themeSlug
-        val requestThemeObj=if(requestTheme.isBlank() || (requestTab!=1 && requestTab!=2)) null else themesByType[requestType]?.firstOrNull { it.slug==requestTheme }
+        val requestThemeObj=if(requestTheme.isBlank() || (requestTab!=1 && requestTab!=2 && requestTab!=3)) null else themesByType[requestType]?.firstOrNull { it.slug==requestTheme }
         work({
             when(requestTab) {
                 1 -> if(requestThemeObj!=null) repository.themeCatalog(ContentType.SHORT,requestThemeObj,nextPage) else repository.home(nextPage,ContentType.SHORT)
                 2 -> if(requestThemeObj!=null) repository.themeCatalog(ContentType.COMIC,requestThemeObj,nextPage) else repository.home(nextPage,ContentType.COMIC)
-                4 -> repository.ranking(requestBoard,nextPage)
+                3 -> if(requestThemeObj!=null) repository.themeCatalog(ContentType.AI,requestThemeObj,nextPage) else repository.home(nextPage,ContentType.AI)
+                5 -> repository.ranking(requestBoard,nextPage)
                 else -> CatalogPage(emptyList(),false)
             }
         }, { result ->
             loadingMore=false
             if(requestTab!=tab || screen!="catalog") return@work
             // Board/theme switched while the request was in flight: drop the stale result.
-            if(requestTab==4 && requestBoard!=library.rankBoard) return@work
-            if((requestTab==1 || requestTab==2) && requestTheme!=themeSlug) return@work
+            if(requestTab==5 && requestBoard!=library.rankBoard) return@work
+            if((requestTab==1 || requestTab==2 || requestTab==3) && requestTheme!=themeSlug) return@work
             // Deduplicate against what is already on screen, then append.
             val known=catalog.map { it.id }.toHashSet()
             val fresh=result.items.filterNot { it.id in known }
@@ -966,15 +973,15 @@ class MainActivity: Activity() {
         val labels=mutableListOf(if(library.progress(series.id)!=null) "继续观看" else "直接播放",
             if(library.favorite(series.id)) "取消收藏" else "收藏这部剧",
             if(library.queued(series.id)) "移出稍后看" else "加入稍后看","查看剧集详情")
-        if(tab==0 || tab==1 || tab==2) labels+="不在热门推荐中显示"
-        if(tab==6) labels+="管理观看记录"
+        if(tab==0 || tab==1 || tab==2 || tab==3) labels+="不在热门推荐中显示"
+        if(tab==7) labels+="管理观看记录"
         tvTools.choose(series.title,labels,anchor,{ choice ->
             when(choice) {
                 0 -> openDetail(series,true)
-                1 -> { val added=library.toggle(series); Toast.makeText(this,if(added) "已收藏" else "已取消收藏",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && (tab==5 || collection=="updates")); if(added) favoriteMonitor.check() }
+                1 -> { val added=library.toggle(series); Toast.makeText(this,if(added) "已收藏" else "已取消收藏",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && (tab==6 || collection=="updates")); if(added) favoriteMonitor.check() }
                 2 -> { val added=library.toggleLater(series); Toast.makeText(this,if(added) "已加入稍后看" else "已移出稍后看",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && collection=="later") }
                 3 -> openDetail(series)
-                4 -> if(tab==6) manageHistory(series,anchor) else { library.hide(series.id); Toast.makeText(this,"已隐藏热门推荐，可在设置中恢复",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,true) }
+                4 -> if(tab==7) manageHistory(series,anchor) else { library.hide(series.id); Toast.makeText(this,"已隐藏热门推荐，可在设置中恢复",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,true) }
             }
         })
     }
@@ -1281,7 +1288,7 @@ class MainActivity: Activity() {
         tvSuggestJob?.cancel(true)
         tvSuggestJob=io.submit {
             val result=runCatching { repository.suggestions(keyword) }.getOrDefault(emptyList())
-            main.post { if(ticket==tvSuggestTicket && screen=="catalog" && tab==3) { tvSuggests=result; renderTvSuggests() } }
+            main.post { if(ticket==tvSuggestTicket && screen=="catalog" && tab==4) { tvSuggests=result; renderTvSuggests() } }
         }
     }
 
@@ -1877,7 +1884,7 @@ class MainActivity: Activity() {
         if(!library.isLoaded) { finish(); return }
         when(screen) {
             "player" -> if(hud.visibility==View.VISIBLE && !playError) hidePlaybackOverlay() else returnToDetail()
-            "detail" -> if(tab==3) {
+            "detail" -> if(tab==4) {
                 // Leaving a drama opened from search results: back to the fresh three-column
                 // search layout, focus on the top nav "搜索" tab, query text dropped.
                 tvResultQuery=""; catalog=emptyList(); hasMore=false; tvQuery=""; tvSuggests=emptyList()
@@ -1892,15 +1899,15 @@ class MainActivity: Activity() {
                 // Focus on the top nav of a non-home tab: back goes home (initial state).
                 if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() } else finish()
             }
-            else if(tab==3) {
+            else if(tab==4) {
                 // Search page: one back press snaps all three scroll columns to the top
                 // (suggestions / history / results, whichever is visible) and moves focus
                 // up to the nav bar tab. The query and results stay as they were.
                 tvSuggestScroll?.scrollTo(0,0); tvHistoryScroll?.scrollTo(0,0); tvResultScroll?.scrollTo(0,0)
                 nav[tab].requestFocus()
             }
-            else if(tab==1 || tab==2) {
-                // Short/comic theme pages: two-step chain — cards → theme bar → nav bar
+            else if(tab==1 || tab==2 || tab==3) {
+                // Short/comic/AI theme pages: two-step chain — cards → theme bar → nav bar
                 // (mirrors the ranking board chain). Focus on a card (or the list
                 // scrolled): back snaps the list to the top and puts focus on the
                 // current theme button; focus already on the theme bar: back moves
@@ -1912,7 +1919,7 @@ class MainActivity: Activity() {
                     themeButtons[themeSlug]?.requestFocus() ?: nav[tab].requestFocus()
                 } else nav[tab].requestFocus()
             }
-            else if(tab==5 || tab==6 || tab==7) {
+            else if(tab==6 || tab==7 || tab==8) {
                 // Card/settings pages: one back press does both — snap the page back to
                 // the top and move focus up to the nav bar tab. scrollTo (not smooth)
                 // so long lists jump instantly; the saved scroll position is cleared so
@@ -1923,7 +1930,7 @@ class MainActivity: Activity() {
                 catalogFocus=catalog.firstOrNull()?.id.orEmpty()
                 nav[tab].requestFocus()
             }
-            else if(tab==4) {
+            else if(tab==5) {
                 // Ranking: three-step chain — cards → board bar → nav bar → home.
                 // Focus on a card (or the list scrolled): back snaps the list to the
                 // top and puts focus on the current board button; focus already on a
@@ -2007,7 +2014,7 @@ class MainActivity: Activity() {
                 when(screen) {
                     "player" -> playEpisode(episodeIndex,startPosition,autoplay=false)
                     "detail" -> if(detail!=null) showDetail(false) else pendingDetail?.let { openDetail(it,resume=false,autoplay=false) } ?: showCatalog()
-                    else -> showCatalog(load=!localCatalog() && catalog.isEmpty() && (tab<=2 || tab==4))
+                    else -> showCatalog(load=!localCatalog() && catalog.isEmpty() && (tab<=3 || tab==5))
                 }
             } else {
                 val waiting=deferredWork; deferredWork=null; waiting?.apply?.invoke()

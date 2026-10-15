@@ -221,8 +221,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
 
     // ---------- theme sub-categories (website category pages) ----------
 
-    /** Website category root path for a content type (real-drama / comic-drama). */
-    private fun categoryPath(type: ContentType) = if(type==ContentType.COMIC) "comic-drama" else "real-drama"
+    /** Website category root path for a content type (real-drama / comic-drama / ai-drama). */
+    private fun categoryPath(type: ContentType) = when(type) {
+        ContentType.COMIC -> "comic-drama"
+        ContentType.AI -> "ai-drama"
+        else -> "real-drama"
+    }
 
     private val themeCache=linkedMapOf<String, Pair<Long,List<Theme>>>()
     private val themeTtlMs=30*60*1000L
