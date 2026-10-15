@@ -13,12 +13,26 @@ import java.util.concurrent.TimeUnit
 
 data class AppUpdate(val versionCode: Long, val versionName: String, val minSdk: Int,
                      val tag: String, val fileName: String, val size: Long, val sha256: String, val notes: String) {
-    fun newerThan(installed: Long, sdk: Int) = versionCode > installed && minSdk <= sdk
+    /** Version-name comparison (1.0.10 > 1.0.9 > 1.0.4): all builds ship the same
+     *  fixed versionCode so any two versions can replace each other (downgrades
+     *  included), and the update channel decides "newer" by name, not by code. */
+    fun newerThan(installedName: String, sdk: Int) = versionName != installedName && minSdk <= sdk && versionNewer(versionName, installedName)
     val downloadUrl get() = "$RELEASES/download/$tag/$fileName"
     companion object {
         const val REPOSITORY = "fyworld/hongguoTV"
         const val RELEASES = "https://github.com/$REPOSITORY/releases"
         const val MAX_APK_BYTES = 80L * 1024 * 1024
+        /** Semantic comparison of dotted numeric versions (1.0.10 > 1.0.9). */
+        fun versionNewer(a: String, b: String): Boolean {
+            val left = a.split('.').map { it.toIntOrNull() ?: 0 }
+            val right = b.split('.').map { it.toIntOrNull() ?: 0 }
+            val n = maxOf(left.size, right.size)
+            for (i in 0 until n) {
+                val l = left.getOrNull(i) ?: 0; val r = right.getOrNull(i) ?: 0
+                if (l != r) return l > r
+            }
+            return false
+        }
         fun parse(json: String): AppUpdate {
             val o = JSONObject(json)
             require(o.getInt("schema") == 1 && o.getString("packageName") == "com.hongguotv.nativeapp") { "更新信息不匹配" }

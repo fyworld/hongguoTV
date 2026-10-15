@@ -21,8 +21,17 @@ class AppUpdatesTest {
         try { block(File(dir, "update.apk")) } finally { dir.deleteRecursively() }
     }
     @Test fun onlyHigherCompatibleVersionsAreUpdates() {
-        val update = update()
-        assertTrue(update.newerThan(9, 26)); assertFalse(update.newerThan(10001, 36)); assertFalse(update.newerThan(10002, 36)); assertFalse(update.newerThan(9, 23))
+        val update = update()  // versionName 0.9.0+1
+        assertTrue(update.newerThan("0.8.9", 26)); assertFalse(update.newerThan("0.9.0+1", 36)); assertFalse(update.newerThan("1.0.0", 36)); assertFalse(update.newerThan("0.9.0+1", 23))
+    }
+    @Test fun versionNamesCompareNumericallyNotLexically() {
+        // 1.0.10 > 1.0.9 numerically (lexically "1.0.10" < "1.0.9" — the trap this guards).
+        assertTrue(AppUpdate.versionNewer("1.0.10", "1.0.9"))
+        assertFalse(AppUpdate.versionNewer("1.0.9", "1.0.10"))
+        assertTrue(AppUpdate.versionNewer("1.0.4", "1.0.3"))
+        assertFalse(AppUpdate.versionNewer("1.0.3", "1.0.3"))
+        assertTrue(AppUpdate.versionNewer("2.0", "1.9.9"))
+        assertFalse(AppUpdate.versionNewer("1.0", "1.0.1"))
     }
     @Test fun downloadUrlUsesOnlyFixedRepositoryAndValidatedNames() {
         assertEquals("https://github.com/fyworld/hongguoTV/releases/download/kotlin-v0.9.0-build.1/hongguotv-kotlin-0.9.0-build.1-android8.apk", update().downloadUrl)
@@ -37,7 +46,7 @@ class AppUpdatesTest {
         o.getJSONObject("apk").put("name", "hongguotv-kotlin-1.0.1-android7.apk")
         val update = AppUpdate.parse(o.toString())
         assertEquals("https://github.com/fyworld/hongguoTV/releases/download/kotlin-v1.0.1/hongguotv-kotlin-1.0.1-android7.apk", update.downloadUrl)
-        assertTrue(update.newerThan(10, 24))
+        assertTrue(update.newerThan("1.0.0", 24))
         assertThrows(IllegalArgumentException::class.java) { AppUpdate.parse(json().put("minSdk", 23).toString()) }
     }
     @Test fun rejectOtherPackageAndInvalidSchema() {

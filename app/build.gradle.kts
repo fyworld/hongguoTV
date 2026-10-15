@@ -11,7 +11,11 @@ android {
         applicationId = "com.hongguotv.nativeapp"
         minSdk = 24
         targetSdk = 34
-        versionCode = System.getenv("HONGGUOTV_VERSION_CODE")?.toInt() ?: 10
+        // Fixed 999 for every build (test AND release): Android only allows replacing an
+        // installed package when the new versionCode is >= the old one, so a constant code
+        // lets any two versions overwrite each other in both directions (downgrades too).
+        // The in-app updater decides "newer" by versionName comparison instead.
+        versionCode = 999
         versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "1.0.0"
     }
     buildFeatures { buildConfig = true }
