@@ -11,9 +11,9 @@ import java.util.concurrent.TimeUnit
 internal fun JSONArray.objects() = (0 until length()).mapNotNull { optJSONObject(it) }
 internal fun JSONObject.str(key: String) = if (isNull(key)) "" else optString(key, "").trim()
 internal fun cleanUrl(s: String) = s.replace("\\/","/").replace("\\u002F","/",ignoreCase=true).replace("\\u0026","&").replace("&amp;","&")
-data class Series(val id: String, val title: String, val cover: String = "", val description: String = "", val badge: String = "", val tags: String = "") {
-    fun toJson() = JSONObject().put("id",id).put("title",title).put("cover",cover).put("description",description).put("badge",badge).put("tags",tags)
-    companion object { fun fromJson(o: JSONObject) = Series(o.str("id"),o.str("title"),o.str("cover"),o.str("description"),o.str("badge"),o.str("tags")) }
+data class Series(val id: String, val title: String, val cover: String = "", val description: String = "", val badge: String = "", val tags: String = "", val heat: String = "") {
+    fun toJson() = JSONObject().put("id",id).put("title",title).put("cover",cover).put("description",description).put("badge",badge).put("tags",tags).put("heat",heat)
+    companion object { fun fromJson(o: JSONObject) = Series(o.str("id"),o.str("title"),o.str("cover"),o.str("description"),o.str("badge"),o.str("tags"),o.str("heat")) }
 }
 data class Detail(val series: Series, val episodes: List<String>, val contentType: ContentType = ContentType.SHORT)
 data class RankPosition(val rank: Int?, val heat: String)
@@ -83,7 +83,19 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             cleanUrl(o.str("series_cover").ifEmpty { o.str("cover") }),
             o.str("series_intro").ifEmpty { o.str("description") },
             o.str("episode_right_text").ifEmpty { if(count>0) "全 $count 集" else "" },
-            (0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) })
+            (0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) },
+            playCountText(o.optLong("play_cnt", 0)))
+    }
+
+    /** Feed rows carry a raw play_cnt; render it the way the site does (万 units). */
+    private fun playCountText(count: Long): String = when {
+        count <= 0 -> ""
+        count < 10000 -> "$count 播放"
+        else -> {
+            val wan = count / 10000.0
+            val text = if (wan >= 100) wan.toInt().toString() else String.format("%.1f", wan)
+            "${text}万播放"
+        }
     }
 
     /** True when a feed row's category_schema contains [name] (e.g. 穿越). */

@@ -57,6 +57,31 @@ fun main(args: Array<String>) {
         }
         return
     }
+    if(args.contains("--heat")) {
+        // Live verification of the card heat/play-count badge: the feed rows carry a raw
+        // play_cnt (rendered as "964 播放" / "1.2万播放"), the website comic category page
+        // carries no heat at all.
+        try {
+            for(type in listOf(ContentType.SHORT,ContentType.AI)) {
+                val home=repository.home(type=type)
+                check(home.items.isNotEmpty())
+                val withHeat=home.items.count { it.heat.isNotBlank() }
+                println("${type.label}Home: items=${home.items.size}; withHeat=$withHeat; top3=${home.items.take(3).joinToString(" / ") { "${it.title}[${it.heat}]" }}")
+            }
+            val comic=repository.home(type=ContentType.COMIC)
+            println("comicHome(website): items=${comic.items.size}; withHeat=${comic.items.count { it.heat.isNotBlank() }} (expected 0)")
+            for(type in listOf(ContentType.SHORT,ContentType.COMIC,ContentType.AI)) {
+                val themes=repository.themes(type)
+                val chuanyue=themes.first { it.slug=="chuanyue" }
+                val page=repository.themeCatalog(type,chuanyue)
+                val withHeat=page.items.count { it.heat.isNotBlank() }
+                println("${type.label}Chuanyue: items=${page.items.size}; withHeat=$withHeat; top3=${page.items.take(3).joinToString(" / ") { "${it.title}[${it.heat}]" }}")
+            }
+        } finally {
+            repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
+        }
+        return
+    }
     if(args.contains("--comicfeed")) {
         // Live verification: comic "全部" from the website category catalog (800
         // entries, 34 pages), chuanyue via the landpage theme filter (real/comic)
