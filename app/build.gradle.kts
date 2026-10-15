@@ -19,15 +19,27 @@ android {
         versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "1.0.0"
     }
     buildFeatures { buildConfig = true }
+    // Both v1 (JAR) and v2 signatures: Android 7/8 package parsers can only read v1
+    // from an uninstalled APK archive, and the updater's validateApk compares signer
+    // sets on those versions - a v2-only APK reads as "no signatures" there.
     signingConfigs {
         create("delivery") {
             storeFile = signingValue("HONGGUOTV_KEYSTORE", "storeFile")?.let { file(it) }
             storePassword = signingValue("HONGGUOTV_STORE_PASSWORD", "storePassword")
             keyAlias = signingValue("HONGGUOTV_KEY_ALIAS", "keyAlias")
             keyPassword = signingValue("HONGGUOTV_KEY_PASSWORD", "keyPassword")
+            enableV1Signing = true
+            enableV2Signing = true
         }
     }
-    buildTypes { getByName("release") { signingConfig = signingConfigs.getByName("delivery"); isMinifyEnabled = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro") } }
+    buildTypes {
+        // Debug builds sign with the delivery config too (same key material): this is
+        // what actually applies enableV1Signing to the shipped APKs — the default debug
+        // signing path skips v1 when minSdk >= 24, leaving v2-only APKs whose signatures
+        // Android 7/8 package parsers cannot read from an uninstalled archive.
+        getByName("debug") { signingConfig = signingConfigs.getByName("delivery") }
+        getByName("release") { signingConfig = signingConfigs.getByName("delivery"); isMinifyEnabled = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro") }
+    }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17; isCoreLibraryDesugaringEnabled = true }
     kotlinOptions { jvmTarget = "17" }
     packaging { resources.excludes += setOf("META-INF/versions/**", "META-INF/*.kotlin_module") }

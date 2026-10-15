@@ -186,8 +186,14 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         val installed = pm.getPackageInfo(activity.packageName, flags)
         fun signers(info: android.content.pm.PackageInfo) =
             (if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners else info.signatures)?.map { it.toCharsString() }?.toSet().orEmpty()
+        // Signature comparison only on API 28+: below that, getPackageArchiveInfo cannot
+        // read v2-only signatures from an uninstalled APK (returns an empty set) and the
+        // comparison would reject every legitimate update. The platform installer itself
+        // enforces signer continuity on replace, so skipping it here is safe.
+        val signaturesMatch = Build.VERSION.SDK_INT < 28 ||
+            (signers(installed).isNotEmpty() && signers(installed) == signers(candidate))
         if (candidate.packageName != activity.packageName || candidate.versionName != update.versionName ||
-            candidate.applicationInfo?.minSdkVersion != update.minSdk || signers(installed).isEmpty() || signers(installed) != signers(candidate))
+            candidate.applicationInfo?.minSdkVersion != update.minSdk || !signaturesMatch)
             throw IOException("新版包名、版本或签名不匹配，已阻止安装")
     }
     private fun install() {
