@@ -219,6 +219,36 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
 
     fun comicRanking(page: Int = 1): CatalogPage = ranking(RankBoard.COMIC,page)
 
+    // ---------- theme sub-categories (website category pages) ----------
+
+    /** Website category root path for a content type (real-drama / comic-drama). */
+    private fun categoryPath(type: ContentType) = if(type==ContentType.COMIC) "comic-drama" else "real-drama"
+
+    private val themeCache=linkedMapOf<String, Pair<Long,List<Theme>>>()
+    private val themeTtlMs=30*60*1000L
+
+    /** Theme list for a content type: read from the category root page (selectorList,
+     *  follows site changes); falls back to the built-in list when the page fails. */
+    fun themes(type: ContentType): List<Theme> {
+        val key="themes:${type.storedValue}"
+        val now=System.currentTimeMillis()
+        synchronized(themeCache) {
+            val cached=themeCache[key]
+            if(cached!=null && now<cached.first) return cached.second
+        }
+        val themes=runCatching { ThemeCategory.parseThemes(webText("$site/category/${categoryPath(type)}"),type) }
+            .getOrNull()
+        val list=themes ?: ThemeCategory.fallback(type)
+        if(themes!=null) synchronized(themeCache) { themeCache[key]=now+themeTtlMs to list }
+        return list
+    }
+
+    /** One theme's series page (24 per page, ~34 pages per theme). */
+    fun themeCatalog(type: ContentType, theme: Theme, page: Int = 1): CatalogPage {
+        require(theme.slug.matches(Regex("[a-z0-9-]{1,40}")) && page in 1..100)
+        return ThemeCategory.parse(webText("$site/category/${categoryPath(type)}/${theme.slug}?page=$page"),page,theme,type)
+    }
+
     /** The four website boards: 总热播榜 / 真人剧榜 / 漫剧榜 / AI剧榜.
      *  Each board holds 100 entries (5 pages x 20); the whole board is fetched at once —
      *  the TV grid renders all cards immediately and the infinite scroll simply has

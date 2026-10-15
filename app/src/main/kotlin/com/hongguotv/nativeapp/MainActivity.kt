@@ -73,6 +73,17 @@ class MainActivity: Activity() {
     /** Refresh button + status line for the global short/comic drama tabs. */
     private var tabRefresh: View?=null
     private var tabSubtitle: TextView?=null
+    /** Theme sub-category bar for the short/comic tabs: "" = 全部 (default feed). */
+    private var themeSlug=""
+    private val themeButtons=mutableMapOf<String,View>()
+    /** Set by switchTheme: after the new theme loads, focus stays on that theme button. */
+    private var themeFocusSlug: String?=null
+    /** Theme list per content type (session cache; fetched once, follows site changes). */
+    private val themesByType=mutableMapOf<ContentType,List<Theme>>()
+    /** Theme selection per tab (1=短剧, 2=漫剧): "" = 全部. */
+    private val tabTheme=mutableMapOf<Int,String>()
+    /** Horizontally scrolling theme bar container, tracked to keep it scrolled to the focused button. */
+    private var themeScroll: HorizontalScrollView?=null
     /** Home shelves show both content types at once; each tab keeps its own catalog. */
     private var homeShort=emptyList<Series>()
     private var homeComic=emptyList<Series>()
@@ -190,8 +201,8 @@ class MainActivity: Activity() {
     private var homeFetchedAt=0L
     private val catalogTtlMs=10*60*1000L
     private fun cacheKeyFor(requestTab: Int,board: RankBoard?=null): String?=when {
-        requestTab==1 -> "short"
-        requestTab==2 -> "comic"
+        requestTab==1 -> if(themeSlug.isBlank()) "short" else "theme:short:${themeSlug}"
+        requestTab==2 -> if(themeSlug.isBlank()) "comic" else "theme:comic:${themeSlug}"
         requestTab==4 -> "rank:${(board ?: library.rankBoard).storedValue}"
         else -> null
     }
@@ -243,7 +254,9 @@ class MainActivity: Activity() {
         view.id=View.generateViewId(); view.isFocusable=true; view.isFocusableInTouchMode=true
         // Focus ring is white across all buttons, matching the top nav's focus colour.
         fun paint(focused: Boolean) { view.background=rounded(if(focused) TvStyle.raised else if(selected) Color.rgb(61,39,34) else surface,if(focused) white else Color.TRANSPARENT) }
-        paint(false); view.setOnFocusChangeListener { _,focused -> paint(focused) }
+        // Any button taking focus means no card is focused: collapse the title preview
+        // row. Deterministic — does not depend on the card's focus-loss event firing.
+        paint(false); view.setOnFocusChangeListener { _,focused -> paint(focused); if(focused) selectionPreview?.blank() }
     }
     private fun button(label: String,selected: Boolean=false,onClick: ()->Unit): TextView = text(label,15f).apply {
         gravity=Gravity.CENTER; setPadding(dp(14),dp(10),dp(14),dp(10)); minHeight=dp(42); focusStyle(this,selected); setOnClickListener { onClick() }
@@ -309,6 +322,7 @@ class MainActivity: Activity() {
         nav.clear(); rankButtons.clear(); rankTitle=null
         historyManage=null; rankRefresh=null; rankSubtitle=null; collectionBack=null; favoriteBadges.clear()
         favoriteStatus=null; favoriteCheck=null; tabRefresh=null; tabSubtitle=null
+        themeButtons.clear(); themeScroll=null
         catalogCards.clear(); cardImages.clear()
         tvSuggestList=null; tvSuggestTitle=null; tvQueryView=null; tvSearchButton=null; tvBackspace=null; tvClear=null; tvFirstKey=null
         tvSuggestScroll=null; tvHistoryScroll=null; tvResultScroll=null; tvPhoneButton=null; tvClearHistory=null
@@ -342,8 +356,39 @@ class MainActivity: Activity() {
         val detail=if(problem is java.net.UnknownHostException) "无法连接内容网站" else if(problem is java.net.SocketTimeoutException) "连接超时" else problem.message.orEmpty().replace(Regex("https?://\\S+"),"[地址]").take(160)
         parent.addView(text(detail,13f,muted)); addButton(parent,"重试",onClick=retry).requestFocus()
     }
+    /** Theme list for the current content type: session cache first, then repository. */
+    private fun themesFor(type: ContentType): List<Theme> {
+        themesByType[type]?.let { return it }
+        val themes=runCatching { repository.themes(type) }.getOrDefault(emptyList())
+        if(themes.isNotEmpty()) themesByType[type]=themes
+        return themes
+    }
+    private fun switchTheme(slug: String) {
+        if(themeSlug==slug || (tab!=1 && tab!=2)) return
+        // Focus-landing switch: defer the rebuild one frame so the focus transfer to the
+        // new theme button settles first (same as switchRankBoard's direct-switch path);
+        // rebuilding synchronously inside onFocusChange would detach the just-focused
+        // button before the focus move commits, and Android hands focus back to the nav.
+        // themeFocusSlug restores focus onto that button after the rebuild.
+        if(!rebuildingGrid && themeButtons[slug]?.hasFocus()==true) {
+            themeSlug=slug
+            themeFocusSlug=slug
+            tabState.remove(tab); tabFocus.remove(tab)
+            page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""
+            main.post { if((tab==1 || tab==2) && themeSlug==slug && screen=="catalog") showCatalog(load=true) }
+            return
+        }
+        themeSlug=slug
+        themeFocusSlug=slug
+        tabState.remove(tab); tabFocus.remove(tab)
+        rebuildingGrid=true
+        try {
+            releaseCatalogViews()
+            page=1; catalog=emptyList(); hasMore=false; ranking=null; catalogFocus=""
+            showCatalog(load=true)
+        } finally { rebuildingGrid=false }
+    }
     private fun switchRankBoard(board: RankBoard) {
-        if(library.rankBoard==board || tab!=4) return
         // Focus-landing switch: defer the rebuild one frame so the focus transfer to the
         // new board button settles first; the rebuild then restores focus onto that
         // button via rankFocusBoard. No visible flicker back to the old board.
@@ -371,7 +416,10 @@ class MainActivity: Activity() {
         if(next==tab) return
         leaveCollection(); homeResetDone=false
         tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
+        // Theme selection is per-tab: remember the leaving tab's theme, restore the entering one.
+        if(tab==1 || tab==2) tabTheme[tab]=themeSlug
         tab=next; val saved=tabState[next]; page=saved?.page ?: 1; catalog=saved?.items ?: emptyList(); hasMore=saved?.hasMore ?: false; ranking=saved?.ranking; catalogFocus=tabFocus[next].orEmpty()
+        if(next==1 || next==2) themeSlug=tabTheme[next].orEmpty()
         // Entering the search tab always starts fresh: keep history, drop query and results.
         if(next==3) { tvQuery=""; tvSuggests=emptyList(); tvResultQuery=""; catalog=emptyList(); hasMore=false; query="" }
         // Focus arrived on another nav button (D-pad left/right): the page switches under
@@ -415,7 +463,9 @@ class MainActivity: Activity() {
         }
         // Never cache a new page number with the previous page's results while a request is pending.
         if(fetch) {
-            val cached=if((tab==0 || tab==1 || tab==2) && page==1) library.cachedHome(tabContentType()) else null
+            // Theme mode: the persistent home cache holds the 全部 feed, not the theme's
+            // list — showing it while loading would look like the filter is not applied.
+            val cached=if((tab==0 || tab==1 || tab==2) && page==1 && themeSlug.isBlank()) library.cachedHome(tabContentType()) else null
             catalog=cached?.items ?: emptyList(); hasMore=cached?.hasMore ?: false; ranking=null; homeFromCache=cached!=null
             // Home shelves need both content types; seed them from the per-type caches.
             if(tab==0 && page==1) {
@@ -439,6 +489,9 @@ class MainActivity: Activity() {
             }
             paint(false); item.setOnFocusChangeListener { _,focused ->
                 paint(focused)
+                // Focus on the nav bar (D-pad up from the cards / back key): collapse
+                // the title preview row.
+                if(focused) selectionPreview?.blank()
                 // D-pad left/right across the global nav switches the page immediately,
                 // no OK press needed. The focused nav button keeps focus (no jump).
                 // Suppressed during in-place grid rebuilds (infinite scroll): focus is
@@ -455,8 +508,59 @@ class MainActivity: Activity() {
         }
         if(tab==1 || tab==2) {
             // Global short-drama / comic-drama tab: a plain card grid of that content type.
-            // No heading row — the nav tab itself identifies the page; cards start right below.
-            nav.forEach { it.nextFocusDownId=View.NO_ID }
+            // Theme bar right below the nav: 全部 (default feed) + the site's theme list.
+            val themes=themesFor(tabContentType())
+            if(themes.isNotEmpty()) {
+                val bar=row().apply { setPadding(0,dp(8),0,dp(6)); gravity=Gravity.LEFT }
+                val scroll=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; isFillViewport=false }
+                val strip=row().apply { gravity=Gravity.LEFT }
+                scroll.addView(strip)
+                themeScroll=scroll
+                val current=themeSlug
+                themeButtons[""]=addButton(strip,"全部",current.isBlank()) { switchTheme("") }
+                    .apply {
+                        isSelected=current.isBlank(); nextFocusUpId=nav[tab].id
+                        fun paint(focused: Boolean) { background=rounded(if(focused) TvStyle.raised else if(isSelected) Color.rgb(61,39,34) else surface,if(focused) white else Color.TRANSPARENT) }
+                        paint(false)
+                        setOnFocusChangeListener { _,focused ->
+                            paint(focused)
+                            // Focus landing on a theme button switches immediately (same
+                            // direct-switch feel as the rank board bar); suppressed while
+                            // the grid rebuilds in place.
+                            if(focused && themeSlug!="" && !rebuildingGrid) switchTheme("")
+                            // Focus back on the theme bar: collapse the title preview row.
+                            if(focused) selectionPreview?.blank()
+                        }
+                    }
+                themes.forEach { theme ->
+                    themeButtons[theme.slug]=addButton(strip,theme.label,current==theme.slug) { switchTheme(theme.slug) }
+                        .apply {
+                            isSelected=current==theme.slug; nextFocusUpId=nav[tab].id
+                            fun paint(focused: Boolean) { background=rounded(if(focused) TvStyle.raised else if(isSelected) Color.rgb(61,39,34) else surface,if(focused) white else Color.TRANSPARENT) }
+                            paint(false)
+                            setOnFocusChangeListener { _,focused ->
+                                paint(focused)
+                                if(focused && themeSlug!=theme.slug && !rebuildingGrid) switchTheme(theme.slug)
+                                // Focus back on the theme bar: collapse the title preview row.
+                                if(focused) selectionPreview?.blank()
+                                // Keep the focused button inside the visible strip as
+                                // focus moves right beyond the screen edge.
+                                if(focused) scroll.post { scroll.smoothScrollTo((left-scroll.width+width+dp(12)).coerceAtLeast(0),0) }
+                            }
+                        }
+                }
+                // Explicit left/right chain: the first/last buttons lock (pressing right
+                // past the last theme stays put) — Android's geometric search would
+                // otherwise escape upward to the nav bar on a short strip.
+                val ordered=themeButtons.values.toList()
+                ordered.forEachIndexed { index,view ->
+                    view.nextFocusLeftId=if(index==0) view.id else ordered[index-1].id
+                    view.nextFocusRightId=if(index==ordered.lastIndex) view.id else ordered[index+1].id
+                }
+                bar.addView(scroll,lp(0,dp(46)).apply { weight=1f })
+                container.addView(bar)
+                nav.forEach { it.nextFocusDownId=themeButtons[current]?.id ?: themeButtons[""]!!.id }
+            } else nav.forEach { it.nextFocusDownId=View.NO_ID }
         }
         if(tab==3) {
             // Global search: full-width three-column keyboard layout, no content-type filter.
@@ -483,6 +587,10 @@ class MainActivity: Activity() {
                         paint(false)
                         setOnFocusChangeListener { _,focused ->
                             paint(focused)
+                            // Focus landing on a board button switches the board immediately,
+                            // no OK press needed — same direct-switch feel as the top nav.
+                            // Focus back on the board bar: collapse the title preview row.
+                            if(focused) selectionPreview?.blank()
                             if(focused && board!=library.rankBoard && !rebuildingGrid) switchRankBoard(board)
                         }
                     }
@@ -530,13 +638,18 @@ class MainActivity: Activity() {
                 else nav[tab].requestFocus()
             }
             val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=tabContentType(); val requestBoard=library.rankBoard
+            val requestTheme=themeSlug; val requestThemeObj=if(requestTheme.isBlank()) null else themesByType[requestType]?.firstOrNull { it.slug==requestTheme }
             work({
                 // The home tab fetches both content types at once so its two shelves
                 // (热门发现·短剧 / 热门发现·漫剧) refresh together.
                 when(requestTab) {
                     0 -> repository.home(requestPage,ContentType.SHORT) to repository.home(requestPage,ContentType.COMIC)
-                    1 -> repository.home(requestPage,ContentType.SHORT) to CatalogPage(emptyList(),false)
-                    2 -> CatalogPage(emptyList(),false) to repository.home(requestPage,ContentType.COMIC)
+                    1 -> if(requestThemeObj!=null) repository.themeCatalog(ContentType.SHORT,requestThemeObj,requestPage) to CatalogPage(emptyList(),false)
+                        else repository.home(requestPage,ContentType.SHORT) to CatalogPage(emptyList(),false)
+                    // The pair is (shortResult, comicResult) and tab 2 reads the SECOND slot:
+                    // a comic theme's list must go there, not into the first.
+                    2 -> if(requestThemeObj!=null) CatalogPage(emptyList(),false) to repository.themeCatalog(ContentType.COMIC,requestThemeObj,requestPage)
+                        else CatalogPage(emptyList(),false) to repository.home(requestPage,ContentType.COMIC)
                     4 -> CatalogPage(emptyList(),false) to repository.ranking(requestBoard,requestPage)
                     else -> repository.search(requestQuery,requestPage,requestType) to CatalogPage(emptyList(),false)
                 }
@@ -544,16 +657,25 @@ class MainActivity: Activity() {
                 if(requestPage==1) {
                     // Session cache: remember the fetched page so tab/board switches within
                     // the TTL re-render instead of re-fetching.
+                    val cacheKey=when {
+                        requestTab==1 && requestThemeObj!=null -> "theme:short:${requestTheme}"
+                        requestTab==2 && requestThemeObj!=null -> "theme:comic:${requestTheme}"
+                        else -> null
+                    }
+                    if(cacheKey!=null) {
+                        val themeResult=if(requestTab==1) shortResult else comicResult
+                        catalogCache[cacheKey]=System.currentTimeMillis() to CatalogState(requestPage,themeResult.items,themeResult.hasMore,null)
+                    }
                     when(requestTab) {
-                        1 -> catalogCache["short"]=System.currentTimeMillis() to CatalogState(requestPage,shortResult.items,shortResult.hasMore,shortResult.ranking)
-                        2 -> catalogCache["comic"]=System.currentTimeMillis() to CatalogState(requestPage,comicResult.items,comicResult.hasMore,comicResult.ranking)
+                        1 -> if(requestThemeObj==null) catalogCache["short"]=System.currentTimeMillis() to CatalogState(requestPage,shortResult.items,shortResult.hasMore,shortResult.ranking)
+                        2 -> if(requestThemeObj==null) catalogCache["comic"]=System.currentTimeMillis() to CatalogState(requestPage,comicResult.items,comicResult.hasMore,comicResult.ranking)
                         4 -> catalogCache["rank:${requestBoard.storedValue}"]=System.currentTimeMillis() to CatalogState(requestPage,comicResult.items,comicResult.hasMore,comicResult.ranking)
                     }
                     if(requestTab==0) homeFetchedAt=System.currentTimeMillis()
                     when(requestTab) {
                         0 -> { library.cacheHome(ContentType.SHORT,shortResult.items,shortResult.hasMore); library.cacheHome(ContentType.COMIC,comicResult.items,comicResult.hasMore) }
-                        1 -> library.cacheHome(ContentType.SHORT,shortResult.items,shortResult.hasMore)
-                        2 -> library.cacheHome(ContentType.COMIC,comicResult.items,comicResult.hasMore)
+                        1 -> if(requestThemeObj==null) library.cacheHome(ContentType.SHORT,shortResult.items,shortResult.hasMore)
+                        2 -> if(requestThemeObj==null) library.cacheHome(ContentType.COMIC,comicResult.items,comicResult.hasMore)
                     }
                 }
                 if(requestTab==0 && requestPage==1) {
@@ -567,10 +689,14 @@ class MainActivity: Activity() {
                     val result=if(requestTab==1) shortResult else if(requestTab==2) comicResult else if(requestTab==4) comicResult else shortResult
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
                     val keepNav=nav.any { it.hasFocus() }; val keepType=rankButtons.values.any { it.hasFocus() } || rankFocusBoard!=null
+                    // Theme switch: focus is sitting on a theme button (the bar lives above
+                    // the body, so it survives this rebuild) — keep it there, never push
+                    // focus to the nav.
+                    val keepTheme=themeFocusSlug!=null || themeButtons.values.any { it.hasFocus() }
                     rankTitle?.text=library.rankBoard.label
                     rankSubtitle?.text=ranking?.updatedText?.ifBlank { "来源：红果${library.rankBoard.label}" } ?: "来源：红果${library.rankBoard.label}"
                     tabSubtitle?.text="来源：红果${tabContentType().label}"
-                    body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType)
+                    body.removeAllViews(); catalogGrid(body,keepNav || focusNav,keepType || focusType || keepTheme)
                 }
             }, { problem ->
                 if(requestTab==0 && requestPage==1) {
@@ -604,10 +730,11 @@ class MainActivity: Activity() {
             body.addView(heading)
         }
         // Infinite grids append pages in place, so their scroll key ignores the page number.
-        catalogPageKey=if(tab==1 || tab==2 || tab==4) "$tab:${collection.orEmpty()}::$query" else "$tab:${collection.orEmpty()}:$page:$query"
+        catalogPageKey=if(tab==1 || tab==2 || tab==4) "$tab:${collection.orEmpty()}:$themeSlug:$query" else "$tab:${collection.orEmpty()}:$page:$query"
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
-        // Short/comic grids show no headline until a card actually takes focus.
-        if((tab==1 || tab==2) && catalogFocus.isBlank()) preview.blank()
+        // Collapsible preview everywhere (theme tabs, ranking, favorites, history):
+        // the whole bar hides until a card actually takes focus and shows its title.
+        preview.collapsible=true; if(catalogFocus.isBlank()) preview.blank()
         val scroll=ScrollView(this).apply { isFillViewport=false; isVerticalScrollBarEnabled=false; clipToPadding=false }; catalogScroll=scroll
         val list=column(); scroll.addView(list); body.addView(scroll,lp(-1,0).apply { weight=1f })
         var restoringScroll=true
@@ -616,7 +743,10 @@ class MainActivity: Activity() {
             message(list,if(loading) "正在加载推荐…" else when(tab) { 3 -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关${library.contentType.label}，换个关键词试试"; 5 -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; 6 -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
             if((tab==0 || localCatalog()) && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) }
             if((tab==0 || localCatalog()) && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) }
-            if(focusType) rankButtons[rankFocusBoard ?: library.rankBoard]?.requestFocus() ?: nav[tab].requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else nav[tab].requestFocus()
+            if(themeFocusSlug!=null) { val slug=themeFocusSlug; themeFocusSlug=null; themeButtons[slug]?.requestFocus() ?: nav[tab].requestFocus() }
+            // Focus already sits on a theme button (empty theme result): leave it there.
+            else if((tab==1 || tab==2) && themeButtons.values.any { it.hasFocus() }) Unit
+            else if(focusType) rankButtons[rankFocusBoard ?: library.rankBoard]?.requestFocus() ?: nav[tab].requestFocus() else if(collectionBack!=null && !focusNav) collectionBack?.requestFocus() else nav[tab].requestFocus()
             return
         }
         val cards=mutableListOf<View>(); val count=6; val gap=dp(14); val width=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
@@ -644,10 +774,16 @@ class MainActivity: Activity() {
                 card.setOnClickListener { catalogFocus=item.id; openDetail(item,tab==6 || collection=="resume" || collection=="updates") }
                 card.setOnLongClickListener { catalogFocus=item.id; quickActions(item,card); true }
                 card.setOnKeyListener { _,key,event -> if(key==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { catalogFocus=item.id; quickActions(item,card) }; true } else false }
-                card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused); if(focused) { catalogFocus=item.id; loadCover(image,item.cover); preview.show(item,selectionStatus(item));
+                card.setOnFocusChangeListener { _,focused -> card.background=TvStyle.card(this,focused)
+                    if(focused) { catalogFocus=item.id; loadCover(image,item.cover); preview.show(item,selectionStatus(item));
                     // Infinite grids: reaching the last row auto-loads the next page and appends.
                     if(infiniteScroll && hasMore && (flatIndex[card] ?: 0)+count>=cards.size) loadMore()
-                    if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when { line.top<scroll.scrollY -> line.top; line.bottom>scroll.scrollY+scroll.height -> (line.bottom-scroll.height).coerceAtLeast(0); else -> scroll.scrollY }) } } }
+                    if(!restoringScroll) scroll.post { scroll.smoothScrollTo(0,when { line.top<scroll.scrollY -> line.top; line.bottom>scroll.scrollY+scroll.height -> (line.bottom-scroll.height).coerceAtLeast(0); else -> scroll.scrollY }) } }
+                    // Focus left the cards (paging row / refresh button / nav bar): collapse
+                    // the title preview row again. Deferred one message: a card→card move
+                    // fires the old card's loss before the new card's gain.
+                    else if(preview.collapsible) main.post { if(!cards.any { it.hasFocus() }) preview.blank() }
+                }
                 // The row measures its tallest card, then stretches siblings to keep badges aligned.
                 line.addView(card,lp(width,-1).apply { if(columnIndex<count-1) rightMargin=gap }); cards+=card; flatIndex[card]=cards.size-1
             }
@@ -675,10 +811,11 @@ class MainActivity: Activity() {
         cards.forEachIndexed { index,card ->
             card.nextFocusLeftId=if(index%count==0) card.id else cards[index-1].id
             card.nextFocusRightId=if(index%count==count-1 || index==cards.lastIndex) card.id else cards[index+1].id
-            card.nextFocusUpId=if(index<count) (collectionBack?.id ?: tabRefresh?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: nav[tab].id) else cards[index-count].id
+            card.nextFocusUpId=if(index<count) (collectionBack?.id ?: themeButtons[themeSlug]?.id ?: tabRefresh?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: nav[tab].id) else cards[index-count].id
             card.nextFocusDownId=if(index+count<cards.size) cards[index+count].id else if(index/count<cards.lastIndex/count) cards.last().id else next?.takeIf { it.isFocusable }?.id ?: prev?.takeIf { it.isFocusable }?.id ?: card.id
         }
-        nav.forEach { it.nextFocusDownId=if(infiniteScroll && tab!=4) cards.first().id else tabRefresh?.id ?: rankButtons[library.rankBoard]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
+        nav.forEach { it.nextFocusDownId=if(infiniteScroll && tab!=4) (themeButtons[themeSlug]?.id ?: cards.first().id) else tabRefresh?.id ?: rankButtons[library.rankBoard]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
+        themeButtons.values.forEach { it.nextFocusDownId=cards.first().id }
         rankButtons.values.forEach { it.nextFocusDownId=rankRefresh?.id ?: cards.first().id }
         rankRefresh?.nextFocusDownId=cards.first().id
         tabRefresh?.nextFocusDownId=cards.first().id
@@ -688,6 +825,10 @@ class MainActivity: Activity() {
         when {
             homeGridFocus -> { homeGridFocus=false; cards.first().requestFocus() }
             rankFocusBoard!=null -> { val board=rankFocusBoard; rankFocusBoard=null; rankButtons[board]?.requestFocus() ?: nav[tab].requestFocus() }
+            themeFocusSlug!=null -> { val slug=themeFocusSlug; themeFocusSlug=null; themeButtons[slug]?.requestFocus() ?: nav[tab].requestFocus() }
+            // Focus already sits on a theme button (data arrived after a theme switch):
+            // leave it alone — do not hand focus to the nav.
+            (tab==1 || tab==2) && themeButtons.values.any { it.hasFocus() } -> Unit
             focusNav -> nav[tab].requestFocus()
             (tab==1 || tab==2) && catalogFocus.isBlank() -> nav[tab].requestFocus()
             else -> cards[displayed.indexOfFirst { it.id==catalogFocus }.coerceAtLeast(0)].requestFocus()
@@ -728,18 +869,21 @@ class MainActivity: Activity() {
         if(!hasMore || loadingMore) return
         loadingMore=true
         val requestTab=tab; val requestBoard=library.rankBoard; val nextPage=page+1
+        val requestType=tabContentType(); val requestTheme=themeSlug
+        val requestThemeObj=if(requestTheme.isBlank() || (requestTab!=1 && requestTab!=2)) null else themesByType[requestType]?.firstOrNull { it.slug==requestTheme }
         work({
             when(requestTab) {
-                1 -> repository.home(nextPage,ContentType.SHORT)
-                2 -> repository.home(nextPage,ContentType.COMIC)
+                1 -> if(requestThemeObj!=null) repository.themeCatalog(ContentType.SHORT,requestThemeObj,nextPage) else repository.home(nextPage,ContentType.SHORT)
+                2 -> if(requestThemeObj!=null) repository.themeCatalog(ContentType.COMIC,requestThemeObj,nextPage) else repository.home(nextPage,ContentType.COMIC)
                 4 -> repository.ranking(requestBoard,nextPage)
                 else -> CatalogPage(emptyList(),false)
             }
         }, { result ->
             loadingMore=false
             if(requestTab!=tab || screen!="catalog") return@work
-            // Board switched while the request was in flight: drop the stale result.
+            // Board/theme switched while the request was in flight: drop the stale result.
             if(requestTab==4 && requestBoard!=library.rankBoard) return@work
+            if((requestTab==1 || requestTab==2) && requestTheme!=themeSlug) return@work
             // Deduplicate against what is already on screen, then append.
             val known=catalog.map { it.id }.toHashSet()
             val fresh=result.items.filterNot { it.id in known }
@@ -760,9 +904,13 @@ class MainActivity: Activity() {
     private fun renderHome(body: LinearLayout,focusNav: Boolean,focusType: Boolean,loading: Boolean) {
         homeUpdateCount=library.updatedFavorites()
         val preview=SeriesPreview(this); selectionPreview=preview; body.addView(preview)
+        // Same collapsible preview as the other pages: hidden until a shelf card takes focus.
+        preview.collapsible=true; if(catalogFocus.isBlank()) preview.blank()
         val top=nav[0]
         val home=HomeScreen(this,top,::loadCover,{ item,label -> preview.show(item,if(label.startsWith("第 ")) selectionStatus(item) else listOf(label,selectionStatus(item)).filter { it.isNotBlank() }.joinToString(" · ")) },
-            { item,resume -> openDetail(item,resume) },::quickActions,{ catalogFocus=it })
+            { item,resume -> openDetail(item,resume) },::quickActions,{ catalogFocus=it },
+            // Focus left every shelf card (nav bar / refresh / more): collapse the row.
+            { preview.blank() })
         homeScreen=home; body.addView(home,lp(-1,0).apply { weight=1f })
         home.render(homeShelves(),catalogFocus,!focusNav && !focusType,null,homePosition)
         home.refresh.text=if(loading) if(homeFromCache) "已显示上次内容 · 正在更新热门…" else "正在更新热门…" else "刷新热门"
@@ -808,7 +956,9 @@ class MainActivity: Activity() {
             artwork.cancelPage(); favoriteBadges.clear()
             catalogBody?.let { body -> body.removeAllViews(); catalogGrid(body,false) }
         } else {
-            catalog.firstOrNull { it.id==changedId }?.let { selectionPreview?.show(it,selectionStatus(it)) }
+            // Only re-show the title row while its card actually holds focus; otherwise
+            // the collapsed bar would re-expand behind a dialog/nav-bar focus.
+            catalog.firstOrNull { it.id==changedId }?.takeIf { catalogCards[it.id]?.hasFocus()==true }?.let { selectionPreview?.show(it,selectionStatus(it)) }
             favoriteBadges[changedId]?.text=library.favoriteLabel(changedId)
         }
     }
@@ -1749,7 +1899,20 @@ class MainActivity: Activity() {
                 tvSuggestScroll?.scrollTo(0,0); tvHistoryScroll?.scrollTo(0,0); tvResultScroll?.scrollTo(0,0)
                 nav[tab].requestFocus()
             }
-            else if(tab==1 || tab==2 || tab==5 || tab==6 || tab==7) {
+            else if(tab==1 || tab==2) {
+                // Short/comic theme pages: two-step chain — cards → theme bar → nav bar
+                // (mirrors the ranking board chain). Focus on a card (or the list
+                // scrolled): back snaps the list to the top and puts focus on the
+                // current theme button; focus already on the theme bar: back moves
+                // focus up to the nav bar tab.
+                if(themeButtons[themeSlug]?.hasFocus()!=true) {
+                    catalogScroll?.scrollTo(0,0)
+                    scrollPositions.remove(catalogPageKey)
+                    catalogFocus=catalog.firstOrNull()?.id.orEmpty()
+                    themeButtons[themeSlug]?.requestFocus() ?: nav[tab].requestFocus()
+                } else nav[tab].requestFocus()
+            }
+            else if(tab==5 || tab==6 || tab==7) {
                 // Card/settings pages: one back press does both — snap the page back to
                 // the top and move focus up to the nav bar tab. scrollTo (not smooth)
                 // so long lists jump instantly; the saved scroll position is cleared so
@@ -1773,13 +1936,18 @@ class MainActivity: Activity() {
                 } else nav[tab].requestFocus()
             }
             else if(homeResetDone) {
-                if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() } else finish()
+                // The reset already ran (focus was moved back to the cards afterwards):
+                // re-run the reset instead of exiting — exit only happens from the nav tab.
+                if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() }
+                else { homeResetDone=true; catalogFocus=""; homePosition=null; scrollPositions.clear(); showCatalog(focusNav=true) }
             }
             else if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() }
             else {
-                // Focus already on the home nav tab: reset to the initial home state
-                // (接着看/热门发现 shelves, first card focused, scroll reset).
-                // One more back press after the reset exits the app.
+                // Focus on a home card: reset to the initial home state (shelves, scroll
+                // reset) and move focus up to the nav bar — the same two-step chain as
+                // every other page (cards → bar → nav → exit). Keeping focus on the
+                // first card after the reset made the next back press (homeResetDone)
+                // exit the app, which felt like a random exit.
                 homeResetDone=true
                 catalogFocus=""; homePosition=null; scrollPositions.clear(); showCatalog(focusNav=true)
             }

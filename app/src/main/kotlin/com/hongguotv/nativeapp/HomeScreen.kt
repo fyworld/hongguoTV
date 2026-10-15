@@ -15,6 +15,11 @@ class SeriesPreview(context: Context): LinearLayout(context) {
     private fun label(size: Float,color: Int)=TextView(context).apply { textSize=size; setTextColor(color); includeFontPadding=false }
     private val title=label(27f,TvStyle.text).apply { minLines=1; maxLines=1; ellipsize=TextUtils.TruncateAt.END; typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL) }
     private val meta=label(12f,TvStyle.muted).apply { minLines=1; maxLines=1; ellipsize=TextUtils.TruncateAt.END }
+    /** Collapsible mode (theme tabs): collapsed = the whole bar is GONE, no blank row
+     *  between the theme bar and the card grid; it expands as soon as a card takes focus. */
+    var collapsible=false
+        set(value) { field=value; updateCollapse() }
+    private var collapsed=false
     init {
         orientation=VERTICAL
         val dp=resources.displayMetrics.density
@@ -23,14 +28,21 @@ class SeriesPreview(context: Context): LinearLayout(context) {
         addView(meta,LayoutParams(-1,-2).apply { topMargin=(5*dp).toInt() })
         show(null,"")
     }
+    private fun updateCollapse() { if(collapsible && collapsed) visibility=View.GONE else visibility=View.VISIBLE }
     fun show(series: Series?,status: String) {
-        val nextTitle=series?.title ?: "下一段好故事，从这里开始"
-        val nextMeta=if(series==null) "浏览片库，选择你想看的剧" else listOf(status,series.badge,series.tags).flatMap { it.split('·') }.map(String::trim).filter { it.isNotBlank() && !it.all(Char::isDigit) }.distinct().joinToString("  /  ")
+        // No placeholder text: without a focused series the bar collapses (theme tabs)
+        // or holds empty fixed slots (rank page) — the slogan is gone for good.
+        if(series==null) { blank(); return }
+        collapsed=false; updateCollapse()
+        val nextTitle=series.title
+        val nextMeta=listOf(status,series.badge,series.tags).flatMap { it.split('·') }.map(String::trim).filter { it.isNotBlank() && !it.all(Char::isDigit) }.distinct().joinToString("  /  ")
         if(title.text.toString()!=nextTitle) title.text=nextTitle
         if(meta.text.toString()!=nextMeta) meta.text=nextMeta
     }
-    /** Empty the fixed text slots: no headline until a card actually takes focus. */
+    /** Empty the fixed text slots: no headline until a card actually takes focus.
+     *  In collapsible mode the whole bar hides instead of holding a blank row. */
     fun blank() {
+        if(collapsible) { collapsed=true; updateCollapse(); return }
         if(title.text.isNotEmpty()) title.text=""
         if(meta.text.isNotEmpty()) meta.text=""
     }
@@ -44,7 +56,11 @@ class HomeScreen(
     private val selected: (Series,String)->Unit,
     private val open: (Series,Boolean)->Unit,
     private val actions: (Series,View)->Unit,
-    private val remember: (String)->Unit
+    private val remember: (String)->Unit,
+    /** Fired when focus leaves every shelf card (nav bar / refresh / more): the caller
+     *  collapses its preview row. Deferred one message so a card→card move — where the
+     *  old card's loss fires before the new card's gain — is not mistaken for a exit. */
+    private val deselected: (() -> Unit)?=null
 ): LinearLayout(context) {
     data class Entry(val series: Series,val label: String,val resume: Boolean=false,val progress: Int?=null)
     data class Shelf(val key: String,val title: String,val entries: List<Entry>,val more: (() -> Unit)?=null)
@@ -66,7 +82,7 @@ class HomeScreen(
     private var lastRow: String?=null
     private var restoring=false
     private var revision=0
-    val refresh=label("正在更新热门…",13f).apply { id=View.generateViewId(); tag="home:refresh"; isFocusable=true; isFocusableInTouchMode=true; gravity=Gravity.CENTER_VERTICAL; setPadding(dp(12),dp(8),dp(12),dp(8)); background=shape(false); setOnFocusChangeListener { _,f -> background=shape(f); if(f) lastFocus=tag.toString() } }
+    val refresh=label("正在更新热门…",13f).apply { id=View.generateViewId(); tag="home:refresh"; isFocusable=true; isFocusableInTouchMode=true; gravity=Gravity.CENTER_VERTICAL; setPadding(dp(12),dp(8),dp(12),dp(8)); background=shape(false); setOnFocusChangeListener { _,f -> background=shape(f); if(f) { lastFocus=tag.toString(); deselected?.invoke() } } }
     init { orientation=VERTICAL; scroll.addView(contents); addView(scroll,LayoutParams(-1,0,1f)) }
 
     fun capturePosition(): Position {
@@ -95,7 +111,14 @@ class HomeScreen(
         return true
     }
 
-    fun refreshSelection() { cards[lastFocus]?.entry?.let { selected(it.series,it.label) } }
+    /** Re-announce the focused card (library updates). Guarded by real focus: when the
+     *  focus sits on the nav bar / refresh button the preview row must stay collapsed,
+     *  not re-expand with the last card's title. */
+    fun refreshSelection() {
+        val card=cards[lastFocus] ?: return
+        if(!card.view.hasFocus()) return
+        card.entry?.let { selected(it.series,it.label) }
+    }
 
     /** Retry visible cover requests after the owner cancels work for a page or lifecycle change. */
     fun reloadArtwork() {
@@ -143,6 +166,11 @@ class HomeScreen(
                             if(lastRow!=shelf.key) scroll.post { if(revision==ticket && view.hasFocus()) reveal(block) }
                         }
                         lastRow=shelf.key
+                    } else if(deselected!=null) {
+                        // Focus left this card: if no other card takes it (checked one
+                        // message later, after the focus transfer commits) the preview
+                        // row collapses. Card→card moves re-show it via selected().
+                        post { if(!cards.values.any { it.view.hasFocus() }) deselected?.invoke() }
                     }
                 }
                 line.addView(view,LayoutParams(width,-1).apply { rightMargin=dp(14) }); rowCards+=card; cards[key]=card
@@ -155,7 +183,7 @@ class HomeScreen(
         contents.addView(refresh,LayoutParams(-1,-2).apply { topMargin=dp(10) })
         val footer=mutableListOf<View>(refresh)
         if(more!=null) {
-            val next=label("更多热门  ›",15f).apply { id=View.generateViewId(); tag="home:more"; isFocusable=true; isFocusableInTouchMode=true; setPadding(dp(12),dp(12),dp(12),dp(12)); background=shape(false); setOnFocusChangeListener { _,f -> background=shape(f); if(f) lastFocus=tag.toString() }; setOnClickListener { more() } }
+            val next=label("更多热门  ›",15f).apply { id=View.generateViewId(); tag="home:more"; isFocusable=true; isFocusableInTouchMode=true; setPadding(dp(12),dp(12),dp(12),dp(12)); background=shape(false); setOnFocusChangeListener { _,f -> background=shape(f); if(f) { lastFocus=tag.toString(); deselected?.invoke() } }; setOnClickListener { more() } }
             contents.addView(next,LayoutParams(-1,-2).apply { topMargin=dp(8) }); footer+=next; moreButton=next
         }
         rows.forEachIndexed { i,row -> row.cards.forEachIndexed { j,card ->
@@ -219,9 +247,17 @@ class HomeScreen(
     }
     private fun loadNearbySelection() {
         if(restoring) return
-        val row=rows.indexOfFirst { it.cards.any { card -> card.key==lastFocus } }.coerceAtLeast(0)
-        val column=rows.getOrNull(row)?.cards?.indexOfFirst { it.key==lastFocus }?.coerceAtLeast(0) ?: 0
-        rows.getOrNull(row)?.cards?.let { items -> for(index in (column-1).coerceAtLeast(0)..(column+6).coerceAtMost(items.lastIndex)) requestCover(items[index]) }
+        val row=rows.indexOfFirst { it.cards.any { card -> card.key==lastFocus } }
+        if(row<0) {
+            // No card focused (focus on the nav bar / refresh button after a page reset):
+            // every shelf is potentially visible — request covers for all rows, not just
+            // the first two. cancelPage() cleared them; leaving the third shelf blank
+            // until focus happens to move near it looks like lost artwork.
+            rows.take(3).forEach { it.cards.take(8).forEach(::requestCover) }
+            return
+        }
+        val column=rows[row].cards.indexOfFirst { it.key==lastFocus }.coerceAtLeast(0)
+        rows[row].cards.let { items -> for(index in (column-1).coerceAtLeast(0)..(column+6).coerceAtMost(items.lastIndex)) requestCover(items[index]) }
         rows.getOrNull(row+1)?.cards?.take(6)?.forEach(::requestCover)
     }
     private fun requestCover(card: Card) {
