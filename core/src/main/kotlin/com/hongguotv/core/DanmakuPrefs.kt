@@ -4,7 +4,7 @@ package com.hongguotv.core
 /** 弹幕视觉档位表（索引存储；档位值与文案集中在此，UI 与渲染层共用）。 */
 object DanmakuPrefs {
     /** 字号 sp 档：小 / 标准 / 大。 */
-    val textSizes = listOf(14f, 16f, 18f)
+    val textSizes = listOf(16f, 18f, 20f)
     /** 全程滚动时长秒档：快 / 标准 / 慢。 */
     val travelSecs = listOf(8f, 11f, 14f)
     /** 行数档。 */
