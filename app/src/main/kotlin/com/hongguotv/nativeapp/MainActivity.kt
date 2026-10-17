@@ -123,6 +123,10 @@ class MainActivity: Activity() {
     private var sleepStopped=false
     private var playerView: PlayerView?=null
     private var danmakuOverlay: DanmakuOverlay?=null
+    private var danmakuJob: java.util.concurrent.Future<*>?=null
+    private val danmakuSeen=mutableSetOf<String>()
+    private var danmakuCursor=0L
+    private var danmakuDuration=0L
     private lateinit var favoriteMonitor: FavoriteMonitor
     private val favoriteBadges=mutableMapOf<String,TextView>()
     private var favoriteStatus: TextView?=null
@@ -1686,7 +1690,7 @@ class MainActivity: Activity() {
             }
             playerView=view; root.addView(view,FrameLayout.LayoutParams(-1,-1))
             if(library.danmaku) {
-                danmakuOverlay=DanmakuOverlay(this).apply { restyle(currentDanmakuParams()); loadDemoData() }
+                danmakuOverlay=DanmakuOverlay(this).apply { restyle(currentDanmakuParams()) }
                 root.addView(danmakuOverlay,FrameLayout.LayoutParams(-1,-1))
             }
             hud=column().apply { setPadding(dp(widthDp()*.05f),dp(20),dp(widthDp()*.05f),(resources.displayMetrics.heightPixels*.05f).toInt()); background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(Color.TRANSPARENT,Color.argb(240,11,15,21))) }
@@ -1701,6 +1705,9 @@ class MainActivity: Activity() {
         playbackText.text="正在获取播放地址…"; progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
+        // 弹幕：切集重置去重集，重新拉取本集弹幕
+        stopDanmakuFetch(); danmakuSeen.clear(); danmakuCursor=0; danmakuDuration=0
+        if(library.danmaku && danmakuOverlay!=null) startDanmakuFetch()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
         work({ prefetched ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality,data.contentType)).prepare() }, { remote ->
             video=remote; quality=remote.info.quality
@@ -1724,6 +1731,7 @@ class MainActivity: Activity() {
                             return
                         }
                         playbackReady=true
+                        if(p.duration>0) danmakuDuration=p.duration
                         if(firstReady) { firstReady=false; readySince=android.os.SystemClock.elapsedRealtime(); android.util.Log.i("HongguoTV","Playback ready episode=${episodeIndex+1} preloaded=${prefetched!=null} reused=$reuse elapsedMs=${readySince-playbackStarted}") }
                         if(hud.visibility==View.VISIBLE) updatePlaybackText()
                     }
@@ -1930,20 +1938,55 @@ class MainActivity: Activity() {
         }.apply { tag="playback-settings" }
         play.requestFocus()
     }
-    /** 弹幕开关（播放中即时生效：开=挂层+假数据，关=卸层）。 */
+    /** 弹幕开关（播放中即时生效：开=挂层+拉真实数据，关=卸层）。 */
     private fun toggleDanmakuInPlayer() {
         library.danmaku=!library.danmaku
         if(library.danmaku) {
             if(danmakuOverlay==null) {
-                danmakuOverlay=DanmakuOverlay(this).apply { restyle(currentDanmakuParams()); loadDemoData() }
+                danmakuOverlay=DanmakuOverlay(this).apply { restyle(currentDanmakuParams()) }
                 root.addView(danmakuOverlay,root.indexOfChild(hud.parent as View).coerceAtLeast(1))
+                startDanmakuFetch()
             }
-            Toast.makeText(this,"弹幕已开启（预览数据）",Toast.LENGTH_SHORT).show()
+            Toast.makeText(this,"弹幕已开启",Toast.LENGTH_SHORT).show()
         } else {
+            stopDanmakuFetch()
             danmakuOverlay?.let { root.removeView(it) }
             danmakuOverlay=null
             Toast.makeText(this,"弹幕已关闭",Toast.LENGTH_SHORT).show()
         }
+    }
+    /** 后台分页拉取真实弹幕（30s 窗口游标推进，comment_id 去重）。 */
+    private fun startDanmakuFetch() {
+        val data=detail ?: return
+        val videoId=data.episodes.getOrNull(episodeIndex) ?: return
+        val seriesId=data.series.id
+        val ticket=generation
+        stopDanmakuFetch()
+        danmakuSeen.clear(); danmakuCursor=0
+        danmakuJob=io.submit {
+            try {
+                while(!Thread.currentThread().isInterrupted) {
+                    val duration=if(danmakuDuration>0) danmakuDuration else 90000L
+                    val page=repository.danmakuPage(videoId,seriesId,danmakuCursor,duration)
+                    val fresh=page.items.filter { it.id !in danmakuSeen }
+                    fresh.forEach { danmakuSeen.add(it.id) }
+                    if(fresh.isNotEmpty()) main.post {
+                        if(danmakuOverlay!=null && generation==ticket && screen=="player") danmakuOverlay?.append(fresh.map { it.timeMs to it.text })
+                    }
+                    if(page.nextCursorMs<=danmakuCursor || page.nextCursorMs<0) break
+                    danmakuCursor=page.nextCursorMs
+                    // 预取下一窗口，别等播放到才拉
+                    Thread.sleep(2500)
+                }
+            } catch(e: InterruptedException) {
+                // 切集/退出：正常中断
+            } catch(e: Exception) {
+                android.util.Log.w("HongguoTV","Danmaku fetch failed: ${e.message}")
+            }
+        }
+    }
+    private fun stopDanmakuFetch() {
+        danmakuJob?.cancel(true); danmakuJob=null
     }
     /** 弹幕样式摘要（设置页与菜单共用）。 */
     private fun danmakuStyleSummary() =
@@ -2071,7 +2114,7 @@ class MainActivity: Activity() {
         speedDialog?.dismiss(); speedDialog=null
         main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); pendingSeek=null
         playerListener?.let { player?.removeListener(it) }; playerListener=null
-        video?.close(); video=null; playerView?.player=null; playerView=null; danmakuOverlay?.shutdown(); danmakuOverlay=null; player?.release(); player=null; playbackReady=false; transportPlay=null; sleepButton=null
+        video?.close(); video=null; playerView?.player=null; playerView=null; stopDanmakuFetch(); danmakuOverlay?.shutdown(); danmakuOverlay=null; player?.release(); player=null; playbackReady=false; transportPlay=null; sleepButton=null
         closeTransport(playbackHttp); playbackHttp=null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }

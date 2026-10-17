@@ -101,13 +101,20 @@ class DanmakuOverlay(context: Context) : View(context) {
     private var playheadAnchorRealtime = 0L
     private var playheadAnchorMs = 0L
 
-    // ---------- 宿主接口（后续接真数据时替换假数据源） ----------
+    // ---------- 宿主接口 ----------
 
     /** 装载一批弹幕（timeMs 为该条在视频内应出现的毫秒位置）。 */
     fun load(items: List<Pair<Long, String>>) {
         pending.clear()
         pending.addAll(items.map { Pending(it.first, it.second) }.sortedBy { it.timeMs })
         shots.clear()
+    }
+
+    /** 追加一批弹幕（分页拉取合并；已发射的滚动条不受影响）。 */
+    fun append(items: List<Pair<Long, String>>) {
+        pending.addAll(items.map { Pending(it.first, it.second) })
+        pending.sortBy { it.timeMs }
+        if (items.isNotEmpty()) ensureRunning()
     }
 
     /** 播放位置推进（playing=false 时暂停发射与滚动）。 */
@@ -204,40 +211,5 @@ class DanmakuOverlay(context: Context) : View(context) {
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         style = DanmakuStyle.from(context, params)
-    }
-
-    // ---------- 假数据（仅方案 B 第一步；接真数据后删除） ----------
-
-    fun loadDemoData() {
-        val demo = listOf(
-            2000L to "测试弹幕：前方高能",
-            3500L to "哈哈哈哈哈哈",
-            5000L to "这剧情绝了",
-            7000L to "前排围观",
-            9000L to "沙发！",
-            11000L to "主角光环护体",
-            13000L to "666666",
-            15000L to "别眨眼，要反转了",
-            17000L to "这BGM我熟",
-            19000L to "弹幕护体",
-            21000L to "泪目了家人们",
-            23000L to "编剧脑洞真大",
-            25000L to "蹲一个后续",
-            27000L to "每天追更打卡",
-            29000L to "这演员是谁啊",
-            31000L to "好家伙",
-            33000L to "全程无尿点",
-            35000L to "三连了",
-            37000L to "下集预告走起",
-            39000L to "弹幕测试完毕，视觉参数待调",
-            42000L to "第二波弹幕来了",
-            45000L to "滚动速度测试",
-            48000L to "字号大小测试",
-            51000L to "透明度测试",
-            54000L to "行数占用测试",
-            57000L to "合并显示测试 ×3",
-            60000L to "结束",
-        )
-        load(demo)
     }
 }

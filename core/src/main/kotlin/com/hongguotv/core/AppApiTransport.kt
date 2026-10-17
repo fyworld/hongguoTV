@@ -102,21 +102,23 @@ internal class AppApiTransport(
         return out.toString()
     }
 
+    /** Query-string profile shared by every App API call (also used by the danmaku signer). */
+    fun queryProfile(): Map<String,String> = linkedMapOf(
+        "aid" to "8662", "app_name" to "novelread", "version_code" to "73532", "version_name" to "7.3.5.32",
+        "manifest_version_code" to "73532", "update_version_code" to "73532", "channel" to "update_64",
+        "device_platform" to "android", "os" to "android", "ssmix" to "a", "device_type" to "25053RT47C",
+        "device_brand" to "Redmi", "language" to "zh", "os_api" to "28", "os_version" to "9",
+        "resolution" to "1280*2772", "dpi" to "520", "ac" to "wifi",
+        "device_id" to deviceId, "iid" to installId,
+        "_rticket" to clock().toString())
+
     /**
      * One App API call. [signed]=true adds the X-Khronos/X-Gorgon signature headers
      * (required by catalog endpoints); [signed]=false sends only the plain client
      * headers (required by the playback endpoint - see the class doc).
      */
     fun request(path: String, payload: String?, signed: Boolean = true): JSONObject {
-        val values = linkedMapOf(
-            "aid" to "8662", "app_name" to "novelread", "version_code" to "73532", "version_name" to "7.3.5.32",
-            "manifest_version_code" to "73532", "update_version_code" to "73532", "channel" to "update_64",
-            "device_platform" to "android", "os" to "android", "ssmix" to "a", "device_type" to "25053RT47C",
-            "device_brand" to "Redmi", "language" to "zh", "os_api" to "28", "os_version" to "9",
-            "resolution" to "1280*2772", "dpi" to "520", "ac" to "wifi",
-            "device_id" to deviceId, "iid" to installId,
-            "_rticket" to clock().toString())
-        val query = encodeQuery(values)
+        val query = encodeQuery(queryProfile())
         val body = payload?.toByteArray(Charsets.UTF_8)
         val headers = if (!signed) linkedMapOf(
             "User-Agent" to userAgent, "Accept" to "application/json", "X-XS-From-Web" to "0", "Sdk-Version" to "2")
