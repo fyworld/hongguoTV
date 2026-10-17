@@ -1972,6 +1972,8 @@ class MainActivity: Activity() {
                 line.addView(view,LinearLayout.LayoutParams(0,-2,1f).apply { rightMargin=dp(6) })
                 views+=view
             }
+            // 行尾等权重占位：3 个按钮共分 3/4 行宽，每个背景框恰好比整行平分窄 25%。
+            line.addView(View(this),LinearLayout.LayoutParams(0,1,1f))
             repaint()
             return views
         }
