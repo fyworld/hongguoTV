@@ -1950,25 +1950,41 @@ class MainActivity: Activity() {
         "${DanmakuPrefs.sizeLabel(library.danmakuSize)} · ${DanmakuPrefs.speedLabel(library.danmakuSpeed)} · ${DanmakuPrefs.rowsLabel(library.danmakuRows)} · ${DanmakuPrefs.alphaLabel(library.danmakuAlpha)}"
     private fun currentDanmakuParams() =
         DanmakuOverlay.Params(DanmakuPrefs.size(library.danmakuSize),DanmakuPrefs.travelSec(library.danmakuSpeed),DanmakuPrefs.rows(library.danmakuRows),library.danmakuAlpha)
-    /** 弹幕样式选择器（设置页与播放菜单共用；改档即时热更新渲染层）。 */
+    /** 弹幕样式一页式面板（设置页与播放菜单共用）：四项同屏，点档位即时生效，面板不关闭。 */
     private fun showDanmakuStylePicker(anchor: TextView,inPlayer: Boolean) {
-        tvTools.choose("弹幕样式",listOf(
-            "字号  ·  ${DanmakuPrefs.sizeLabel(library.danmakuSize)}",
-            "速度  ·  ${DanmakuPrefs.speedLabel(library.danmakuSpeed)}",
-            "行数  ·  ${DanmakuPrefs.rowsLabel(library.danmakuRows)}",
-            "透明度  ·  ${DanmakuPrefs.alphaLabel(library.danmakuAlpha)}"),anchor,{ choice ->
-            main.post {
-                if(anchor.isAttachedToWindow) when(choice) {
-                    0 -> chooseDanmakuLevel("弹幕字号",DanmakuPrefs.textSizes.size,library.danmakuSize,{ DanmakuPrefs.sizeLabel(it) },{ library.danmakuSize=it; afterDanmakuStyleChange(anchor,inPlayer) },anchor)
-                    1 -> chooseDanmakuLevel("弹幕速度",DanmakuPrefs.travelSecs.size,library.danmakuSpeed,{ DanmakuPrefs.speedLabel(it) },{ library.danmakuSpeed=it; afterDanmakuStyleChange(anchor,inPlayer) },anchor)
-                    2 -> chooseDanmakuLevel("弹幕行数",DanmakuPrefs.rowCounts.size,library.danmakuRows,{ DanmakuPrefs.rowsLabel(it) },{ library.danmakuRows=it; afterDanmakuStyleChange(anchor,inPlayer) },anchor)
-                    3 -> chooseDanmakuLevel("弹幕透明度",DanmakuPrefs.alphas.size,library.danmakuAlpha,{ DanmakuPrefs.alphaLabel(it) },{ library.danmakuAlpha=it; afterDanmakuStyleChange(anchor,inPlayer) },anchor)
-                }
+        tvTools.close()
+        val content=column().apply { setPadding(dp(6),dp(2),dp(6),dp(4)) }
+        content.addView(text("选择后立即生效，按完成退出。",12f,muted).apply { setPadding(dp(2),0,0,dp(4)) })
+        fun addRow(title: String,count: Int,current: Int,label: (Int)->String,pick: (Int)->Unit): List<TextView> {
+            content.addView(text(title,14f,muted).apply { setPadding(dp(2),dp(10),0,dp(6)) })
+            val line=row(); content.addView(line)
+            var selected=current
+            val views=mutableListOf<TextView>()
+            fun repaint()=views.forEachIndexed { i,v ->
+                val focused=v.isFocused
+                v.background=rounded(if(focused) TvStyle.raised else if(i==selected) Color.rgb(61,39,34) else surface,if(focused) white else Color.TRANSPARENT)
             }
-        })
-    }
-    private fun chooseDanmakuLevel(title: String,count: Int,current: Int,label: (Int)->String,pick: (Int)->Unit,anchor: View?) {
-        tvTools.choose(title,(0 until count).map(label).toList(),anchor,{ index -> pick(index) })
+            for(index in 0 until count) {
+                val view=text(label(index),14f).apply { gravity=Gravity.CENTER; setPadding(dp(12),dp(9),dp(12),dp(9)); minHeight=dp(40) }
+                view.id=View.generateViewId(); view.isFocusable=true
+                view.setOnFocusChangeListener { _,_ -> repaint() }
+                view.setOnClickListener { if(selected!=index) { selected=index; pick(index); repaint() } }
+                line.addView(view,LinearLayout.LayoutParams(0,-2,1f).apply { rightMargin=dp(6) })
+                views+=view
+            }
+            repaint()
+            return views
+        }
+        val sizeRow=addRow("字号",DanmakuPrefs.textSizes.size,library.danmakuSize,{ DanmakuPrefs.sizeLabel(it) }) { library.danmakuSize=it; afterDanmakuStyleChange(anchor,inPlayer) }
+        addRow("速度",DanmakuPrefs.travelSecs.size,library.danmakuSpeed,{ DanmakuPrefs.speedLabel(it) }) { library.danmakuSpeed=it; afterDanmakuStyleChange(anchor,inPlayer) }
+        addRow("行数",DanmakuPrefs.rowCounts.size,library.danmakuRows,{ DanmakuPrefs.rowsLabel(it) }) { library.danmakuRows=it; afterDanmakuStyleChange(anchor,inPlayer) }
+        addRow("透明度",DanmakuPrefs.alphas.size,library.danmakuAlpha,{ DanmakuPrefs.alphaLabel(it) }) { library.danmakuAlpha=it; afterDanmakuStyleChange(anchor,inPlayer) }
+        val dialog=AlertDialog.Builder(this).setTitle("弹幕样式")
+            .setView(ScrollView(this).apply { isVerticalScrollBarEnabled=false; addView(content) })
+            .setPositiveButton("完成",null).create()
+        dialog.setOnDismissListener { if(anchor.isAttachedToWindow) { anchor.requestFocus(); if(inPlayer) showHud() } }
+        dialog.show()
+        sizeRow[library.danmakuSize.coerceIn(0,sizeRow.lastIndex)].requestFocus()
     }
     /** 档位变化后：热更新渲染层 + 刷新设置页摘要。 */
     private fun afterDanmakuStyleChange(anchor: TextView,inPlayer: Boolean) {
