@@ -1964,15 +1964,19 @@ class MainActivity: Activity() {
                 val focused=v.isFocused
                 v.background=rounded(if(focused) TvStyle.raised else if(i==selected) Color.rgb(61,39,34) else surface,if(focused) white else Color.TRANSPARENT)
             }
+            // 行首占位（1 份）：与行尾对称，整组居中。
+            line.addView(View(this),LinearLayout.LayoutParams(0,1,1f))
             for(index in 0 until count) {
+                if(index>0) line.addView(View(this),LinearLayout.LayoutParams(0,1,2f))  // 按钮间隔 2 占位
                 val view=text(label(index),14f).apply { gravity=Gravity.CENTER; setPadding(dp(12),dp(9),dp(12),dp(9)); minHeight=dp(40) }
                 view.id=View.generateViewId(); view.isFocusable=true
                 view.setOnFocusChangeListener { _,_ -> repaint() }
                 view.setOnClickListener { if(selected!=index) { selected=index; pick(index); repaint() } }
-                line.addView(view,LinearLayout.LayoutParams(0,-2,1f).apply { rightMargin=dp(6) })
+                // 权重 6：按钮宽保持 1/4 行宽（上轮 25% 收窄不回退），间隔 2 占位、行首尾各 1 占位。
+                line.addView(view,LinearLayout.LayoutParams(0,-2,6f))
                 views+=view
             }
-            // 行尾等权重占位：3 个按钮共分 3/4 行宽，每个背景框恰好比整行平分窄 25%。
+            // 行尾占位（1 份）。
             line.addView(View(this),LinearLayout.LayoutParams(0,1,1f))
             repaint()
             return views
