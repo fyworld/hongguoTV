@@ -156,6 +156,18 @@ class Library(context: Context) {
     var danmaku: Boolean
         get() = state().settings.danmaku
         set(value) { if (value != danmaku) { state().settings = state().settings.copy(danmaku = value); put("danmaku", value) } }
+    var danmakuSize: Int
+        get() = state().settings.danmakuSize
+        set(value) { val next = DanmakuPrefs.normalize(value, DanmakuPrefs.textSizes.size); if (next != danmakuSize) { state().settings = state().settings.copy(danmakuSize = next); put("danmakuSize", next) } }
+    var danmakuSpeed: Int
+        get() = state().settings.danmakuSpeed
+        set(value) { val next = DanmakuPrefs.normalize(value, DanmakuPrefs.travelSecs.size); if (next != danmakuSpeed) { state().settings = state().settings.copy(danmakuSpeed = next); put("danmakuSpeed", next) } }
+    var danmakuRows: Int
+        get() = state().settings.danmakuRows
+        set(value) { val next = DanmakuPrefs.normalize(value, DanmakuPrefs.rowCounts.size); if (next != danmakuRows) { state().settings = state().settings.copy(danmakuRows = next); put("danmakuRows", next) } }
+    var danmakuAlpha: Int
+        get() = state().settings.danmakuAlpha
+        set(value) { val next = DanmakuPrefs.normalize(value, DanmakuPrefs.alphas.size); if (next != danmakuAlpha) { state().settings = state().settings.copy(danmakuAlpha = next); put("danmakuAlpha", next) } }
     var contentType: ContentType
         get() = state().settings.type
         set(value) { if (value != contentType) { state().settings = state().settings.copy(type = value); put("contentType", value.storedValue) } }
@@ -175,7 +187,9 @@ class Library(context: Context) {
         persist("favorites", "later", "progress", "watched", "hidden", "searches", "favoriteUpdates")
         writes.submit(mapOf("quality" to { merged.settings.quality }, "playbackSpeed" to { merged.settings.speed },
             "autoNext" to { merged.settings.autoNext }, "contentType" to { merged.settings.type.storedValue }, "frameMode" to { merged.settings.frame.name },
-            "rankBoard" to { merged.settings.rankBoard.storedValue }, "danmaku" to { merged.settings.danmaku }))
+            "rankBoard" to { merged.settings.rankBoard.storedValue }, "danmaku" to { merged.settings.danmaku },
+            "danmakuSize" to { merged.settings.danmakuSize }, "danmakuSpeed" to { merged.settings.danmakuSpeed },
+            "danmakuRows" to { merged.settings.danmakuRows }, "danmakuAlpha" to { merged.settings.danmakuAlpha }))
         flush()
     }
     /** Requests prompt background commit, without lifecycle-thread disk waits. */

@@ -1163,6 +1163,8 @@ class MainActivity: Activity() {
             library.danmaku=!library.danmaku
             danmakuButton.text="弹幕  ·  ${if(library.danmaku) "开启" else "关闭"}"
         }
+        lateinit var danmakuStyleButton: TextView
+        danmakuStyleButton=setting(playback,"弹幕样式  ·  ${danmakuStyleSummary()}") { showDanmakuStylePicker(danmakuStyleButton,false) }
         lateinit var backup: TextView
         backup=setting(device,"手机备份与恢复") {
             runCatching { LibraryBackup.encode(library.snapshot()) }.onSuccess { encoded ->
@@ -1183,7 +1185,7 @@ class MainActivity: Activity() {
         val license=setting(device,"开源许可") {
             AlertDialog.Builder(this).setTitle("开源许可").setMessage("红果TV以 GPL-3.0 发布。\n派生自 N3urda/hongguoTV（GPL-3.0），接口链路参考 HongguoTV-Phone-TV-NoAds（Kotlin 重写），内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：fyworld/hongguoTV。").setPositiveButton("关闭",null).show()
         }
-        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,danmakuButton); val right=listOf(backup,hidden,updates,license)
+        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,danmakuButton,danmakuStyleButton); val right=listOf(backup,hidden,updates,license)
         listOf(left,right).forEach { items -> items.forEachIndexed { index,view ->
             view.nextFocusUpId=items.getOrNull(index-1)?.id ?: nav[tab].id
             view.nextFocusDownId=items.getOrNull(index+1)?.id ?: view.id
@@ -1684,7 +1686,7 @@ class MainActivity: Activity() {
             }
             playerView=view; root.addView(view,FrameLayout.LayoutParams(-1,-1))
             if(library.danmaku) {
-                danmakuOverlay=DanmakuOverlay(this).apply { loadDemoData() }
+                danmakuOverlay=DanmakuOverlay(this).apply { restyle(currentDanmakuParams()); loadDemoData() }
                 root.addView(danmakuOverlay,FrameLayout.LayoutParams(-1,-1))
             }
             hud=column().apply { setPadding(dp(widthDp()*.05f),dp(20),dp(widthDp()*.05f),(resources.displayMetrics.heightPixels*.05f).toInt()); background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(Color.TRANSPARENT,Color.argb(240,11,15,21))) }
@@ -1912,15 +1914,16 @@ class MainActivity: Activity() {
         episodes=addButton(options,"选集") { showEpisodePanel(episodes) }
         lateinit var more: TextView
         more=addButton(options,"播放设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","弹幕 ${if(library.danmaku) "开" else "关"}","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","弹幕 ${if(library.danmaku) "开" else "关"}","弹幕设置","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSpeedPicker(more)
                         1 -> showQualityPicker(more,true)
                         2 -> showFramePicker(more,true)
                         3 -> toggleDanmakuInPlayer()
-                        4 -> showSleepPicker(more)
-                        5 -> { seekTo(0); hidePanel() }
+                        4 -> showDanmakuStylePicker(more,true)
+                        5 -> showSleepPicker(more)
+                        6 -> { seekTo(0); hidePanel() }
                     }
                 }
             })
@@ -1932,7 +1935,7 @@ class MainActivity: Activity() {
         library.danmaku=!library.danmaku
         if(library.danmaku) {
             if(danmakuOverlay==null) {
-                danmakuOverlay=DanmakuOverlay(this).apply { loadDemoData() }
+                danmakuOverlay=DanmakuOverlay(this).apply { restyle(currentDanmakuParams()); loadDemoData() }
                 root.addView(danmakuOverlay,root.indexOfChild(hud.parent as View).coerceAtLeast(1))
             }
             Toast.makeText(this,"弹幕已开启（预览数据）",Toast.LENGTH_SHORT).show()
@@ -1941,6 +1944,37 @@ class MainActivity: Activity() {
             danmakuOverlay=null
             Toast.makeText(this,"弹幕已关闭",Toast.LENGTH_SHORT).show()
         }
+    }
+    /** 弹幕样式摘要（设置页与菜单共用）。 */
+    private fun danmakuStyleSummary() =
+        "${DanmakuPrefs.sizeLabel(library.danmakuSize)} · ${DanmakuPrefs.speedLabel(library.danmakuSpeed)} · ${DanmakuPrefs.rowsLabel(library.danmakuRows)} · ${DanmakuPrefs.alphaLabel(library.danmakuAlpha)}"
+    private fun currentDanmakuParams() =
+        DanmakuOverlay.Params(DanmakuPrefs.size(library.danmakuSize),DanmakuPrefs.travelSec(library.danmakuSpeed),DanmakuPrefs.rows(library.danmakuRows),library.danmakuAlpha)
+    /** 弹幕样式选择器（设置页与播放菜单共用；改档即时热更新渲染层）。 */
+    private fun showDanmakuStylePicker(anchor: TextView,inPlayer: Boolean) {
+        tvTools.choose("弹幕样式",listOf(
+            "字号  ·  ${DanmakuPrefs.sizeLabel(library.danmakuSize)}",
+            "速度  ·  ${DanmakuPrefs.speedLabel(library.danmakuSpeed)}",
+            "行数  ·  ${DanmakuPrefs.rowsLabel(library.danmakuRows)}",
+            "透明度  ·  ${DanmakuPrefs.alphaLabel(library.danmakuAlpha)}"),anchor,{ choice ->
+            main.post {
+                if(anchor.isAttachedToWindow) when(choice) {
+                    0 -> chooseDanmakuLevel("弹幕字号",DanmakuPrefs.textSizes.size,library.danmakuSize,{ DanmakuPrefs.sizeLabel(it) },{ library.danmakuSize=it; afterDanmakuStyleChange(anchor,inPlayer) },anchor)
+                    1 -> chooseDanmakuLevel("弹幕速度",DanmakuPrefs.travelSecs.size,library.danmakuSpeed,{ DanmakuPrefs.speedLabel(it) },{ library.danmakuSpeed=it; afterDanmakuStyleChange(anchor,inPlayer) },anchor)
+                    2 -> chooseDanmakuLevel("弹幕行数",DanmakuPrefs.rowCounts.size,library.danmakuRows,{ DanmakuPrefs.rowsLabel(it) },{ library.danmakuRows=it; afterDanmakuStyleChange(anchor,inPlayer) },anchor)
+                    3 -> chooseDanmakuLevel("弹幕透明度",DanmakuPrefs.alphas.size,library.danmakuAlpha,{ DanmakuPrefs.alphaLabel(it) },{ library.danmakuAlpha=it; afterDanmakuStyleChange(anchor,inPlayer) },anchor)
+                }
+            }
+        })
+    }
+    private fun chooseDanmakuLevel(title: String,count: Int,current: Int,label: (Int)->String,pick: (Int)->Unit,anchor: View?) {
+        tvTools.choose(title,(0 until count).map(label).toList(),anchor,{ index -> pick(index) })
+    }
+    /** 档位变化后：热更新渲染层 + 刷新设置页摘要。 */
+    private fun afterDanmakuStyleChange(anchor: TextView,inPlayer: Boolean) {
+        danmakuOverlay?.restyle(currentDanmakuParams())
+        if(anchor.tag!="playback-settings" && anchor.isAttachedToWindow) anchor.text="弹幕样式  ·  ${danmakuStyleSummary()}"
+        if(inPlayer) showHud()
     }
     private fun showSpeedPicker(anchor: TextView,inPlayer: Boolean=true) {        if(speedDialog!=null) return
         val speeds=PlaybackSpeed.options

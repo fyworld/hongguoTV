@@ -8,8 +8,8 @@ import java.net.URI
 data class BackupProgress(val series: Series,val episodeId: String,val episodeIndex: Int,val position: Long,val duration: Long,val completed: Boolean,val updatedAt: Long) {
     fun json()=JSONObject().put("series",LibraryBackup.seriesJson(series)).put("episodeId",episodeId).put("episodeIndex",episodeIndex).put("position",position).put("duration",duration).put("completed",completed).put("updatedAt",updatedAt)
 }
-data class BackupSettings(val quality: Int=1080,val speed: Float=1f,val autoNext: Boolean=true,val type: ContentType=ContentType.COMIC,val frame: VideoFrameMode=VideoFrameMode.FIT,val rankBoard: RankBoard=RankBoard.COMIC,val danmaku: Boolean=false) {
-    fun json()=JSONObject().put("quality",quality).put("speed",speed.toDouble()).put("autoNext",autoNext).put("type",type.storedValue).put("frame",frame.name).put("rankBoard",rankBoard.storedValue).put("danmaku",danmaku)
+data class BackupSettings(val quality: Int=1080,val speed: Float=1f,val autoNext: Boolean=true,val type: ContentType=ContentType.COMIC,val frame: VideoFrameMode=VideoFrameMode.FIT,val rankBoard: RankBoard=RankBoard.COMIC,val danmaku: Boolean=false,val danmakuSize: Int=1,val danmakuSpeed: Int=1,val danmakuRows: Int=2,val danmakuAlpha: Int=1) {
+    fun json()=JSONObject().put("quality",quality).put("speed",speed.toDouble()).put("autoNext",autoNext).put("type",type.storedValue).put("frame",frame.name).put("rankBoard",rankBoard.storedValue).put("danmaku",danmaku).put("danmakuSize",DanmakuPrefs.normalize(danmakuSize,DanmakuPrefs.textSizes.size)).put("danmakuSpeed",DanmakuPrefs.normalize(danmakuSpeed,DanmakuPrefs.travelSecs.size)).put("danmakuRows",DanmakuPrefs.normalize(danmakuRows,DanmakuPrefs.rowCounts.size)).put("danmakuAlpha",DanmakuPrefs.normalize(danmakuAlpha,DanmakuPrefs.alphas.size))
 }
 data class BackupData(val favorites: List<Series>,val history: List<BackupProgress>,val watched: Set<String>,val searches: List<RecentSearch>,val settings: BackupSettings,val later: List<Series> = emptyList(),val hidden: Set<String> = emptySet())
 
@@ -78,7 +78,11 @@ object LibraryBackup {
         val frame=VideoFrameMode.entries.firstOrNull { it.name==settings.getString("frame") } ?: error("画面模式无效")
         val rankBoard=RankBoard.entries.firstOrNull { it.storedValue==settings.optString("rankBoard") } ?: RankBoard.COMIC
         val danmaku=settings.optBoolean("danmaku",false)
-        return BackupData(favorites,history,watchedIds,searches,BackupSettings(quality,speed.toFloat(),autoNext,type,frame,rankBoard,danmaku),later,hiddenIds)
+        val danmakuSize=DanmakuPrefs.normalize(settings.optInt("danmakuSize",1),DanmakuPrefs.textSizes.size)
+        val danmakuSpeed=DanmakuPrefs.normalize(settings.optInt("danmakuSpeed",1),DanmakuPrefs.travelSecs.size)
+        val danmakuRows=DanmakuPrefs.normalize(settings.optInt("danmakuRows",2),DanmakuPrefs.rowCounts.size)
+        val danmakuAlpha=DanmakuPrefs.normalize(settings.optInt("danmakuAlpha",1),DanmakuPrefs.alphas.size)
+        return BackupData(favorites,history,watchedIds,searches,BackupSettings(quality,speed.toFloat(),autoNext,type,frame,rankBoard,danmaku,danmakuSize,danmakuSpeed,danmakuRows,danmakuAlpha),later,hiddenIds)
     }
     /** Existing favorites stay first; only newer imported progress replaces a local record. */
     fun merge(local: BackupData,incoming: BackupData,restoreSettings: Boolean): BackupData {

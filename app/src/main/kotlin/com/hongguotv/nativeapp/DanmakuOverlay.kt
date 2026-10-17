@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.os.SystemClock
 import android.view.View
+import com.hongguotv.core.DanmakuPrefs
 
 /**
  * 弹幕渲染层（方案 B 第一步：假数据驱动，验证视觉参数）。
@@ -16,14 +17,15 @@ import android.view.View
  * TextView 动画——TV 上大量 View 动画开销大且掉帧，单 Canvas 绘制一批
  * 文本性能可控（短剧弹幕密度低，同屏通常 <10 条）。
  *
- * 视觉参数集中在 [DanmakuStyle] 便于上机后按观感微调：
- * - 字号 16sp 档（TV 3-4 米观看距离）
- * - 滚动全程 11s（右缘到左缘），约 120px/s @ 1080p
- * - 行高 2.2 倍字号，最多 4 行，顶部留 8% 高度避开标题区
+ * 视觉参数由 [Params] 注入（档位来自设置），播放中可 [restyle] 热更新：
+ * - 字号/速度/行数/透明度四项档位见 DanmakuPrefs
+ * - 顶部留白 = 8% 屏高再上移一行（避开标题区但不压得太低）
  * - 半透明白字 + 细黑描边（浅色画面可读）
- * - 同文本 3 秒内合并显示 ×N（上游特色，爱心计数简化为 ×N）
  */
 class DanmakuOverlay(context: Context) : View(context) {
+
+    /** 档位参数（sizeSp/travelSec/rows/alphaIndex 来自设置档位）。 */
+    data class Params(val sizeSp: Float, val travelSec: Float, val rows: Int, val alphaIndex: Int)
 
     data class DanmakuStyle(
         val textSizePx: Float,
@@ -34,17 +36,19 @@ class DanmakuOverlay(context: Context) : View(context) {
         val alpha: Int,
     ) {
         companion object {
-            fun from(context: Context): DanmakuStyle {
+            fun from(context: Context, params: Params): DanmakuStyle {
                 val density = context.resources.displayMetrics.density
                 val width = context.resources.displayMetrics.widthPixels
+                val lineHeight = params.sizeSp * density * 2.2f
                 return DanmakuStyle(
-                    textSizePx = 16f * density,
-                    // 全程时长 ~11s：速度 = 屏宽+文本宽 / 11s，这里按屏宽近似
-                    speedPxPerSec = (width + 400f * density) / 11f,
-                    lineHeightPx = 16f * density * 2.2f,
-                    maxRows = 4,
-                    topMarginPx = context.resources.displayMetrics.heightPixels * 0.08f,
-                    alpha = 230,
+                    textSizePx = params.sizeSp * density,
+                    // 全程时长按档位：速度 = 屏宽+文本宽近似 / travelSec
+                    speedPxPerSec = (width + 400f * density) / params.travelSec,
+                    lineHeightPx = lineHeight,
+                    maxRows = params.rows,
+                    // 8% 屏高再上移一行，贴顶但不顶出屏幕
+                    topMarginPx = (context.resources.displayMetrics.heightPixels * 0.08f - lineHeight).coerceAtLeast(density * 4f),
+                    alpha = DanmakuPrefs.alphas[params.alphaIndex],
                 )
             }
         }
@@ -72,7 +76,20 @@ class DanmakuOverlay(context: Context) : View(context) {
         typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
     }
 
-    private var style = DanmakuStyle.from(context)
+    private var style = DanmakuStyle.from(context, DEFAULT_PARAMS)
+    private var params = DEFAULT_PARAMS
+
+    /** 播放中热更新视觉参数（档位变化即时生效，不清屏）。 */
+    fun restyle(params: Params) {
+        this.params = params
+        style = DanmakuStyle.from(context, params)
+        invalidate()
+    }
+
+    companion object {
+        /** 默认档位（与设置默认一致：16sp / 11s / 4 行 / alpha 档 1）。 */
+        val DEFAULT_PARAMS = Params(sizeSp = DanmakuPrefs.size(1), travelSec = DanmakuPrefs.travelSec(1), rows = DanmakuPrefs.rows(2), alphaIndex = 1)
+    }
     private val shots = mutableListOf<Shot>()
     private val pending = mutableListOf<Pending>()
     private var running = false
@@ -186,7 +203,7 @@ class DanmakuOverlay(context: Context) : View(context) {
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        style = DanmakuStyle.from(context)
+        style = DanmakuStyle.from(context, params)
     }
 
     // ---------- 假数据（仅方案 B 第一步；接真数据后删除） ----------
