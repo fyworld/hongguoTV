@@ -153,7 +153,7 @@ class DanmakuOverlay(context: Context) : View(context) {
         // 2. 发射到达的弹幕
         val head = currentPlayhead()
         while (pending.isNotEmpty() && pending.first().timeMs <= head) {
-            val item = pending.removeFirst()
+            val item = pending.removeAt(0)
             val textWidth = paint.measureText(item.text)
             var row = -1
             for (r in 0 until style.maxRows) {
