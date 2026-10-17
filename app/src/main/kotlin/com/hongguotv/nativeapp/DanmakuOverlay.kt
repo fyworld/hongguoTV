@@ -87,8 +87,8 @@ class DanmakuOverlay(context: Context) : View(context) {
     }
 
     companion object {
-        /** 默认档位（与设置默认一致：16sp / 11s / 4 行 / alpha 档 1）。 */
-        val DEFAULT_PARAMS = Params(sizeSp = DanmakuPrefs.size(1), travelSec = DanmakuPrefs.travelSec(1), rows = DanmakuPrefs.rows(2), alphaIndex = 1)
+        /** 默认档位（与设置默认一致：16sp / 11s / 2 行 / alpha 档 1）。 */
+        val DEFAULT_PARAMS = Params(sizeSp = DanmakuPrefs.size(1), travelSec = DanmakuPrefs.travelSec(1), rows = DanmakuPrefs.rows(1), alphaIndex = 1)
     }
     private val shots = mutableListOf<Shot>()
     private val pending = mutableListOf<Pending>()
