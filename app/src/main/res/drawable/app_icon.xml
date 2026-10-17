@@ -1,8 +1,0 @@
-<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-    <!-- Rounded-square background (r=24 on a 108 canvas, ~22%): TV-box launchers show the
-         drawable as-is, so the shape itself must be rounded instead of relying on masks. -->
-    <path android:fillColor="#FFFFFF" android:pathData="M24,0H84A24,24 0 0 1 108,24V84A24,24 0 0 1 84,108H24A24,24 0 0 1 0,84V24A24,24 0 0 1 24,0Z"/>
-    <path android:fillColor="#FF694F" android:pathData="M54,25C20,18 15,48 25,71C33,90 50,91 54,85C58,91 75,90 83,71C93,48 88,18 54,25Z"/>
-    <path android:fillColor="#9BC67D" android:pathData="M54,25Q55,8 77,11Q70,29 54,25Z"/>
-    <path android:fillColor="#FFFFFF" android:pathData="M45,43L45,71L68,57Z"/>
-</vector>
