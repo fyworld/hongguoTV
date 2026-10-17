@@ -1955,28 +1955,29 @@ class MainActivity: Activity() {
         tvTools.close()
         val content=column().apply { setPadding(dp(6),dp(2),dp(6),dp(4)) }
         content.addView(text("选择后立即生效，按完成退出。",12f,muted).apply { setPadding(dp(2),0,0,dp(4)) })
+        val titles=mutableListOf<TextView>()
+        val lines=mutableListOf<LinearLayout>()
         fun addRow(title: String,count: Int,current: Int,label: (Int)->String,pick: (Int)->Unit): List<TextView> {
-            content.addView(text(title,14f,muted).apply { setPadding(dp(2),dp(10),0,dp(6)) })
-            val line=row(); content.addView(line)
+            val heading=text(title,14f,muted).apply { setPadding(0,dp(10),0,dp(6)) }
+            titles+=heading; content.addView(heading)
+            val line=row(); lines+=line; content.addView(line)
             var selected=current
             val views=mutableListOf<TextView>()
             fun repaint()=views.forEachIndexed { i,v ->
                 val focused=v.isFocused
                 v.background=rounded(if(focused) TvStyle.raised else if(i==selected) Color.rgb(61,39,34) else surface,if(focused) white else Color.TRANSPARENT)
             }
-            // 行首占位（1 份）：与行尾对称，整组居中。
+            // 行首占位（1 份）：与行尾对称保持整组居中；标题左缘对齐到它。
             line.addView(View(this),LinearLayout.LayoutParams(0,1,1f))
             for(index in 0 until count) {
-                if(index>0) line.addView(View(this),LinearLayout.LayoutParams(0,1,2f))  // 按钮间隔 2 占位
                 val view=text(label(index),14f).apply { gravity=Gravity.CENTER; setPadding(dp(12),dp(9),dp(12),dp(9)); minHeight=dp(40) }
                 view.id=View.generateViewId(); view.isFocusable=true
                 view.setOnFocusChangeListener { _,_ -> repaint() }
                 view.setOnClickListener { if(selected!=index) { selected=index; pick(index); repaint() } }
-                // 权重 6：按钮宽保持 1/4 行宽（上轮 25% 收窄不回退），间隔 2 占位、行首尾各 1 占位。
-                line.addView(view,LinearLayout.LayoutParams(0,-2,6f))
+                // 按钮间隔 12dp 固定边距；权重 6 维持收窄后的按钮宽度量级。
+                line.addView(view,LinearLayout.LayoutParams(0,-2,6f).apply { if(index>0) leftMargin=dp(12) })
                 views+=view
             }
-            // 行尾占位（1 份）。
             line.addView(View(this),LinearLayout.LayoutParams(0,1,1f))
             repaint()
             return views
@@ -1990,6 +1991,11 @@ class MainActivity: Activity() {
             .setPositiveButton("完成",null).create()
         dialog.setOnDismissListener { if(anchor.isAttachedToWindow) { anchor.requestFocus(); if(inPlayer) showHud() } }
         dialog.show()
+        // 标题与按钮组左缘对齐：测量行首占位实际宽度，统一设为标题左 padding。
+        content.post {
+            val lead=lines.firstOrNull()?.getChildAt(0)?.width ?: 0
+            if(lead>0) titles.forEach { it.setPadding(lead,dp(10),0,dp(6)) }
+        }
         sizeRow[library.danmakuSize.coerceIn(0,sizeRow.lastIndex)].requestFocus()
     }
     /** 档位变化后：热更新渲染层 + 刷新设置页摘要。 */
