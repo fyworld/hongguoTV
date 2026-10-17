@@ -122,6 +122,7 @@ class MainActivity: Activity() {
     private val sleepTimer=SleepTimer { android.os.SystemClock.elapsedRealtime() }
     private var sleepStopped=false
     private var playerView: PlayerView?=null
+    private var danmakuOverlay: DanmakuOverlay?=null
     private lateinit var favoriteMonitor: FavoriteMonitor
     private val favoriteBadges=mutableMapOf<String,TextView>()
     private var favoriteStatus: TextView?=null
@@ -245,6 +246,10 @@ class MainActivity: Activity() {
                 if(sleepTimer.poll()) stopForSleep()
                 if(hud.visibility==View.VISIBLE) updatePlaybackText()
                 maybePrefetch()
+                danmakuOverlay?.let { overlay ->
+                    val p=player
+                    if(p!=null && playbackReady && !playError) overlay.update(p.currentPosition,p.playbackParameters.speed,p.isPlaying)
+                }
                 val now=android.os.SystemClock.elapsedRealtime()
                 if(player?.isPlaying==true && now-lastSaved>5000) { saveProgress(); lastSaved=now }
             }
@@ -1153,6 +1158,11 @@ class MainActivity: Activity() {
             library.autoNext=!library.autoNext
             autoNextButton.text="自动连播  ·  ${if(library.autoNext) "开启" else "关闭"}"
         }
+        lateinit var danmakuButton: TextView
+        danmakuButton=setting(playback,"弹幕  ·  ${if(library.danmaku) "开启" else "关闭"}") {
+            library.danmaku=!library.danmaku
+            danmakuButton.text="弹幕  ·  ${if(library.danmaku) "开启" else "关闭"}"
+        }
         lateinit var backup: TextView
         backup=setting(device,"手机备份与恢复") {
             runCatching { LibraryBackup.encode(library.snapshot()) }.onSuccess { encoded ->
@@ -1173,13 +1183,13 @@ class MainActivity: Activity() {
         val license=setting(device,"开源许可") {
             AlertDialog.Builder(this).setTitle("开源许可").setMessage("红果TV以 GPL-3.0 发布。\n派生自 N3urda/hongguoTV（GPL-3.0），接口链路参考 HongguoTV-Phone-TV-NoAds（Kotlin 重写），内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：fyworld/hongguoTV。").setPositiveButton("关闭",null).show()
         }
-        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton); val right=listOf(backup,hidden,updates,license)
+        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,danmakuButton); val right=listOf(backup,hidden,updates,license)
         listOf(left,right).forEach { items -> items.forEachIndexed { index,view ->
             view.nextFocusUpId=items.getOrNull(index-1)?.id ?: nav[tab].id
             view.nextFocusDownId=items.getOrNull(index+1)?.id ?: view.id
         } }
-        left.forEachIndexed { i,v -> v.nextFocusLeftId=v.id; v.nextFocusRightId=right[i].id }
-        right.forEachIndexed { i,v -> v.nextFocusLeftId=left[i].id; v.nextFocusRightId=v.id }
+        left.forEachIndexed { i,v -> v.nextFocusLeftId=v.id; v.nextFocusRightId=right[i.coerceAtMost(right.lastIndex)].id }
+        right.forEachIndexed { i,v -> v.nextFocusLeftId=left[i.coerceAtMost(left.lastIndex)].id; v.nextFocusRightId=v.id }
         nav.forEach { it.nextFocusDownId=qualityButton.id }
         parent.addView(text("红果TV v${BuildConfig.VERSION_NAME} by Dong    ·    收藏与进度保存在本机",12f,muted).apply { setPadding(dp(2),dp(18),0,dp(10)) })
         nav[tab].requestFocus()
@@ -1673,6 +1683,10 @@ class MainActivity: Activity() {
                 setKeepContentOnPlayerReset(true); setShutterBackgroundColor(Color.BLACK); setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
             }
             playerView=view; root.addView(view,FrameLayout.LayoutParams(-1,-1))
+            if(library.danmaku) {
+                danmakuOverlay=DanmakuOverlay(this).apply { loadDemoData() }
+                root.addView(danmakuOverlay,FrameLayout.LayoutParams(-1,-1))
+            }
             hud=column().apply { setPadding(dp(widthDp()*.05f),dp(20),dp(widthDp()*.05f),(resources.displayMetrics.heightPixels*.05f).toInt()); background=GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,intArrayOf(Color.TRANSPARENT,Color.argb(240,11,15,21))) }
             playbackTitle=text("",23f).apply { maxLines=1; ellipsize=TextUtils.TruncateAt.END; setTypeface(null,Typeface.BOLD) }; hud.addView(playbackTitle)
             playbackText=text("",15f,muted).apply { setPadding(0,dp(10),0,dp(9)) }; hud.addView(playbackText)
@@ -1898,22 +1912,37 @@ class MainActivity: Activity() {
         episodes=addButton(options,"选集") { showEpisodePanel(episodes) }
         lateinit var more: TextView
         more=addButton(options,"播放设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","弹幕 ${if(library.danmaku) "开" else "关"}","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSpeedPicker(more)
                         1 -> showQualityPicker(more,true)
                         2 -> showFramePicker(more,true)
-                        3 -> showSleepPicker(more)
-                        4 -> { seekTo(0); hidePanel() }
+                        3 -> toggleDanmakuInPlayer()
+                        4 -> showSleepPicker(more)
+                        5 -> { seekTo(0); hidePanel() }
                     }
                 }
             })
         }.apply { tag="playback-settings" }
         play.requestFocus()
     }
-    private fun showSpeedPicker(anchor: TextView,inPlayer: Boolean=true) {
-        if(speedDialog!=null) return
+    /** 弹幕开关（播放中即时生效：开=挂层+假数据，关=卸层）。 */
+    private fun toggleDanmakuInPlayer() {
+        library.danmaku=!library.danmaku
+        if(library.danmaku) {
+            if(danmakuOverlay==null) {
+                danmakuOverlay=DanmakuOverlay(this).apply { loadDemoData() }
+                root.addView(danmakuOverlay,root.indexOfChild(hud.parent as View).coerceAtLeast(1))
+            }
+            Toast.makeText(this,"弹幕已开启（预览数据）",Toast.LENGTH_SHORT).show()
+        } else {
+            danmakuOverlay?.let { root.removeView(it) }
+            danmakuOverlay=null
+            Toast.makeText(this,"弹幕已关闭",Toast.LENGTH_SHORT).show()
+        }
+    }
+    private fun showSpeedPicker(anchor: TextView,inPlayer: Boolean=true) {        if(speedDialog!=null) return
         val speeds=PlaybackSpeed.options
         val selected=speeds.indexOf(library.playbackSpeed)
         val dialog=AlertDialog.Builder(this).setTitle("全局默认倍速")
@@ -1980,7 +2009,7 @@ class MainActivity: Activity() {
         speedDialog?.dismiss(); speedDialog=null
         main.removeCallbacks(hideHud); main.removeCallbacks(seekRunnable); pendingSeek=null
         playerListener?.let { player?.removeListener(it) }; playerListener=null
-        video?.close(); video=null; playerView?.player=null; playerView=null; player?.release(); player=null; playbackReady=false; transportPlay=null; sleepButton=null
+        video?.close(); video=null; playerView?.player=null; playerView=null; danmakuOverlay?.shutdown(); danmakuOverlay=null; player?.release(); player=null; playbackReady=false; transportPlay=null; sleepButton=null
         closeTransport(playbackHttp); playbackHttp=null
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }

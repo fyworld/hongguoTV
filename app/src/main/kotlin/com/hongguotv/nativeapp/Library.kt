@@ -153,6 +153,9 @@ class Library(context: Context) {
     var autoNext: Boolean
         get() = state().settings.autoNext
         set(value) { if (value != autoNext) { state().settings = state().settings.copy(autoNext = value); put("autoNext", value) } }
+    var danmaku: Boolean
+        get() = state().settings.danmaku
+        set(value) { if (value != danmaku) { state().settings = state().settings.copy(danmaku = value); put("danmaku", value) } }
     var contentType: ContentType
         get() = state().settings.type
         set(value) { if (value != contentType) { state().settings = state().settings.copy(type = value); put("contentType", value.storedValue) } }
@@ -172,7 +175,7 @@ class Library(context: Context) {
         persist("favorites", "later", "progress", "watched", "hidden", "searches", "favoriteUpdates")
         writes.submit(mapOf("quality" to { merged.settings.quality }, "playbackSpeed" to { merged.settings.speed },
             "autoNext" to { merged.settings.autoNext }, "contentType" to { merged.settings.type.storedValue }, "frameMode" to { merged.settings.frame.name },
-            "rankBoard" to { merged.settings.rankBoard.storedValue }))
+            "rankBoard" to { merged.settings.rankBoard.storedValue }, "danmaku" to { merged.settings.danmaku }))
         flush()
     }
     /** Requests prompt background commit, without lifecycle-thread disk waits. */
