@@ -20,13 +20,15 @@ class LibraryTransferServerTest {
             socket.getInputStream().readBytes().toString(Charsets.UTF_8)
         }
     }
-    @Test fun `download is one use and validated import is delivered once then listener closes`() {
+    @Test fun `download is repeatable and validated import is delivered once then listener closes`() {
         val latch=CountDownLatch(1); var received: BackupData?=null
         LibraryTransferServer("127.0.0.1",backup,{ received=it; latch.countDown() }).use { server ->
             assertTrue(request(server).contains("frame-ancestors 'none'"))
             val download=request(server,"/download")
             assertTrue(download.contains("Content-Disposition: attachment")); assertEquals(backup,download.substringAfter("\r\n\r\n"))
-            assertTrue(request(server,"/download").startsWith("HTTP/1.1 410"))
+            // Repeatable: QR-scanner webviews fail the first client-side download attempt;
+            // a one-use flag burned it and retries got 410 (v1.0.11 下载失败 regression).
+            assertTrue(request(server,"/download").startsWith("HTTP/1.1 200"))
             assertTrue(request(server,"/import",backup).startsWith("HTTP/1.1 200"))
             assertTrue(latch.await(2,TimeUnit.SECONDS)); assertEquals(data,received)
             assertTrue(runCatching { request(server) }.isFailure)
@@ -39,6 +41,10 @@ class LibraryTransferServerTest {
             assertTrue(request(server,"/wrong").startsWith("HTTP/1.1 404"))
             assertTrue(request(server,"/import",backup,"Origin: http://evil.example\r\n").startsWith("HTTP/1.1 403"))
             assertTrue(request(server,"/download",headers="Sec-Fetch-Site: cross-site\r\n").startsWith("HTTP/1.1 403"))
+            // Origin: null (QR-scanner webviews like WeChat X5) must NOT be rejected, or
+            // every real phone failed with 来源不匹配 (v1.0.10 regression). Use the page
+            // GET (not /download) so the one-use download stays available for line below.
+            assertTrue(request(server,headers="Origin: null\r\n").startsWith("HTTP/1.1 200"))
             assertTrue(request(server,"/import",backup,"Host: other\r\n").startsWith("HTTP/1.1 400"))
             assertTrue(request(server,"/import","{}").startsWith("HTTP/1.1 400"))
             assertTrue(request(server,"/import",backup,"Transfer-Encoding: chunked\r\n").startsWith("HTTP/1.1 400"))

@@ -209,14 +209,45 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
             // the app. Pre-8.0 unknown-source installs are a global setting, so just fire
             // the installer intent directly.
             if (Build.VERSION.SDK_INT >= 26 && !activity.packageManager.canRequestPackageInstalls()) {
-                    permissionRequested = true
-                    activity.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${activity.packageName}")))
+                    val settings = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${activity.packageName}"))
+                    if (settings.resolveActivity(activity.packageManager) != null) {
+                        permissionRequested = true
+                        activity.startActivity(settings)
+                    } else {
+                        // TV firmwares (Dangbei etc.) strip the per-app unknown-sources
+                        // settings page; they gate sideloading globally instead (pre-8.0
+                        // style). Fire the installer directly - on such ROMs it works
+                        // without the per-app grant (seen on Dangbei Android 10).
+                        fireInstaller()
+                    }
                 } else {
-                    val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.updates", apk)
-                    activity.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).apply { clipData = ClipData.newRawUri("更新安装包", uri) })
+                    fireInstaller()
                 }
-            } catch (_: Exception) { permissionRequested = false; updateStatus("电视未提供安装或授权入口，请通过系统文件管理器安装新版") }
+            } catch (_: Exception) {
+                permissionRequested = false
+                // No installer entry point at all: export the APK to the public Downloads
+                // collection so the user can install it with the TV's file manager.
+                updateStatus("电视未提供安装入口，安装包已放入下载目录\n请用系统文件管理器选择 hongguotv-${update.versionName}.apk 安装")
+                worker.execute { runCatching { exportToDownloads(update) } }
+            }
         }
+    }
+    private fun fireInstaller() {
+        val uri = FileProvider.getUriForFile(activity, "${activity.packageName}.updates", apk)
+        activity.startActivity(Intent(Intent.ACTION_VIEW).setDataAndType(uri, "application/vnd.android.package-archive")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION).apply { clipData = ClipData.newRawUri("更新安装包", uri) })
+    }
+    /** Last resort for ROMs without any installer activity: copy the verified APK into the
+     *  public Downloads collection (MediaStore, API 29+: no permission needed) so the user
+     *  can install it from the TV's own file manager. */
+    private fun exportToDownloads(update: AppUpdate) {
+        if (Build.VERSION.SDK_INT < 29) return  // legacy public dir needs WRITE storage permission
+        val values = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.Downloads.DISPLAY_NAME, "hongguotv-${update.versionName}.apk")
+            put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/vnd.android.package-archive")
+        }
+        val resolver = activity.contentResolver
+        val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
+        resolver.openOutputStream(uri)?.use { out -> apk.inputStream().use { it.copyTo(out) } }
     }
 }

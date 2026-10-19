@@ -18,16 +18,20 @@ class PhoneSearchServerTest {
             socket.getInputStream().readBytes().toString(Charsets.UTF_8)
         }
     }
-    @Test fun `phone form accepts one unicode search without reflecting it in HTML`() {
-        val received=CountDownLatch(1); var query=""
-        PhoneSearchServer("127.0.0.1",{ query=it;received.countDown() }).use { server ->
+    @Test fun `phone form accepts repeated unicode searches within the session without reflecting them in HTML`() {
+        val received=CountDownLatch(2); val queries=java.util.Collections.synchronizedList(mutableListOf<String>())
+        PhoneSearchServer("127.0.0.1",{ queries.add(it); received.countDown() }).use { server ->
             val page=request(server)
             assertTrue(page.startsWith("HTTP/1.1 200")); assertTrue(page.contains("Cache-Control: no-store")); assertTrue(page.contains("form-action 'self'"))
             val value="测试 <script>alert(1)</script>"
             val reply=request(server,"POST",URI(server.url).path+"/submit","query="+URLEncoder.encode(value,"UTF-8"))
             assertTrue(reply.startsWith("HTTP/1.1 200")); assertFalse(reply.contains(value))
-            assertTrue(received.await(2,TimeUnit.SECONDS)); assertEquals(value,query)
-            assertTrue(runCatching { request(server) }.isFailure)
+            // Session stays alive: a second query must go through too (previously the
+            // first submit closed the server and every retry needed a new QR code).
+            val second=request(server,"POST",URI(server.url).path+"/submit","query="+URLEncoder.encode("第二季","UTF-8"))
+            assertTrue(second.startsWith("HTTP/1.1 200"))
+            assertTrue(received.await(2,TimeUnit.SECONDS)); assertEquals(listOf(value,"第二季"),queries)
+            assertTrue(request(server).startsWith("HTTP/1.1 200"))  // page still served
         }
     }
     @Test fun `wrong token host and cross site posts cannot submit`() {
@@ -37,6 +41,18 @@ class PhoneSearchServerTest {
             assertTrue(request(server,host="evil.example").startsWith("HTTP/1.1 404"))
             assertTrue(request(server,"POST",URI(server.url).path+"/submit","query=test","Origin: http://evil.example\r\n").startsWith("HTTP/1.1 403"))
             assertFalse(submitted)
+        }
+    }
+    @Test fun `origin null and missing origin are accepted like real scanner webviews`() {
+        // WeChat X5 / camera-app webviews send "Origin: null"; plain form posts send none.
+        // Both must go through, or every real phone got 来源不匹配 (v1.0.10 regression).
+        for(origin in listOf("", "Origin: null\r\n")) {
+            val received=CountDownLatch(1); var query=""
+            PhoneSearchServer("127.0.0.1",{ query=it; received.countDown() }).use { server ->
+                val reply=request(server,"POST",URI(server.url).path+"/submit","query=test",origin)
+                assertTrue(reply.startsWith("HTTP/1.1 200"))
+                assertTrue(received.await(2,TimeUnit.SECONDS)); assertEquals("test",query)
+            }
         }
     }
     @Test fun `invalid and oversized input does not consume the session`() {

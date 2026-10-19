@@ -26,7 +26,6 @@ class LibraryTransferServer(address: String,private val backup: String,private v
     private val token=ByteArray(16).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it.toInt() and 255) }
     private val host="${local.hostAddress}:${listener.localPort}"
     val url="http://$host/$token"
-    private var downloaded=false
     init {
         require(backup.toByteArray(Charsets.UTF_8).size<=LibraryBackup.MAX_BYTES)
         expiry.schedule(object: TimerTask() { override fun run()=expire() },ttlMillis.coerceIn(1,300_000))
@@ -68,13 +67,20 @@ class LibraryTransferServer(address: String,private val backup: String,private v
         }
         if(stopped.get() || System.nanoTime()>=deadline) return respond(socket,410,"二维码已过期")
         if(headers["host"]!=host || request[1] !in listOf("/$token","/$token/download","/$token/import")) return respond(socket,404,"页面不存在")
-        if(headers["origin"]!=null && headers["origin"]!="http://$host") return respond(socket,403,"来源不匹配")
+        // Same relaxation as PhoneSearchServer: QR-scanner webviews send "Origin: null" and
+        // some domestic browsers attach unexpected Origins to GET/POST, which the strict
+        // same-origin check turned into "来源不匹配" for every real phone. Token + LAN-only
+        // peer + Host checks carry the security model; only reject a different host:port.
+        val origin=headers["origin"]
+        if(origin!=null && origin!="null" && origin.trimEnd('/')!="http://$host") return respond(socket,403,"来源不匹配")
         if(headers["sec-fetch-site"]=="cross-site") return respond(socket,403,"来源不匹配")
         if(request[0]=="GET" && request[1]=="/$token") return respond(socket,200,page())
         if(request[0]=="GET" && request[1]=="/$token/download") {
-            if(downloaded) return respond(socket,410,"本次备份已下载，请在电视上重新打开二维码")
-            respond(socket,200,backup,"application/json; charset=utf-8","Content-Disposition: attachment; filename=hongguotv-library.json\r\n")
-            downloaded=true; return
+            // Repeatable within the session: QR-scanner webviews (WeChat X5 etc.) have no
+            // download manager and fail the first client-side attempt; a one-use flag burned
+            // that attempt and every retry got 410 (reported as 下载失败 on v1.0.11).
+            // The token + LAN-only peer checks carry the security model.
+            return respond(socket,200,backup,"application/json; charset=utf-8","Content-Disposition: attachment; filename=hongguotv-library.json\r\n")
         }
         if(request[0]!="POST" || request[1]!="/$token/import") return respond(socket,405,"不支持的操作")
         if(headers.containsKey("transfer-encoding") || headers["content-type"]?.substringBefore(';')!="application/json") return respond(socket,400,"请选择 JSON 备份文件")
@@ -91,7 +97,7 @@ class LibraryTransferServer(address: String,private val backup: String,private v
         try { respond(socket,200,"已发送到电视，请用遥控器确认恢复。确认前不会更改记录。") }
         finally { close(); onImport(data) }
     }
-    private fun page()="""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>红果TV · 记录备份</title><style>body{font:18px sans-serif;background:#10131b;color:#f4f5f8;max-width:540px;margin:32px auto;padding:20px;line-height:1.6}a,button{display:block;background:#ff634c;color:white;border:0;border-radius:8px;padding:14px;text-align:center;text-decoration:none;font:inherit;margin:16px 0}input{max-width:100%;font:inherit}button{width:100%}</style><h1>备份与恢复</h1><p>保存本机收藏、观看位置、稍后看、隐藏推荐、搜索记录和播放设置。文件仅在手机与电视之间传输，不包含平台账号。</p><a href="/$token/download" download>下载电视备份</a><h2>从备份恢复</h2><input id="file" type="file" accept=".json,application/json"><button id="send">发送到电视确认</button><p id="status">最多 2 MB；需要在电视上确认后才会合并。</p><p>关闭电视窗口即失效，最长 5 分钟。</p><script nonce="$token">document.getElementById('send').onclick=function(){var file=document.getElementById('file').files[0],status=document.getElementById('status'),button=this;if(!file||file.size>2097152){status.textContent='请选择不超过 2 MB 的备份文件';return}button.disabled=true;var reader=new FileReader();reader.onerror=function(){status.textContent='文件读取失败';button.disabled=false};reader.onload=function(){fetch('/$token/import',{method:'POST',headers:{'Content-Type':'application/json'},body:reader.result}).then(function(r){return r.text().then(function(t){status.textContent=t;if(!r.ok)button.disabled=false})}).catch(function(){status.textContent='连接已失效，请在电视上重新打开二维码';button.disabled=false})};reader.readAsText(file)};</script></html>"""
+    private fun page()="""<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>红果TV · 记录备份</title><style>body{font:18px sans-serif;background:#10131b;color:#f4f5f8;max-width:540px;margin:32px auto;padding:20px;line-height:1.6}a,button{display:block;background:#ff634c;color:white;border:0;border-radius:8px;padding:14px;text-align:center;text-decoration:none;font:inherit;margin:16px 0}input,textarea{max-width:100%;font:inherit;box-sizing:border-box;width:100%}button{width:100%}textarea{min-height:120px;background:#1a1f2b;color:#f4f5f8;border:1px solid #333;border-radius:8px;padding:10px}details{margin:12px 0}summary{cursor:pointer;color:#9fb0c8}</style><h1>备份与恢复</h1><p>保存本机收藏、观看位置、稍后看、隐藏推荐、搜索记录和播放设置。文件仅在手机与电视之间传输，不包含平台账号。</p><a href="/$token/download" download>下载电视备份</a><details><summary>下载失败？点开查看备份内容，全选复制保存</summary><p>部分手机浏览器（如微信内置）不支持下载，可复制以下内容到备忘录等任意地方保存：</p><button id="load">查看备份内容</button><textarea id="content" readonly placeholder="点击上方按钮载入"></textarea><button id="copy">全选复制</button><p id="hint"></p></details><h2>从备份恢复</h2><input id="file" type="file" accept=".json,application/json"><button id="send">发送文件到电视确认</button><details><summary>没有文件？粘贴备份内容恢复</summary><textarea id="pasted" placeholder="把之前复制的备份内容粘贴到这里"></textarea><button id="sendpasted">发送粘贴内容到电视</button></details><p id="status">最多 2 MB；需要在电视上确认后才会合并。</p><p>关闭电视窗口即失效，最长 5 分钟。</p><script nonce="$token">function sendText(text){var status=document.getElementById('status');fetch('/$token/import',{method:'POST',headers:{'Content-Type':'application/json'},body:text}).then(function(r){return r.text().then(function(t){status.textContent=t})}).catch(function(){status.textContent='连接已失效，请在电视上重新打开二维码'})}document.getElementById('send').onclick=function(){var file=document.getElementById('file').files[0],status=document.getElementById('status'),button=this;if(!file||file.size>2097152){status.textContent='请选择不超过 2 MB 的备份文件';return}button.disabled=true;var reader=new FileReader();reader.onerror=function(){status.textContent='文件读取失败';button.disabled=false};reader.onload=function(){sendText(reader.result);button.disabled=false};reader.readAsText(file)};document.getElementById('sendpasted').onclick=function(){var text=document.getElementById('pasted').value.trim();if(!text){document.getElementById('status').textContent='请先粘贴备份内容';return}sendText(text)};document.getElementById('load').onclick=function(){var hint=document.getElementById('hint');fetch('/$token/download').then(function(r){return r.text()}).then(function(t){document.getElementById('content').value=t;hint.textContent='已载入，点下方按钮复制'}).catch(function(){hint.textContent='载入失败，请重试'})};document.getElementById('copy').onclick=function(){var area=document.getElementById('content');area.focus();area.select();var hint=document.getElementById('hint');try{document.execCommand('copy');hint.textContent='已复制，请粘贴到备忘录保存'}catch(e){hint.textContent='请长按文本框手动全选复制'}};</script></html>"""
     private fun respond(socket: Socket,code: Int,message: String,type: String=if(message.startsWith("<!doctype")) "text/html; charset=utf-8" else "text/plain; charset=utf-8",extra: String="") {
         val body=message.toByteArray(Charsets.UTF_8)
         val header="HTTP/1.1 $code Response\r\nContent-Type: $type\r\nContent-Length: ${body.size}\r\nConnection: close\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-$token'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'\r\n$extra\r\n"

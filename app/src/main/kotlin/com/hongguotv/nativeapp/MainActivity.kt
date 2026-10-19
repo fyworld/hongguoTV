@@ -1300,18 +1300,25 @@ class MainActivity: Activity() {
         screen.addView(left,lp(leftWidth,android.view.ViewGroup.LayoutParams.WRAP_CONTENT).apply { rightMargin=gap })
         // Middle column: live suggestions (hidden once results are shown).
         tvMiddleColumn=column()
-        tvSuggestTitle=text("匹配结果",16f,accent).apply { setTypeface(null,Typeface.BOLD); setPadding(0,0,0,dp(8)) }
-        tvMiddleColumn?.addView(tvSuggestTitle)
+        // Both column titles sit in 34dp-high slots with center gravity so they share the
+        // same baseline; the right column's clear-history icon (34dp) then centers against
+        // its title too. A plain top-aligned title left the icon's glyph ~7dp too low.
+        tvSuggestTitle=text("匹配结果",16f,accent).apply { setTypeface(null,Typeface.BOLD); gravity=Gravity.CENTER_VERTICAL }
+        tvMiddleColumn?.addView(tvSuggestTitle,lp(-1,dp(34)))
         val suggestScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false; isFocusable=false }
         tvSuggestScroll=suggestScroll
         tvSuggestList=column(); suggestScroll.addView(tvSuggestList)
+        // No top margin: both columns' first entries (42dp buttons) then start right below
+        // their 34dp title slots, putting the two name baselines on the same line.
         tvMiddleColumn?.addView(suggestScroll,lp(-1,0).apply { weight=1f })
         screen.addView(tvMiddleColumn,lp((total*.20f).toInt(),android.view.ViewGroup.LayoutParams.MATCH_PARENT).apply { rightMargin=gap })
         // Right column: history with flow-wrapped entries (hidden once results are shown).
         tvRightColumn=column()
+        // Title in the same 34dp center-gravity slot as 匹配结果; the 34dp clear icon
+        // centers in the row, so title and icon end up on the same axis.
         val historyHeading=row()
-        tvHistoryTitle=text("搜索历史",16f,accent).apply { setTypeface(null,Typeface.BOLD) }
-        historyHeading.addView(tvHistoryTitle,lp(0,-2).apply { weight=1f })
+        tvHistoryTitle=text("搜索历史",16f,accent).apply { setTypeface(null,Typeface.BOLD); gravity=Gravity.CENTER_VERTICAL }
+        historyHeading.addView(tvHistoryTitle,lp(0,dp(34)).apply { weight=1f })
         lateinit var clearHistory: View
         clearHistory=ImageView(this).apply {
             id=View.generateViewId(); isFocusable=true; isFocusableInTouchMode=true
@@ -1337,7 +1344,11 @@ class MainActivity: Activity() {
         screen.addView(tvRightColumn,lp(0,android.view.ViewGroup.LayoutParams.MATCH_PARENT).apply { weight=1f })
         // Result panel: spans the middle+right area (~70%) once a search is confirmed.
         tvResultPanel=column().apply { visibility=View.GONE }
-        tvResultTitle=text("",16f,accent).apply { setTypeface(null,Typeface.BOLD); setPadding(0,0,0,dp(8)) }
+        tvResultTitle=text("",16f,accent).apply { setTypeface(null,Typeface.BOLD); setPadding(0,0,0,dp(8))
+            // Focusable parking spot for repeat phone searches: focus moves here before
+            // the result list is rebuilt, so the disappearing cards can't push focus to
+            // the nav bar (which would switch to 首页). Not touch-focusable, remote only.
+            isFocusable=true }
         tvResultPanel?.addView(tvResultTitle)
         val resultScroll=ScrollView(this).apply { isVerticalScrollBarEnabled=false; isFocusable=false }
         tvResultScroll=resultScroll
@@ -1560,16 +1571,19 @@ class MainActivity: Activity() {
     private fun tvSubmitText(value: String) {
         val clean=value.trim(); if(clean.isEmpty() || clean.length>80) return
         tvResultQuery=clean; library.rememberSearch(clean,library.contentType); query=clean; page=1
-        tvResultTitle?.text="搜索结果 · $clean"; tvResultList?.removeAllViews()
-        tvResultList?.addView(text("正在搜索…",14f,muted).apply { setPadding(0,dp(10),0,dp(10)) })
-        // The layout switch below hides the suggestion/history columns. Focus is usually
-        // sitting on a suggestion entry inside them — when that view disappears Android
-        // would hand focus to the top nav (首页), whose focus-to-switch listener then
-        // leaves the search tab. Park focus on the query box first and suppress the nav
-        // listener during the swap, exactly like the infinite-grid rebuild.
-        tvQueryView?.requestFocus()
+        tvResultTitle?.text="搜索结果 · $clean"
+        // Park focus BEFORE clearing the list: on repeat searches focus sits on a result
+        // card, and removing that card lets Android hand focus to the top nav (首页),
+        // whose focus-to-switch listener leaves the search tab. The result title is
+        // always attached, so it is the safe parking spot; rebuildingGrid suppresses
+        // the nav listener while the layout swaps.
         rebuildingGrid=true
-        try { applyTvLayoutMode() } finally { rebuildingGrid=false }
+        try {
+            tvResultTitle?.requestFocus()
+            tvResultList?.removeAllViews()
+            tvResultList?.addView(text("正在搜索…",14f,muted).apply { setPadding(0,dp(10),0,dp(10)) })
+            applyTvLayoutMode()
+        } finally { rebuildingGrid=false }
         // The panel just switched from GONE to VISIBLE, so its width is not measured yet.
         // Re-layout now so renderTvResults() can read the real panel width for card sizing.
         tvResultPanel?.requestLayout()

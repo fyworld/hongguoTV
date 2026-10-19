@@ -34,7 +34,7 @@ class TvTools(private val activity: Activity) {
     private fun column()=LinearLayout(activity).apply { orientation=LinearLayout.VERTICAL; setPadding(dp(16),dp(4),dp(16),dp(8)) }
     private fun open(next: AlertDialog,anchor: View?) {
         dialog?.dismiss(); dialog=next
-        next.setOnDismissListener { if(dialog===next) { phone?.close(); phone=null; dialog=null }; if(anchor?.isAttachedToWindow==true) anchor.requestFocus() }
+        next.setOnDismissListener { if(dialog===next) dialog=null; if(anchor?.isAttachedToWindow==true) anchor.requestFocus() }
         next.show()
     }
     fun close() { dialog?.dismiss(); phone?.close(); phone=null }
@@ -101,6 +101,23 @@ class TvTools(private val activity: Activity) {
         contentDescription="二维码"
     }
     fun phoneInput(anchor: View?,submit: (String)->Unit) {
+        // Reuse a live session: within the 5-minute TTL re-opening 手机输入 shows the SAME
+        // QR code, so the phone page stays open and keeps submitting without re-scanning.
+        // The dialog auto-collapses on each query (results render on the search screen
+        // behind it); the session itself only dies on TTL expiry or TvTools.close().
+        val existing=phone as? PhoneSearchServer
+        if(existing!=null && !existing.isExpired) {
+            val content=column()
+            val next=AlertDialog.Builder(activity).setTitle("手机输入剧名").setView(ScrollView(activity).apply { addView(content) }).setNegativeButton("关闭",null).create()
+            open(next,anchor)
+            val row=LinearLayout(activity).apply { gravity=Gravity.CENTER_VERTICAL }
+            row.addView(qr(existing.url),LinearLayout.LayoutParams(dp(185),dp(185)))
+            val instructions=column()
+            instructions.addView(label("手机扫码后用浏览器打开，输入剧名发送到电视。\n可连续搜索；二维码 5 分钟内有效，无需重复扫码。",16f))
+            instructions.addView(label(existing.url,12f))
+            row.addView(instructions,LinearLayout.LayoutParams(0,-2,1f)); content.addView(row)
+            return
+        }
         val connectivity=activity.getSystemService(ConnectivityManager::class.java)
         val network=connectivity.activeNetwork
         val capabilities=connectivity.getNetworkCapabilities(network)
@@ -113,14 +130,27 @@ class TvTools(private val activity: Activity) {
         open(next,anchor)
         worker.execute {
             try {
-                val session=PhoneSearchServer(address,{ query -> main.post { if(dialog===next) { next.dismiss(); submit(query) } } },{ main.post { if(dialog===next) { content.removeAllViews(); content.addView(label("二维码已过期，请关闭后重新打开。")) } } })
+                // Session stays open for the full TTL: each phone query runs the search
+                // and collapses the QR dialog (results show behind it), but the server
+                // and QR stay alive so the phone page can submit again without re-scanning.
+                // The callback checks SESSION identity (phone===current), not dialog
+                // identity: the first query dismisses the dialog, so a dialog===next
+                // check silently dropped every later query (only search #1 worked).
+                var current: PhoneSearchServer?=null
+                val session=PhoneSearchServer(address,{ query -> main.post {
+                    if(current!=null && phone===current) {
+                        dialog?.dismiss()  // collapse the QR window (original or reused)
+                        submit(query)
+                    }
+                } },{ main.post { if(dialog===next) { content.removeAllViews(); content.addView(label("二维码已过期，请关闭后重新打开。")) } } })
+                current=session
                 main.post {
                     if(dialog!==next) { session.close(); return@post }
                     phone=session; content.removeAllViews()
                     val row=LinearLayout(activity).apply { gravity=Gravity.CENTER_VERTICAL }
                     row.addView(qr(session.url),LinearLayout.LayoutParams(dp(185),dp(185)))
                     val instructions=column()
-                    instructions.addView(label("手机扫码后用浏览器打开，输入剧名发送到电视。\n需连接同一局域网；关闭窗口即失效，最长 5 分钟。",16f))
+                    instructions.addView(label("手机扫码后用浏览器打开，输入剧名发送到电视。\n可连续搜索；二维码 5 分钟内有效，无需重复扫码。",16f))
                     instructions.addView(label(session.url,12f))
                     row.addView(instructions,LinearLayout.LayoutParams(0,-2,1f)); content.addView(row)
                 }
