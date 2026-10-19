@@ -124,8 +124,6 @@ class MainActivity: Activity() {
     private var playerView: PlayerView?=null
     private var danmakuOverlay: DanmakuOverlay?=null
     private var danmakuJob: java.util.concurrent.Future<*>?=null
-    private val danmakuSeen=mutableSetOf<String>()
-    private var danmakuCursor=0L
     private var danmakuDuration=0L
     private lateinit var favoriteMonitor: FavoriteMonitor
     private val favoriteBadges=mutableMapOf<String,TextView>()
@@ -1832,8 +1830,9 @@ class MainActivity: Activity() {
         playbackText.text="正在获取播放地址…"; progressBar.progress=0; progressBar.visibility=View.VISIBLE; hidePlaybackOverlay()
         controls.removeAllViews(); controls.visibility=View.GONE; transportPlay=null; sleepButton=null
         syncMediaSession()
-        // 弹幕：切集重置去重集，重新拉取本集弹幕
-        stopDanmakuFetch(); danmakuSeen.clear(); danmakuCursor=0; danmakuDuration=0
+        // 弹幕：切集重置，清空 overlay 待发射队列（旧集残余），重新拉取本集弹幕
+        stopDanmakuFetch(); danmakuDuration=0
+        danmakuOverlay?.shutdown()
         if(library.danmaku && danmakuOverlay!=null) startDanmakuFetch()
         val requestedId=data.episodes[episodeIndex]; val maxQuality=library.maxQuality; val ticket=generation
         work({ prefetched ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality,data.contentType)).prepare() }, { remote ->
@@ -2082,33 +2081,57 @@ class MainActivity: Activity() {
             Toast.makeText(this,"弹幕已关闭",Toast.LENGTH_SHORT).show()
         }
     }
-    /** 后台分页拉取真实弹幕（30s 窗口游标推进，comment_id 去重）。 */
+    /** 后台持续拉取真实弹幕：跟随播放进度逐窗口推进直到片尾，网络失败重试不退出。
+     *  旧实现一次性预取全部窗口后 break——短剧 7.5s 拉完就再无新弹幕（播到一半弹幕消失）、
+     *  一页失败整个循环退出（有时没弹幕）、切集瞬间在途数据被丢（开局弹幕闪现即失）。 */
     private fun startDanmakuFetch() {
         val data=detail ?: return
         val videoId=data.episodes.getOrNull(episodeIndex) ?: return
         val seriesId=data.series.id
         val ticket=generation
         stopDanmakuFetch()
-        danmakuSeen.clear(); danmakuCursor=0
         danmakuJob=io.submit {
+            // 游标与去重集为任务局部状态：被 cancel(true) 的旧任务若正阻塞在网络
+            // 调用上（中断打不断），复活后写共享字段会污染新集的拉取进度
+            var cursor=0L
+            val seen=mutableSetOf<String>()
+            var failures=0
             try {
                 while(!Thread.currentThread().isInterrupted) {
                     val duration=if(danmakuDuration>0) danmakuDuration else 90000L
-                    val page=repository.danmakuPage(videoId,seriesId,danmakuCursor,duration)
-                    val fresh=page.items.filter { it.id !in danmakuSeen }
-                    fresh.forEach { danmakuSeen.add(it.id) }
+                    val page=try {
+                        repository.danmakuPage(videoId,seriesId,cursor,duration)
+                    } catch(e: Exception) {
+                        failures++
+                        if(failures>5) break  // 连续失败才放弃
+                        Thread.sleep(3000L*failures)  // 退避重试
+                        continue
+                    }
+                    failures=0
+                    val fresh=page.items.filter { it.id !in seen }
+                    fresh.forEach { seen.add(it.id) }
                     if(fresh.isNotEmpty()) main.post {
+                        // 校验同集（generation）且层还在——切集后 overlay 已 shutdown，自然丢弃
                         if(danmakuOverlay!=null && generation==ticket && screen=="player") danmakuOverlay?.append(fresh.map { it.timeMs to it.text })
                     }
-                    if(page.nextCursorMs<=danmakuCursor || page.nextCursorMs<0) break
-                    danmakuCursor=page.nextCursorMs
-                    // 预取下一窗口，别等播放到才拉
-                    Thread.sleep(2500)
+                    if(page.nextCursorMs<=cursor || page.nextCursorMs<0) {
+                        // 游标到头：等播放推进或时长更新（duration 之前是兜底值，READY 后会变大）
+                        Thread.sleep(2500)
+                        // 已拉到真实片尾且播放也接近片尾：正常结束
+                        if(danmakuDuration>0 && cursor>=danmakuDuration-1000) break
+                        continue
+                    }
+                    cursor=page.nextCursorMs
+                    // 追着播放位置拉：游标领先播放进度一个窗口即可，别一口气拉完全片
+                    val playhead=player?.currentPosition ?: 0
+                    if(cursor>playhead+60000) Thread.sleep(2500)
                 }
             } catch(e: InterruptedException) {
                 // 切集/退出：正常中断
-            } catch(e: Exception) {
-                android.util.Log.w("HongguoTV","Danmaku fetch failed: ${e.message}")
+            } finally {
+                // 归池前清中断标志：cancel(true) 打在网络调用上时标志残留在线程上，
+                // 复用该线程的下一个任务（含本循环的 isInterrupted 检查）会静默死亡
+                Thread.interrupted()
             }
         }
     }
