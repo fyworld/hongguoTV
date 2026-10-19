@@ -46,8 +46,8 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
     var extraAction: Pair<String, () -> Unit>? = null
     private var status = "当前版本 ${BuildConfig.VERSION_NAME}"
     private var retryAfter = 0L
-    /** VersionName of the update already prompted this session; every build ships the
-     *  same fixed versionCode 999, so the code can no longer tell versions apart. */
+    /** VersionName of the update already prompted this session (versionCode now
+     *  increases per release, but the name is still the unique per-build key). */
     private var promptedName: String? = null
     private val auto get() = preferences.getBoolean("automatic", true)
 
@@ -98,7 +98,7 @@ class AppUpdater(private val activity: Activity, private val idle: () -> Boolean
         Thread({ repository.close() }, "hongguotv-update-cleanup").start()
     }
     private fun updateStatus(text: String) { status = text; statusView?.text = text }
-    /** "Later" defers by versionName (unique per build), not the fixed versionCode 999. */
+    /** "Later" defers by versionName (unique per build), not by versionCode. */
     private fun deferred(update: AppUpdate) = (preferences.getString("deferred_name", null) == update.versionName
         && preferences.getLong("deferred_until", 0) > System.currentTimeMillis())
     private fun renderActions() {

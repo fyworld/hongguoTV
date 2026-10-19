@@ -13,9 +13,9 @@ import java.util.concurrent.TimeUnit
 
 data class AppUpdate(val versionCode: Long, val versionName: String, val minSdk: Int,
                      val tag: String, val fileName: String, val size: Long, val sha256: String, val notes: String) {
-    /** Version-name comparison (1.0.10 > 1.0.9 > 1.0.4): all builds ship the same
-     *  fixed versionCode so any two versions can replace each other (downgrades
-     *  included), and the update channel decides "newer" by name, not by code. */
+    /** Version-name comparison (1.0.10 > 1.0.9 > 1.0.4): versionCode now increases with
+     *  each release (Dangbei launchers only refresh their icon cache when it changes),
+     *  and the update channel still decides "newer" by name, not by code. */
     fun newerThan(installedName: String, sdk: Int) = versionName != installedName && minSdk <= sdk && versionNewer(versionName, installedName)
     val downloadUrl get() = "$RELEASES/download/$tag/$fileName"
     companion object {

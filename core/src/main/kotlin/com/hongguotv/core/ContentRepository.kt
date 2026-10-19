@@ -342,6 +342,38 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return SearchSuggest.nameSearchDramas(records)
     }
 
+    // ---------- related series (season siblings, search-backed) ----------
+
+    /**
+     * Other seasons of the same series, for the detail page's bottom card row.
+     * The detail endpoint itself carries no related-content field (recommendations
+     * is always empty), so this walks the search chains with the season-stripped
+     * title: website search + name-search merged, then keeps rows whose own
+     * season-suffix base matches the current title's base (searchText-normalized,
+     * so "持械入宋：第二季" and "持械入宋第二季" share the key "持械入宋").
+     *
+     * A title WITHOUT a 第N季/部 suffix is treated as its own series base: season 1
+     * is often unmarked ("伪人降临" / "伪人降临第二季" / "伪人降临第三季"), so the
+     * plain title must still find its marked siblings, and a sibling row whose own
+     * title has no suffix matches when its full-title key equals the base key.
+     * Rows are sorted by season (unmarked first = season 1), the current series
+     * excluded by id.
+     */
+    fun relatedSeries(id: String, title: String): List<Series> {
+        val info = SearchSuggest.parseSeason(title)
+        val base = info?.base ?: title.trim()
+        val baseKey = SearchSuggest.searchText(base)
+        if (baseKey.isBlank()) return emptyList()
+        val pageResult = runCatching { search(base, 1) }.getOrDefault(CatalogPage(emptyList(), false))
+        val names = runCatching { nameSearch(base) }.getOrDefault(emptyList())
+        val merged = SearchSuggest.mergeDramas(pageResult.items, names)
+        return merged.filter { other ->
+            other.id != id && other.id.matches(Regex("[0-9]{1,30}")) &&
+                SearchSuggest.parseSeason(other.title)?.let { SearchSuggest.searchText(it.base) == baseKey }
+                    ?: (SearchSuggest.searchText(other.title) == baseKey)
+        }.sortedBy { SearchSuggest.parseSeason(it.title)?.season ?: 0 }
+    }
+
     // ---------- detail (website page) ----------
 
     fun detail(id: String, type: ContentType = ContentType.SHORT): Detail {

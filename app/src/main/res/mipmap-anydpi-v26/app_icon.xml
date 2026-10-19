@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon (Android 8.0+): TV launchers like Dangbei read the adaptive
+     layer first; without it they show a placeholder. Foreground logo sits in
+     the 108dp canvas's center safe zone (62% scale), background is the app's
+     dark brand color. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@mipmap/app_icon_bg"/>
+    <foreground android:drawable="@mipmap/app_icon_fg"/>
+</adaptive-icon>

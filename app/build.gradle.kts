@@ -11,12 +11,18 @@ android {
         applicationId = "com.hongguotv.nativeapp"
         minSdk = 24
         targetSdk = 34
-        // Fixed 999 for every build (test AND release): Android only allows replacing an
-        // installed package when the new versionCode is >= the old one, so a constant code
-        // lets any two versions overwrite each other in both directions (downgrades too).
-        // The in-app updater decides "newer" by versionName comparison instead.
-        versionCode = 999
-        versionName = System.getenv("HONGGUOTV_VERSION_NAME") ?: "1.0.0"
+        // versionCode derived from versionName (major*10000 + minor*100 + patch, e.g. 1.0.9 -> 10009).
+        // It used to be a fixed 999 so any two builds could replace each other in both directions,
+        // but TV launchers (Dangbei) cache the app icon and only refresh it when versionCode changes,
+        // so a constant code left users stuck with a stale/blank launcher icon forever (reported on
+        // v1.0.8: icon fine inside the APK, never picked up by the launcher). Increasing codes mean
+        // Android now rejects downgrade installs (use `adb install -d` or uninstall to go back);
+        // the in-app updater still decides "newer" by versionName comparison, not by code.
+        val name = System.getenv("HONGGUOTV_VERSION_NAME") ?: "1.0.0"
+        fun leadingInt(part: String?) = part?.takeWhile { it.isDigit() }?.toIntOrNull() ?: 0
+        val parts = name.split('.')
+        versionCode = leadingInt(parts.getOrNull(0)) * 10000 + leadingInt(parts.getOrNull(1)) * 100 + leadingInt(parts.getOrNull(2))
+        versionName = name
     }
     buildFeatures { buildConfig = true }
     // Both v1 (JAR) and v2 signatures: Android 7/8 package parsers can only read v1

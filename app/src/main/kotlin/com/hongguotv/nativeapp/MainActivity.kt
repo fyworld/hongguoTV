@@ -227,6 +227,10 @@ class MainActivity: Activity() {
     private var episodeIndex=0
     private var group=0
     private var synopsisExpanded=false
+    /** Related-seasons row for the detail page: loaded async after the detail itself. */
+    private var relatedRow: LinearLayout?=null
+    private var relatedScroll: HorizontalScrollView?=null
+    private var relatedCards=mutableListOf<View>()
     private var player: ExoPlayer?=null
     private var video: RemoteVideo?=null
     private var playbackReady=false
@@ -1592,7 +1596,7 @@ class MainActivity: Activity() {
     }
     private fun openDetail(series: Series,resume: Boolean=false,autoplay: Boolean=true) {
         pendingDetail=series; detailAutoplay=autoplay
-        invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false
+        invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false; relatedSeasons=null
         val body=base(series.title); message(body,"正在加载剧集…")
         work({ repository.detail(series.id,tabContentType()) }, { result ->
             detail=result; library.observeFavorite(series.id,result.episodes.size,System.currentTimeMillis(),acknowledge=true)
@@ -1600,6 +1604,7 @@ class MainActivity: Activity() {
             val target=ResumePlayback.target(result.episodes,progress?.episodeId,progress?.position ?: 0,progress?.completed==true)
             episodeIndex=target.index; group=episodeIndex/20
             if(resume) playEpisode(target.index,target.position,autoplay=detailAutoplay) else showDetail(false)
+            fetchRelatedSeries(result.series)
         }, { problem -> error(body,problem) { openDetail(series,resume,detailAutoplay) } })
     }
     private fun showDetail(focusEpisode: Boolean) {
@@ -1651,7 +1656,115 @@ class MainActivity: Activity() {
             content.addView(line,lp(-1,dp(49)))
         }
         episodes.forEachIndexed { i,v -> v.nextFocusLeftId=if(i%10==0) v.id else episodes[i-1].id; v.nextFocusRightId=if(i%10==9 || i==episodes.lastIndex) v.id else episodes[i+1].id; if(i>=10) v.nextFocusUpId=episodes[i-10].id; v.nextFocusDownId=if(i+10<episodes.size) episodes[i+10].id else v.id }
+        // Group/jump rebuilds reuse the cached related-seasons row (no second search).
+        relatedSeasons?.takeIf { it.isNotEmpty() }?.let { appendRelatedRow(it) }
         if(focusEpisode) episodes.getOrNull((episodeIndex-group*20).coerceIn(0,episodes.lastIndex))?.requestFocus() else play.requestFocus()
+    }
+    /**
+     * Related-seasons row at the bottom of the detail page. Loaded asynchronously so a
+     * slow search never blocks the detail itself. Deliberately NOT routed through
+     * work(): that helper is a single slot which cancels the previous job — calling it
+     * from openDetail's done callback would kill the just-started playback prepare
+     * (resume flow), and conversely the prepare would kill this fetch. Instead this
+     * uses its own io submission with a generation ticket: the result is written to
+     * relatedSeasons whenever it is still for the SAME series (regardless of screen —
+     * the resume flow enters playback immediately and returns to the detail page
+     * later, where showDetail() re-attaches the cached row).
+     */
+    private fun fetchRelatedSeries(series: Series) {
+        relatedRow=null; relatedScroll=null; relatedCards.clear()
+        relatedJob?.cancel(true); relatedJob=null
+        val scope=RequestScope()
+        relatedJob=io.submit {
+            try {
+                val seasons=scope.run { repository.relatedSeries(series.id,series.title) }
+                main.post {
+                    // Same-series check only (NOT generation: returning from playback to
+                    // the detail page rebuilds it and bumps generation, but the fetch is
+                    // still valid for this series — the cached row must survive that).
+                    if(isDestroyed || detail?.series?.id!=series.id) return@post
+                    relatedSeasons=seasons
+                    if(screen=="detail" && seasons.isNotEmpty()) appendRelatedRow(seasons)
+                }
+            } catch(_: Exception) { /* related content is best-effort: silent on failure */ }
+        }
+    }
+    private var relatedJob: java.util.concurrent.Future<*>?=null
+    /** Cached related seasons: showDetail() rebuilds the page on group/jump/synopsis
+     *  changes, and the row must survive those rebuilds without a second search. */
+    private var relatedSeasons: List<Series>?=null
+    private fun appendRelatedRow(seasons: List<Series>) {
+        // The detail page lives in base("剧集详情")'s ScrollView: root → container →
+        // [heading row, vertical ScrollView]; the scroll's only child is the content column.
+        val container=root.getChildAt(0) as? LinearLayout ?: return
+        val scroll=container.getChildAt(1) as? ScrollView ?: return
+        val content=scroll.getChildAt(0) as? LinearLayout ?: return
+        val data=detail ?: return
+        val block=column()
+        val heading=row(); heading.setPadding(dp(2),dp(16),dp(2),dp(2))
+        heading.addView(View(this).apply { background=TvStyle.shape(this@MainActivity,TvStyle.accent,Color.TRANSPARENT,2) },lp(dp(3),dp(14)).apply { rightMargin=dp(8) })
+        heading.addView(text("相关剧集",16f).apply { setTypeface(null,Typeface.BOLD) })
+        heading.addView(text("左右选剧  ·  滚动循环",10f,muted),lp(-2,-2).apply { leftMargin=dp(16) })
+        block.addView(heading)
+        val horizontal=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; clipToPadding=false; setPadding(dp(2),dp(2),dp(2),dp(2)) }
+        val line=row().apply { gravity=Gravity.TOP }
+        horizontal.addView(line); block.addView(horizontal,lp(-1,-2).apply { topMargin=dp(14) })
+        val width=((resources.displayMetrics.widthPixels*.9f-dp(70))/6).toInt().coerceAtLeast(dp(100))
+        val cards=mutableListOf<View>()
+        seasons.forEach { season ->
+            val card=column().apply { setPadding(dp(4),dp(4),dp(4),dp(8)); focusStyle(this); contentDescription=season.title }
+            val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+            card.addView(image,lp(-1,((width-dp(8))/TvStyle.POSTER_ASPECT).toInt()).apply { bottomMargin=dp(6) }); loadCover(image,season.cover)
+            card.addView(text(season.title,13f).apply { gravity=Gravity.CENTER; minLines=2; maxLines=2; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(2),dp(3),dp(2),0) })
+            card.addView(text(season.badge.ifBlank { "查看剧集" },11f,muted).apply { gravity=Gravity.CENTER; maxLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(2),0,dp(2),0) })
+            card.setOnClickListener { openDetail(season) }
+            card.setOnLongClickListener { quickActions(season,card); true }
+            line.addView(card,lp(width,-1).apply { rightMargin=dp(14) }); cards+=card
+        }
+        // Focus cycle: last→first and first→last, with the scroller following focus
+        // so the wrapped card is revealed (post: the card widths need a layout pass).
+        // The listener replaces focusStyle's default one, so it re-implements the
+        // paint (raised background + white ring) plus the wrap-around scrolling.
+        cards.forEachIndexed { i,card ->
+            card.nextFocusLeftId=cards[(i-1).coerceAtLeast(0)].id
+            card.nextFocusRightId=cards[(i+1).coerceAtMost(cards.lastIndex)].id
+            card.setOnFocusChangeListener { _,focused ->
+                card.background=rounded(if(focused) TvStyle.raised else surface,if(focused) white else Color.TRANSPARENT)
+                if(focused) horizontal.post {
+                    val left=card.left-horizontal.scrollX; val right=card.right-horizontal.scrollX
+                    if(left<0) horizontal.smoothScrollBy(left-dp(16),0)
+                    else if(right>horizontal.width) horizontal.smoothScrollBy(right-horizontal.width+dp(16),0)
+                }
+            }
+        }
+        // First card's left wraps to the last, last card's right wraps to the first.
+        cards.first().nextFocusLeftId=cards.last().id
+        cards.last().nextFocusRightId=cards.first().id
+        content.addView(block,lp(-1,-2).apply { topMargin=dp(6) })
+        relatedRow=block; relatedScroll=horizontal; relatedCards.clear(); relatedCards+=cards
+        // Episode buttons above the row: their down-focus currently stops at the last
+        // episode line (self-id). Re-wire the LAST episode row's down-focus into the
+        // related cards so pressing down from the episode grid enters the row.
+        // (appendRelatedRow runs after showDetail built the episode buttons.)
+        if(relatedCards.isNotEmpty()) {
+            // The episode grid's last row buttons were assigned nextFocusDownId=self
+            // in showDetail; find them by scanning the content column for the last
+            // episode line and pointing its buttons down to the first related card.
+            // Simplest reliable hook: the last episode button of the last line.
+            val episodeButtons=mutableListOf<View>()
+            for(i in 0 until content.childCount) {
+                val child=content.getChildAt(i)
+                if(child is LinearLayout && child.orientation==LinearLayout.HORIZONTAL && child.getChildAt(0) is TextView && (child.getChildAt(0) as TextView).text.toString().toIntOrNull()!=null)
+                    for(j in 0 until child.childCount) { val b=child.getChildAt(j); if(b is TextView && b.text.toString().toIntOrNull()!=null) episodeButtons+=b }
+            }
+            if(episodeButtons.isNotEmpty()) {
+                val firstCard=relatedCards.first()
+                val lastLineStart=(episodeButtons.size-1)/10*10
+                for(i in lastLineStart until episodeButtons.size) episodeButtons[i].nextFocusDownId=firstCard.id
+                // Up-focus from the related row returns to the last episode line.
+                relatedCards.forEach { it.nextFocusUpId=episodeButtons[lastLineStart].id }
+            }
+        }
     }
     private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
         updater.interrupt()
