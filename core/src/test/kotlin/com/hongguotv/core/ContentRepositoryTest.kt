@@ -71,30 +71,38 @@ class ContentRepositoryTest {
     }
 
     @Test fun appRequestCarriesSignatureHeaders() {
+        // The landpage feed still serves theme filtering (穿越 category_dim_theme=37),
+        // so its requests must carry the six-header signature chain.
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
             JSONObject().put("code",0).put("data",JSONObject().put("video_data",JSONArray())).toString()
         }
-        repo.home(1,ContentType.SHORT)
+        repo.themeCatalog(ContentType.SHORT,Theme("chuanyue","穿越",feedThemeId = "37"),1)
         val request=requests.single()
         assertEquals("POST",request.method)
+        assertEquals("/reading/distribution/category/landpage/v/",request.url.encodedPath)
         assertNotNull(request.header("X-Gorgon"))
         assertNotNull(request.header("X-Khronos"))
-        assertNotNull(request.header("X-SS-Req-Ticket"))
+        assertNotNull(request.header("X-Ladon"))
+        assertNotNull(request.header("X-Argus"))
+        assertNotNull(request.header("X-Helios"))
+        assertNotNull(request.header("X-Medusa"))
         assertEquals("8662",request.url.queryParameter("aid"))
         assertNotNull(request.url.queryParameter("device_id"))
         assertNotNull(request.url.queryParameter("_rticket"))
     }
 
     @Test fun homeParsesLandpageFeedAndPagination() {
+        // 2026-10: every "全部" grid reads the website category page — the feed's cover
+        // URLs switched to HEIC (API-28+ only, blank on Android 7/8 TVs), while the
+        // website serves jpg/webp covers with true pagination.
         val repo=repository { request ->
-            val row=JSONObject()
-                .put("series_id","123").put("title","测试短剧").put("episode_cnt",12)
-                .put("cover","https:\\u002F\\u002Fexample.com\\u002Fcover.jpg")
-            JSONObject().put("code",0).put("data",JSONObject()
-                .put("video_data",JSONArray().put(row))
-                .put("has_more",true).put("next_offset",18).put("session_id","session-1")).toString()
+            assertEquals("/category/real-drama",request.url.encodedPath)
+            assertEquals("1",request.url.queryParameter("page"))
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"isSuccess":true,
+                "recommendList":[{"series_id":"123","series_name":"测试短剧","series_cover":"https:\\u002F\\u002Fexample.com\\u002Fcover.jpg","episode_cnt":12,"tags":[{"name":"都市"}]}],
+                "pagination":{"total":800,"pageNum":1,"pageSize":24,"totalPages":34}}}};</script>"""
         }
         val result=repo.home(1,ContentType.SHORT)
         assertEquals(listOf("123"),result.items.map { it.id })
@@ -105,24 +113,27 @@ class ContentRepositoryTest {
     }
 
     @Test fun homeSecondPageUsesOffsetCursor() {
+        // The website catalog paginates with ?page= — page 2 must request page=2 and
+        // the parser must reject a mismatched pageNum anchor (stale cache guard).
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
-            JSONObject().put("code",0).put("data",JSONObject()
-                .put("video_data",JSONArray()).put("has_more",false).put("next_offset",36)).toString()
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"isSuccess":true,
+                "recommendList":[{"series_id":"${requests.size}00","series_name":"第${requests.size}页","series_cover":"https:\\u002F\\u002Fexample.com\\u002Fc.jpg","episode_cnt":12}],
+                "pagination":{"total":800,"pageNum":${requests.size},"pageSize":24,"totalPages":34}}}};</script>"""
         }
         repo.home(1,ContentType.SHORT)
-        repo.home(2,ContentType.SHORT)
+        val result=repo.home(2,ContentType.SHORT)
         assertEquals(2,requests.size)
-        val payload=JSONObject(okio.Buffer().apply { requests[1].body!!.writeTo(this) }.readUtf8())
-        assertEquals(18,payload.getInt("offset"))
-        assertEquals(2,payload.getInt("client_req_type"))
+        assertEquals("2",requests[1].url.queryParameter("page"))
+        assertEquals("第2页",result.items.single().title)
     }
 
     @Test fun homeRejectsInvalidRows() {
-        val repo=repository { request ->
-            JSONObject().put("code",0).put("data",JSONObject()
-                .put("video_data",JSONArray().put(JSONObject().put("series_id","abc").put("title","无效")))).toString()
+        val repo=repository {
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"isSuccess":true,
+                "recommendList":[{"series_id":"abc","series_name":"无效","series_cover":"https:\\u002F\\u002Fexample.com\\u002Fc.jpg"}],
+                "pagination":{"total":800,"pageNum":1,"pageSize":24,"totalPages":34}}}};</script>"""
         }
         assertTrue(repo.home(1,ContentType.SHORT).items.isEmpty())
     }
@@ -156,18 +167,18 @@ class ContentRepositoryTest {
     }
 
     @Test fun aiHomeUsesItsOwnAppFeedGenre() {
-        // The AI tab must not fall into the real-drama feed: home(AI) sends
-        // genre=ai_series + req_scene=ai_series (phone-version hongguoAppGenres).
+        // The AI "全部" grid reads the website ai-drama category page (HEIC-free
+        // covers); the feed channel stays reserved for theme filtering.
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
-            JSONObject().put("code",0).put("data",JSONObject()
-                .put("video_data",JSONArray()).put("has_more",false).put("next_offset",18)).toString()
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"isSuccess":true,
+                "recommendList":[{"series_id":"123","series_name":"测试AI剧","series_cover":"https:\\u002F\\u002Fexample.com\\u002Fcover.jpg","episode_cnt":12}],
+                "pagination":{"total":800,"pageNum":1,"pageSize":24,"totalPages":34}}}};</script>"""
         }
         repo.home(1,ContentType.AI)
-        val payload=JSONObject(okio.Buffer().apply { requests.single().body!!.writeTo(this) }.readUtf8())
-        assertEquals(listOf("ai_series"),payload.getJSONObject("select_items").getJSONArray("genre").let { arr -> (0 until arr.length()).map { arr.optString(it) } })
-        assertEquals("ai_series",payload.getString("req_scene"))
+        assertEquals("/category/ai-drama",requests.single().url.encodedPath)
+        assertEquals("1",requests.single().url.queryParameter("page"))
     }
 
     @Test fun searchBackedThemeServesSearchResults() {

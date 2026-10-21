@@ -110,15 +110,15 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // short_play (real drama) and ai_series (AI drama). Each channel needs its own
         // req_scene as well, otherwise the server falls back to the real-drama feed and
         // the tabs would show the same content.
-        // COMIC is different: its feed is a recommendation stream that rotates and runs
-        // dry (all duplicates) after ~6 pages (~108 entries), while the website category
-        // page is a true paginated catalog (24/page, 34 pages = 800 entries). The comic
-        // "全部" grid therefore reads the website page; the feed channel stays reserved
-        // for theme filtering (category_dim_theme).
-        if (type == ContentType.COMIC)
-            return ThemeCategory.parse(webText("$site/category/comic-drama?page=$page"),page,
-                Theme("all","全部"),ContentType.COMIC)
-        return feedPage(page, feedGenre(type), feedScene(type), emptyList())
+        // 2026-10: the feed's cover URLs switched to HEIC (p*-reading-sign.fqnovelpic.com,
+        // signature-locked, no CDN format conversion) - HEIF decoding needs API 28+, so
+        // covers went blank on Android 7/8 TVs. The website category pages serve the same
+        // catalog with jpg/webp covers (byteimg CDN, no signature) and true pagination
+        // (24/page), so the "全部" grid now reads the website for every content type.
+        // The feed channels stay reserved for theme filtering (category_dim_theme) and
+        // the home recommendation shelves.
+        return ThemeCategory.parse(webText("$site/category/${categoryPath(type)}?page=$page"),page,
+            Theme("all","全部"),type)
     }
 
     /** One landpage feed page.
