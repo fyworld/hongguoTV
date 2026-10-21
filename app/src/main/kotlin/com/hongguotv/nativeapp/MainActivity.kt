@@ -84,9 +84,10 @@ class MainActivity: Activity() {
     private val tabTheme=mutableMapOf<Int,String>()
     /** Horizontally scrolling theme bar container, tracked to keep it scrolled to the focused button. */
     private var themeScroll: HorizontalScrollView?=null
-    /** Home shelves show both content types at once; each tab keeps its own catalog. */
+    /** Home shelves show every content type at once; each tab keeps its own catalog. */
     private var homeShort=emptyList<Series>()
     private var homeComic=emptyList<Series>()
+    private var homeAi=emptyList<Series>()
     private fun tabContentType(): ContentType = when(tab) { 1 -> ContentType.SHORT; 2 -> ContentType.COMIC; 3 -> ContentType.AI; else -> library.contentType }
     private val pageSize=20
     private var catalogScroll: ScrollView?=null
@@ -476,7 +477,7 @@ class MainActivity: Activity() {
             if(cached!=null && System.currentTimeMillis()-cached.first<catalogTtlMs) {
                 page=cached.second.page; catalog=cached.second.items; hasMore=cached.second.hasMore; ranking=cached.second.ranking
                 fetch=false
-            } else if(tab==0 && homeFetchedAt>0 && System.currentTimeMillis()-homeFetchedAt<catalogTtlMs && (homeShort.isNotEmpty() || homeComic.isNotEmpty())) {
+            } else if(tab==0 && homeFetchedAt>0 && System.currentTimeMillis()-homeFetchedAt<catalogTtlMs && (homeShort.isNotEmpty() || homeComic.isNotEmpty() || homeAi.isNotEmpty())) {
                 // Home tab: the session fetch is still fresh — render the shelves from
                 // the in-memory lists (homeShort/homeComic) without a background refresh.
                 fetch=false
@@ -488,10 +489,11 @@ class MainActivity: Activity() {
             // list — showing it while loading would look like the filter is not applied.
             val cached=if((tab==0 || tab==1 || tab==2 || tab==3) && page==1 && themeSlug.isBlank()) library.cachedHome(tabContentType()) else null
             catalog=cached?.items ?: emptyList(); hasMore=cached?.hasMore ?: false; ranking=null; homeFromCache=cached!=null
-            // Home shelves need both content types; seed them from the per-type caches.
+            // Home shelves need every content type; seed them from the per-type caches.
             if(tab==0 && page==1) {
                 homeShort=library.cachedHome(ContentType.SHORT)?.items ?: emptyList()
                 homeComic=library.cachedHome(ContentType.COMIC)?.items ?: emptyList()
+                homeAi=library.cachedHome(ContentType.AI)?.items ?: emptyList()
             }
         }
         invalidatePage(); screen="catalog"; releaseCatalogViews(); val container=base()
@@ -667,22 +669,22 @@ class MainActivity: Activity() {
             val requestTab=tab; val requestPage=page; val requestQuery=query; val requestType=tabContentType(); val requestBoard=library.rankBoard
             val requestTheme=themeSlug; val requestThemeObj=if(requestTheme.isBlank()) null else themesByType[requestType]?.firstOrNull { it.slug==requestTheme }
             work({
-                // The home tab fetches both content types at once so its two shelves
-                // (热门发现·短剧 / 热门发现·漫剧) refresh together.
+                // The home tab fetches every content type at once so its shelves
+                // (热门发现·短剧 / 漫剧 / AI剧) refresh together.
                 when(requestTab) {
-                    0 -> repository.home(requestPage,ContentType.SHORT) to repository.home(requestPage,ContentType.COMIC)
-                    1 -> if(requestThemeObj!=null) repository.themeCatalog(ContentType.SHORT,requestThemeObj,requestPage) to CatalogPage(emptyList(),false)
-                        else repository.home(requestPage,ContentType.SHORT) to CatalogPage(emptyList(),false)
-                    // The pair is (shortResult, comicResult) and tab 2 reads the SECOND slot:
-                    // a comic theme's list must go there, not into the first.
-                    2 -> if(requestThemeObj!=null) CatalogPage(emptyList(),false) to repository.themeCatalog(ContentType.COMIC,requestThemeObj,requestPage)
-                        else CatalogPage(emptyList(),false) to repository.home(requestPage,ContentType.COMIC)
-                    3 -> if(requestThemeObj!=null) repository.themeCatalog(ContentType.AI,requestThemeObj,requestPage) to CatalogPage(emptyList(),false)
-                        else repository.home(requestPage,ContentType.AI) to CatalogPage(emptyList(),false)
-                    5 -> CatalogPage(emptyList(),false) to repository.ranking(requestBoard,requestPage)
-                    else -> repository.search(requestQuery,requestPage,requestType) to CatalogPage(emptyList(),false)
+                    0 -> Triple(repository.home(requestPage,ContentType.SHORT), repository.home(requestPage,ContentType.COMIC), repository.home(requestPage,ContentType.AI))
+                    1 -> if(requestThemeObj!=null) Triple(repository.themeCatalog(ContentType.SHORT,requestThemeObj,requestPage), CatalogPage(emptyList(),false), CatalogPage(emptyList(),false))
+                        else Triple(repository.home(requestPage,ContentType.SHORT), CatalogPage(emptyList(),false), CatalogPage(emptyList(),false))
+                    // The triple is (shortResult, comicResult, aiResult); tabs 2/3 read
+                    // their own slot: a comic/AI theme's list must go there, not the first.
+                    2 -> if(requestThemeObj!=null) Triple(CatalogPage(emptyList(),false), repository.themeCatalog(ContentType.COMIC,requestThemeObj,requestPage), CatalogPage(emptyList(),false))
+                        else Triple(CatalogPage(emptyList(),false), repository.home(requestPage,ContentType.COMIC), CatalogPage(emptyList(),false))
+                    3 -> if(requestThemeObj!=null) Triple(CatalogPage(emptyList(),false), CatalogPage(emptyList(),false), repository.themeCatalog(ContentType.AI,requestThemeObj,requestPage))
+                        else Triple(CatalogPage(emptyList(),false), CatalogPage(emptyList(),false), repository.home(requestPage,ContentType.AI))
+                    5 -> Triple(CatalogPage(emptyList(),false), CatalogPage(emptyList(),false), repository.ranking(requestBoard,requestPage))
+                    else -> Triple(repository.search(requestQuery,requestPage,requestType), CatalogPage(emptyList(),false), CatalogPage(emptyList(),false))
                 }
-            }, { (shortResult,comicResult) ->
+            }, { (shortResult,comicResult,aiResult) ->
                 if(requestPage==1) {
                     // Session cache: remember the fetched page so tab/board switches within
                     // the TTL re-render instead of re-fetching.
@@ -693,32 +695,32 @@ class MainActivity: Activity() {
                         else -> null
                     }
                     if(cacheKey!=null) {
-                        val themeResult=if(requestTab==1 || requestTab==3) shortResult else comicResult
+                        val themeResult=if(requestTab==1) shortResult else if(requestTab==2) comicResult else aiResult
                         catalogCache[cacheKey]=System.currentTimeMillis() to CatalogState(requestPage,themeResult.items,themeResult.hasMore,null)
                     }
                     when(requestTab) {
                         1 -> if(requestThemeObj==null) catalogCache["short"]=System.currentTimeMillis() to CatalogState(requestPage,shortResult.items,shortResult.hasMore,shortResult.ranking)
                         2 -> if(requestThemeObj==null) catalogCache["comic"]=System.currentTimeMillis() to CatalogState(requestPage,comicResult.items,comicResult.hasMore,comicResult.ranking)
-                        3 -> if(requestThemeObj==null) catalogCache["ai"]=System.currentTimeMillis() to CatalogState(requestPage,shortResult.items,shortResult.hasMore,shortResult.ranking)
+                        3 -> if(requestThemeObj==null) catalogCache["ai"]=System.currentTimeMillis() to CatalogState(requestPage,aiResult.items,aiResult.hasMore,aiResult.ranking)
                         5 -> catalogCache["rank:${requestBoard.storedValue}"]=System.currentTimeMillis() to CatalogState(requestPage,comicResult.items,comicResult.hasMore,comicResult.ranking)
                     }
                     if(requestTab==0) homeFetchedAt=System.currentTimeMillis()
                     when(requestTab) {
-                        0 -> { library.cacheHome(ContentType.SHORT,shortResult.items,shortResult.hasMore); library.cacheHome(ContentType.COMIC,comicResult.items,comicResult.hasMore) }
+                        0 -> { library.cacheHome(ContentType.SHORT,shortResult.items,shortResult.hasMore); library.cacheHome(ContentType.COMIC,comicResult.items,comicResult.hasMore); library.cacheHome(ContentType.AI,aiResult.items,aiResult.hasMore) }
                         1 -> if(requestThemeObj==null) library.cacheHome(ContentType.SHORT,shortResult.items,shortResult.hasMore)
                         2 -> if(requestThemeObj==null) library.cacheHome(ContentType.COMIC,comicResult.items,comicResult.hasMore)
-                        3 -> if(requestThemeObj==null) library.cacheHome(ContentType.AI,shortResult.items,shortResult.hasMore)
+                        3 -> if(requestThemeObj==null) library.cacheHome(ContentType.AI,aiResult.items,aiResult.hasMore)
                     }
                 }
                 if(requestTab==0 && requestPage==1) {
-                    homeShort=shortResult.items; homeComic=comicResult.items
-                    catalog=shortResult.items+comicResult.items; hasMore=shortResult.hasMore || comicResult.hasMore; ranking=shortResult.ranking
+                    homeShort=shortResult.items; homeComic=comicResult.items; homeAi=aiResult.items
+                    catalog=shortResult.items+comicResult.items+aiResult.items; hasMore=shortResult.hasMore || comicResult.hasMore || aiResult.hasMore; ranking=shortResult.ranking
                     if(homeFromCache || tvTools.showing || updater.showing) {
                         homeScreen?.refresh?.text="热门已更新 · 按确认查看"
                         homeScreen?.refresh?.setOnClickListener { showCatalog() }
                     } else showCatalog()
                 } else {
-                    val result=if(requestTab==1 || requestTab==3) shortResult else if(requestTab==2) comicResult else if(requestTab==5) comicResult else shortResult
+                    val result=if(requestTab==1) shortResult else if(requestTab==2) comicResult else if(requestTab==3) aiResult else if(requestTab==5) comicResult else shortResult
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
                     val keepNav=nav.any { it.hasFocus() }; val keepType=rankButtons.values.any { it.hasFocus() } || rankFocusBoard!=null
                     // Theme switch: focus is sitting on a theme button (the bar lives above
@@ -732,7 +734,7 @@ class MainActivity: Activity() {
                 }
             }, { problem ->
                 if(requestTab==0 && requestPage==1) {
-                    homeScreen?.refresh?.text=if(homeShort.isNotEmpty() || homeComic.isNotEmpty()) "当前显示上次内容 · 联网后按确认刷新" else "热门暂时无法加载 · 按确认重试"
+                    homeScreen?.refresh?.text=if(homeShort.isNotEmpty() || homeComic.isNotEmpty() || homeAi.isNotEmpty()) "当前显示上次内容 · 联网后按确认刷新" else "热门暂时无法加载 · 按确认重试"
                     homeScreen?.refresh?.setOnClickListener { showCatalog(true) }
                     return@work
                 }
@@ -1049,7 +1051,7 @@ class MainActivity: Activity() {
         home.refresh.setOnClickListener { invalidateCatalogCache(); showCatalog(true) }
         nav.forEach { it.nextFocusDownId=home.firstId() }
         if(focusNav) nav[0].requestFocus()
-        if((homeShort.isNotEmpty() || homeComic.isNotEmpty()) && !homeContentLogged) {
+        if((homeShort.isNotEmpty() || homeComic.isNotEmpty() || homeAi.isNotEmpty()) && !homeContentLogged) {
             homeContentLogged=true
             body.post { android.util.Log.i("HongguoTV","Home content ready cached=$homeFromCache elapsedMs=${android.os.SystemClock.elapsedRealtime()-activityStarted}") }
         }
@@ -1063,6 +1065,7 @@ class MainActivity: Activity() {
         val hidden=library.hidden()
         val short=homeShort.filterNot { it.id in hidden }
         val comic=homeComic.filterNot { it.id in hidden }
+        val ai=homeAi.filterNot { it.id in hidden }
         return listOf(
             HomeScreen.Shelf("resume","接着看",recent.take(8).map { p -> HomeScreen.Entry(p.series,
                 "第 ${p.episodeIndex+1} 集 · ${if(p.completed) "接着看下一集" else formatTime(p.position)}",true,
@@ -1071,7 +1074,9 @@ class MainActivity: Activity() {
             HomeScreen.Shelf("short","热门发现 · 短剧",short.take(10).map { HomeScreen.Entry(it,it.badge.ifBlank { "查看剧集" }) },
                 if(short.size>10) { { switchTab(1) } } else null),
             HomeScreen.Shelf("comic","热门发现 · 漫剧",comic.take(10).map { HomeScreen.Entry(it,it.badge.ifBlank { "查看剧集" }) },
-                if(comic.size>10) { { switchTab(2) } } else null))
+                if(comic.size>10) { { switchTab(2) } } else null),
+            HomeScreen.Shelf("ai","热门发现 · AI剧",ai.take(10).map { HomeScreen.Entry(it,it.badge.ifBlank { "查看剧集" }) },
+                if(ai.size>10) { { switchTab(3) } } else null))
     }
     private fun refreshLibraryCards(changedId: String,removed: Boolean=false) {
         if(screen!="catalog") return
