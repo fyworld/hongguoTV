@@ -45,12 +45,15 @@ internal class AesV3(key: ByteArray, timestamp: Int) {
         for(i in 0..3) for(j in 0..3) rows[i][j]=rows[i][j] xor keys[4+i][j]
         return rows.flatMap { it.toList() }.map { it.toByte() }.toByteArray()
     }
+    // JS out-of-bounds reads return undefined -> 0 in bitwise ops (hgAESSrc semantics).
+    private fun src(data: ByteArray, at: Int) = if (at in data.indices) data[at].u() else 0
+    private fun put(out: ByteArray, at: Int, value: Int) { if (at in out.indices) out[at] = value.toByte() }
+
     fun encrypt(source: ByteArray, iv: ByteArray): ByteArray {
-        require(source.size >= 248)
         val plaintext=ByteArray(32)
         for(i in 0 until 31) {
             val at=i*8
-            plaintext[i]=(((source[at].u() shr 4) and 2) or (source[at+1].u() and 64) or ((source[at+2].u() shr 2) and 1) or ((source[at+3].u() shl 3) and 128) or ((source[at+4].u() shr 1) and 4) or ((source[at+5].u() shl 3) and 16) or ((source[at+6].u() shl 5) and 32) or ((source[at+7].u() shr 4) and 8)).toByte()
+            plaintext[i]=(((src(source,at) shr 4) and 2) or (src(source,at+1) and 64) or ((src(source,at+2) shr 2) and 1) or ((src(source,at+3) shl 3) and 128) or ((src(source,at+4) shr 1) and 4) or ((src(source,at+5) shl 3) and 16) or ((src(source,at+6) shl 5) and 32) or ((src(source,at+7) shr 4) and 8)).toByte()
         }
         plaintext[31]=1
         val first=block(xor(plaintext.copyOfRange(0,16),iv))
@@ -58,14 +61,14 @@ internal class AesV3(key: ByteArray, timestamp: Int) {
         val out=source.copyOf()
         for(i in 0 until 31) {
             val at=i*8; val k=key[i].u()
-            out[at]=((out[at].u() and 0xdf) or ((k shl 4) and 32)).toByte()
-            out[at+1]=((out[at+1].u() and 0xbf) or (k and 64)).toByte()
-            out[at+2]=((out[at+2].u() and 0xfb) or ((k shl 2) and 4)).toByte()
-            out[at+3]=((out[at+3].u() and 0xef) or ((k shr 3) and 16)).toByte()
-            out[at+4]=((out[at+4].u() and 0xf7) or ((k+k) and 8)).toByte()
-            out[at+5]=((out[at+5].u() and 0xfd) or ((k shr 3) and 2)).toByte()
-            out[at+6]=((out[at+6].u() and 0xfe) or ((k shr 5) and 1)).toByte()
-            out[at+7]=((out[at+7].u() and 0x7f) or ((k shl 4) and 128)).toByte()
+            put(out,at,(src(out,at) and 0xdf) or ((k shl 4) and 32))
+            put(out,at+1,(src(out,at+1) and 0xbf) or (k and 64))
+            put(out,at+2,(src(out,at+2) and 0xfb) or ((k shl 2) and 4))
+            put(out,at+3,(src(out,at+3) and 0xef) or ((k shr 3) and 16))
+            put(out,at+4,(src(out,at+4) and 0xf7) or ((k+k) and 8))
+            put(out,at+5,(src(out,at+5) and 0xfd) or ((k shr 3) and 2))
+            put(out,at+6,(src(out,at+6) and 0xfe) or ((k shr 5) and 1))
+            put(out,at+7,(src(out,at+7) and 0x7f) or ((k shl 4) and 128))
         }
         return byteArrayOf(key.last())+out
     }

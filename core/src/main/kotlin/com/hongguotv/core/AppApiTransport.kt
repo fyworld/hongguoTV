@@ -30,15 +30,19 @@ internal class AppApiTransport(
 ) {
     private val random = SecureRandom()
     private val deviceId = newDeviceId()
-    private val installId = newDeviceId()
+    /** Upstream 6e43927 live probe pins iid to the device id; independent random
+     *  install ids get flagged by risk control (110001). */
+    private val installId = deviceId
 
     /** App client UA: must match the version_code/version_name in the query profile. */
     val userAgent = "com.phoenix.read/73532 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
 
     private fun newDeviceId(): String {
+        // Server risk control rejects fixed/fake values with 110001; the App-side rule
+        // is 1e15 + 48-bit random (16 digits) - upstream live probe verified this shape.
         val bytes = ByteArray(8); random.nextBytes(bytes)
         var value = 0L; for (b in bytes) value = (value shl 8) or (b.toLong() and 0xff)
-        return (1_000_000_000_000_000_000L + (value and 0x7fffffffffffffffL) % 8_000_000_000_000_000_000L).toString()
+        return (1_000_000_000_000_000L + (value and 0xffffffffffffL) % 1_000_000_000_000_000L).toString()
     }
 
     private fun rotl8(v: Int, n: Int) = ((v shl n) or (v ushr (8 - n))) and 0xff
@@ -107,9 +111,10 @@ internal class AppApiTransport(
         "aid" to "8662", "app_name" to "novelread", "version_code" to "73532", "version_name" to "7.3.5.32",
         "manifest_version_code" to "73532", "update_version_code" to "73532", "channel" to "update_64",
         "device_platform" to "android", "os" to "android", "ssmix" to "a", "device_type" to "25053RT47C",
-        "device_brand" to "Redmi", "language" to "zh", "os_api" to "28", "os_version" to "9",
+        "device_brand" to "Redmi", "language" to "zh", "os_api" to "36", "os_version" to "16",
         "resolution" to "1280*2772", "dpi" to "520", "ac" to "wifi",
         "device_id" to deviceId, "iid" to installId,
+        "ts" to (clock() / 1000).toString(),
         "_rticket" to clock().toString())
 
     /**
@@ -123,7 +128,16 @@ internal class AppApiTransport(
         val headers = if (!signed) linkedMapOf(
             "User-Agent" to userAgent, "Accept" to "application/json", "X-XS-From-Web" to "0", "Sdk-Version" to "2")
         else appSign(query, body)
-        val builder = Request.Builder().url("$APP_BASE$path?$query")
+        return requestUrl("$APP_BASE$path?$query", body, headers)
+    }
+
+    /**
+     * Pre-signed request (multi_video_model playback channel): the URL and headers
+     * were produced by the caller's six-header signature chain; this only sends and
+     * validates the response envelope.
+     */
+    fun requestUrl(url: String, body: ByteArray?, headers: Map<String,String>): JSONObject {
+        val builder = Request.Builder().url(url)
         for ((k,v) in headers) builder.header(k,v)
         if (body != null) builder.post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
         return RequestScope.execute(http.newCall(builder.build())) { response ->

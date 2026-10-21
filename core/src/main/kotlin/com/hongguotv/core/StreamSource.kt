@@ -23,11 +23,14 @@ interface StreamSource {
 
     companion object {
         /**
-         * Ordered fallback chain: App API first (multi-quality + CENC keys), the
-         * website's public MP4 second (360p, plain, immune to App API breakage).
+         * Ordered fallback chain: multi_video_model first (current App endpoint,
+         * six-header signature, multi-quality + CENC keys), the retired unsigned
+         * video_model second (kept as a probe - the endpoint may come back), the
+         * website's public MP4 last (360p, plain, immune to App API breakage).
          */
         internal fun default(transport: AppApiTransport, http: okhttp3.OkHttpClient, webUa: String, site: String): List<StreamSource> =
             listOf(
+                MultiVideoModelStreamSource(transport, http),
                 AppApiStreamSource(transport),
                 PublicMp4StreamSource(http, webUa, site),
             )
