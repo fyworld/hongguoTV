@@ -10,6 +10,7 @@ import java.util.concurrent.TimeUnit
  */
 class DanmakuLiveProbeTest {
     @org.junit.Test
+    @org.junit.Ignore("live probe - run explicitly when needed (shares device id, trips rate limits in the full suite)")
     fun probe() {
         val http = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
         val transport = AppApiTransport(http)
