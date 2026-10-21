@@ -94,6 +94,10 @@ class MainActivity: Activity() {
     private var settingsScroll: ScrollView?=null
     private var catalogBody: LinearLayout?=null
     private var homePosition: HomeScreen.Position?=null
+    /** goBack's home reset clears homePosition on purpose; releaseCatalogViews must not
+     *  re-capture the live HomeScreen's position over it (the reset would be undone and
+     *  the page would stay scrolled to the comic/AI shelf instead of the initial top). */
+    private var discardHomePosition=false
     private var catalogPageKey=""
     private val scrollPositions=mutableMapOf<String,Int>()
     private val catalogCards=linkedMapOf<String,View>()
@@ -337,7 +341,8 @@ class MainActivity: Activity() {
         generation++; cancelWork(); artwork.cancelPage(); loadingMore=false
     }
     private fun releaseCatalogViews() {
-        homeScreen?.let { homePosition=it.capturePosition() }
+        if(discardHomePosition) discardHomePosition=false
+        else homeScreen?.let { homePosition=it.capturePosition() }
         catalogScroll?.let { scrollPositions[catalogPageKey]=it.scrollY }
         catalogBody=null; gridList=null; gridScroll=null; gridCards.clear(); gridFlatIndex.clear(); gridLoadingRow=null
         homeScreen=null; selectionPreview=null; catalogScroll=null; settingsScroll=null
@@ -436,7 +441,7 @@ class MainActivity: Activity() {
     }
     private fun switchTab(next: Int) {
         if(next==tab) return
-        leaveCollection(); homeResetDone=false
+        leaveCollection(); homeResetDone=false; discardHomePosition=false
         tabState[tab]=CatalogState(page,catalog,hasMore,ranking); tabFocus[tab]=catalogFocus
         // Theme selection is per-tab: remember the leaving tab's theme, restore the entering one.
         if(tab==1 || tab==2 || tab==3) tabTheme[tab]=themeSlug
@@ -2283,7 +2288,7 @@ class MainActivity: Activity() {
     /** Back-to-home always lands on the initial home state (page 1, no saved focus/scroll). */
     private fun resetHomeState() {
         tabState.remove(0); tabFocus.remove(0)
-        homePosition=null; scrollPositions.clear()
+        homePosition=null; discardHomePosition=true; scrollPositions.clear()
     }
     private fun goBack() {
         if(!library.isLoaded) { finish(); return }
@@ -2298,7 +2303,7 @@ class MainActivity: Activity() {
             else -> if(collection!=null) { leaveCollection(); showCatalog() }
             else if(tab==0 && page>1) {
                 // Backing out of the home paged grid returns to page 1 (home shelves).
-                page=1; catalogFocus=""; homePosition=null; showCatalog(focusNav=true)
+                page=1; catalogFocus=""; homePosition=null; discardHomePosition=true; showCatalog(focusNav=true)
             }
             else if(nav.any { it.hasFocus() }) {
                 // Focus on the top nav of a non-home tab: back goes home (initial state).
@@ -2351,7 +2356,7 @@ class MainActivity: Activity() {
                 // The reset already ran (focus was moved back to the cards afterwards):
                 // re-run the reset instead of exiting — exit only happens from the nav tab.
                 if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() }
-                else { homeResetDone=true; catalogFocus=""; homePosition=null; scrollPositions.clear(); showCatalog(focusNav=true) }
+                else { homeResetDone=true; catalogFocus=""; homePosition=null; discardHomePosition=true; scrollPositions.clear(); showCatalog(focusNav=true) }
             }
             else if(tab!=0) { resetHomeState(); switchTab(0); nav[0].requestFocus() }
             else {
@@ -2361,7 +2366,7 @@ class MainActivity: Activity() {
                 // first card after the reset made the next back press (homeResetDone)
                 // exit the app, which felt like a random exit.
                 homeResetDone=true
-                catalogFocus=""; homePosition=null; scrollPositions.clear(); showCatalog(focusNav=true)
+                catalogFocus=""; homePosition=null; discardHomePosition=true; scrollPositions.clear(); showCatalog(focusNav=true)
             }
         }
     }
