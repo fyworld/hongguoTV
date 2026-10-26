@@ -707,7 +707,7 @@ class MainActivity: Activity() {
                         1 -> if(requestThemeObj==null) catalogCache["short"]=System.currentTimeMillis() to CatalogState(requestPage,shortResult.items,shortResult.hasMore,shortResult.ranking)
                         2 -> if(requestThemeObj==null) catalogCache["comic"]=System.currentTimeMillis() to CatalogState(requestPage,comicResult.items,comicResult.hasMore,comicResult.ranking)
                         3 -> if(requestThemeObj==null) catalogCache["ai"]=System.currentTimeMillis() to CatalogState(requestPage,aiResult.items,aiResult.hasMore,aiResult.ranking)
-                        5 -> catalogCache["rank:${requestBoard.storedValue}"]=System.currentTimeMillis() to CatalogState(requestPage,comicResult.items,comicResult.hasMore,comicResult.ranking)
+                        5 -> catalogCache["rank:${requestBoard.storedValue}"]=System.currentTimeMillis() to CatalogState(requestPage,aiResult.items,aiResult.hasMore,aiResult.ranking)
                     }
                     if(requestTab==0) homeFetchedAt=System.currentTimeMillis()
                     when(requestTab) {
@@ -725,7 +725,7 @@ class MainActivity: Activity() {
                         homeScreen?.refresh?.setOnClickListener { showCatalog() }
                     } else showCatalog()
                 } else {
-                    val result=if(requestTab==1) shortResult else if(requestTab==2) comicResult else if(requestTab==3) aiResult else if(requestTab==5) comicResult else shortResult
+                    val result=if(requestTab==1) shortResult else if(requestTab==2) comicResult else if(requestTab==3) aiResult else if(requestTab==5) aiResult else shortResult
                     catalog=result.items; hasMore=result.hasMore; ranking=result.ranking
                     val keepNav=nav.any { it.hasFocus() }; val keepType=rankButtons.values.any { it.hasFocus() } || rankFocusBoard!=null
                     // Theme switch: focus is sitting on a theme button (the bar lives above

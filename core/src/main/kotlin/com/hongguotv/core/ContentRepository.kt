@@ -245,20 +245,12 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      * search mixes real and AI dramas and carries no reliable per-type marker (the
      * category_list id system differs per page, genre is always 205), so the results
      * are shown unfiltered — same approach as the phone-version's keyword themes.
-     * The SSR page ignores ?page= and always renders the same first 10 rows, so there
-     * is no real pagination: hasMore is false (a second page would only re-serve
-     * duplicates and spin the infinite scroll).
      */
     private fun searchTheme(keyword: String, page: Int, type: ContentType): CatalogPage {
-        val encoded = appApi.urlEscape(keyword)
-        val data = extractRouter(webText("$site/search/$encoded?page=$page"))
-        val loader = data.optJSONObject("loaderData") ?: throw IOException("${keyword}数据暂不可用")
-        val section = (loader.keys().asSequence().mapNotNull { loader.optJSONObject(it) }
-            .firstOrNull { it.length() > 0 && it.optJSONArray("searchList") != null })
-            ?: throw IOException("${keyword}数据暂不可用")
-        val rows = section.optJSONArray("searchList") ?: throw IOException("${keyword}数据结构已变化")
+        val data = searchResult(keyword, page)
+        val rows = data.optJSONArray("searchList") ?: throw IOException("${keyword}数据结构已变化")
         val items = valid(rows.objects().mapNotNull { it.optJSONObject("video_data")?.let(::card) })
-        return CatalogPage(items, false)
+        return CatalogPage(items, data.optBoolean("hasMore", false) && items.isNotEmpty() && page < 100)
     }
 
     /** The four website boards: 总热播榜 / 真人剧榜 / 漫剧榜 / AI剧榜.
@@ -291,20 +283,30 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return CatalogPage(items,false,ComicRanking(positions,totalPages,first.ranking!!.updatedText))
     }
 
-    // ---------- search (website) ----------
+    // ---------- search (website XHR) ----------
+
+    /**
+     * The website search page went client-rendered (2026-10): /search/{keyword} now
+     * returns a JS-only shell with no _ROUTER_DATA, and the data moved to the XHR
+     * endpoint /api/search/result?query=...&page=... (discovered via the page's
+     * _SdkGlueInit bdms config). The row shape is the same searchList the SSR page
+     * used to embed, so card() parses rows unchanged. The endpoint serves real
+     * pagination (10 rows/page, hasMore + totalPages fields).
+     */
+    private fun searchResult(keyword: String, page: Int): JSONObject {
+        val encoded = appApi.urlEscape(keyword)
+        val body = text("$site/api/search/result?query=$encoded&page=$page", mapOf(
+            "User-Agent" to webUa, "Referer" to "$site/", "Accept" to "application/json", "Accept-Language" to "zh-CN,zh;q=0.9"))
+        return JSONObject(body)
+    }
 
     fun search(keyword: String, page: Int = 1, type: ContentType = ContentType.SHORT): CatalogPage {
         require(keyword.isNotBlank() && keyword.length<=80 && page in 1..100)
         // The website search does not constrain content type; use it for both.
-        val encoded = appApi.urlEscape(keyword)
-        val data = extractRouter(webText("$site/search/$encoded?page=$page"))
-        val loader = data.optJSONObject("loaderData") ?: throw IOException("搜索数据暂不可用")
-        val section = (loader.keys().asSequence().mapNotNull { loader.optJSONObject(it) }
-            .firstOrNull { it.length() > 0 && it.optJSONArray("searchList") != null })
-            ?: throw IOException("搜索数据暂不可用")
-        val rows = section.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
+        val data = searchResult(keyword, page)
+        val rows = data.optJSONArray("searchList") ?: throw IOException("搜索数据结构已变化")
         val items = valid(rows.objects().map(::card))
-        return CatalogPage(items, items.isNotEmpty() && page < 100)
+        return CatalogPage(items, items.isNotEmpty() && data.optBoolean("hasMore", false) && page < 100)
     }
 
     // ---------- search suggestions (pinyin-initials capable, from provider_hongguo_suggestions.go) ----------

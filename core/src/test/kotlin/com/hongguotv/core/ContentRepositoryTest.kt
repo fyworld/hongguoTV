@@ -157,9 +157,13 @@ class ContentRepositoryTest {
     }
 
     @Test fun searchParsesWebsitePage() {
+        // The website search page went client-rendered (2026-10): search() now reads
+        // the XHR endpoint /api/search/result?query=...&page=...
         val repo=repository { request ->
-            assertEquals("/search/keyword",request.url.encodedPath)
-            """<script>_ROUTER_DATA={"loaderData":{"search_(keyword)/page":{"searchList":[{"series_id":"456","series_name":"测试结果","episode_cnt":8}],"totalCount":10}}}};</script>"""
+            assertEquals("/api/search/result",request.url.encodedPath)
+            assertEquals("keyword",request.url.queryParameter("query"))
+            assertEquals("1",request.url.queryParameter("page"))
+            """{"searchList":[{"series_id":"456","series_name":"测试结果","episode_cnt":8}],"totalCount":10,"hasMore":true}"""
         }
         val result=repo.search("keyword",1,ContentType.SHORT)
         assertEquals(listOf("456"),result.items.map { it.id })
@@ -183,19 +187,19 @@ class ContentRepositoryTest {
 
     @Test fun searchBackedThemeServesSearchResults() {
         // A theme with an explicit searchKeyword (defensive routing path) serves the
-        // website search unfiltered. The SSR search ignores ?page= (always the same
-        // 10 rows): no pagination.
+        // website search unfiltered. The XHR endpoint paginates for real (10 rows/page
+        // with hasMore), so hasMore follows the endpoint's answer.
         val repo=repository { request ->
-            assertEquals("/search/%E7%A9%BF%E8%B6%8A",request.url.encodedPath)
-            """<script>_ROUTER_DATA={"loaderData":{"search_(%E7%A9%BF%E8%B6%8A)/page":{"searchList":[
+            assertEquals("/api/search/result",request.url.encodedPath)
+            assertEquals("穿越",request.url.queryParameter("query"))
+            """{"searchList":[
                 {"video_data":{"series_id":"111","series_title":"真人穿越","category_list":[{"category_id":"5000","name":"爱情"},{"category_id":"37","name":"穿越"}]}},
                 {"video_data":{"series_id":"222","series_title":"AI穿越","category_list":[{"category_id":"316","name":"剧情"},{"category_id":"37","name":"穿越"}]}}
-            ],"totalCount":2}}}};</script>"""
+            ],"totalCount":2,"hasMore":false}"""
         }
         val ai=repo.themeCatalog(ContentType.AI,Theme("chuanyue","穿越","穿越"),1)
         assertEquals(listOf("111","222"),ai.items.map { it.id })
         assertEquals("真人穿越",ai.items.first().title)
-        // The SSR search ignores ?page= (always the same 10 rows): no pagination.
         assertFalse(ai.hasMore)
     }
 
@@ -275,10 +279,10 @@ class ContentRepositoryTest {
         // must still route away from /category/{type}/chuanyue (a 404) — feed-backed
         // on the real tab (theme id 37), search-backed on the AI tab.
         val repo=repository { request ->
-            if(request.url.encodedPath.startsWith("/search/"))
-                """<script>_ROUTER_DATA={"loaderData":{"search_(x)/page":{"searchList":[
+            if(request.url.encodedPath=="/api/search/result")
+                """{"searchList":[
                     {"video_data":{"series_id":"111","series_title":"穿越剧","category_list":[{"category_id":"37","name":"穿越"}]}}
-                ],"totalCount":1}}}};</script>"""
+                ],"totalCount":1,"hasMore":false}"""
             else JSONObject().put("code",0).put("data",JSONObject()
                 .put("video_data",JSONArray().put(JSONObject()
                     .put("series_id","111").put("title","穿越剧")))
@@ -534,7 +538,7 @@ class ContentRepositoryTest {
         val nameEntry=suggestionEntry("联想结果","short_play_name","222")
         val repo=repository { request ->
             if(request.url.encodedPath=="/incent_resource/suggestion") suggestionBody(nameEntry)
-            else """<script>_ROUTER_DATA={"loaderData":{"search_(keyword)/page":{"searchList":[{"video_data":${pageRow}}],"totalCount":1}}};</script>"""
+            else """{"searchList":[{"video_data":${pageRow}}],"totalCount":1,"hasMore":true}"""
         }
         val result=repo.searchEnhanced("keyword")
         assertEquals(listOf("111","222"),result.items.map { it.id })
@@ -558,7 +562,7 @@ class ContentRepositoryTest {
             .put(JSONObject().put("video_data",JSONObject().put("series_id","3").put("series_title","无关剧集")))
         val repo=repository { request ->
             if(request.url.encodedPath=="/incent_resource/suggestion") suggestionBody()
-            else """<script>_ROUTER_DATA={"loaderData":{"search_(keyword)/page":{"searchList":$pageRows,"totalCount":3}}};</script>"""
+            else """{"searchList":$pageRows,"totalCount":3,"hasMore":false}"""
         }
         val result=repo.searchEnhanced("闪婚甜果")
         assertEquals("闪婚甜果",result.items.first().title)
