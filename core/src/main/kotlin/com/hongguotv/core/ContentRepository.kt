@@ -39,6 +39,23 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     // ---------- shared HTTP helpers ----------
 
     private fun text(url: String, headers: Map<String,String> = emptyMap()): String {
+        // The site's CDN edges intermittently 404/5xx a page that serves fine seconds
+        // later (verified 2026-10: all four rank boards 404 on one probe, 200 on the
+        // next). Retry transient failures once or twice so the blip never surfaces.
+        var lastError: IOException? = null
+        for (attempt in 1..3) {
+            try { return textOnce(url, headers) }
+            catch (e: IOException) {
+                lastError = e
+                val transient = e.message?.contains("HTTP 4") == true || e.message?.contains("HTTP 5") == true
+                if (!transient || attempt == 3) throw e
+                Thread.sleep(300L * attempt)
+            }
+        }
+        throw lastError ?: IOException("内容请求失败")
+    }
+
+    private fun textOnce(url: String, headers: Map<String,String>): String {
         val builder = Request.Builder().url(url)
         for ((k,v) in headers) builder.header(k,v)
         return RequestScope.execute(http.newCall(builder.build())) { response ->
@@ -261,7 +278,14 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                 .onSuccess { part ->
                     val known=items.map { it.id }.toHashSet()
                     items+=part.items.filterNot { it.id in known }
-                    positions+=part.ranking?.positions.orEmpty()
+                    // Map-plus would overwrite a rank/heat captured on an earlier page
+                    // with a blank one from a later page (the site only stamps rank on
+                    // the first page a series appears on); keep the richer existing entry.
+                    part.ranking?.positions?.forEach { (id,position) ->
+                        val existing=positions[id]
+                        if(existing==null || (existing.rank==null && existing.heat.isBlank()))
+                            positions[id]=position
+                    }
                 }
         }
         return CatalogPage(items,false,ComicRanking(positions,totalPages,first.ranking!!.updatedText))

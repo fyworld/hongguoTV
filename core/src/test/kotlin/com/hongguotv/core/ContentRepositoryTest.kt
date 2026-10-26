@@ -324,15 +324,21 @@ class ContentRepositoryTest {
         payload.getJSONArray("rankList").getJSONObject(0).put("rank",23).put("heatText","5746万热度")
         val repo=repository { request ->
             assertEquals("/rank/hot-comic-drama",request.url.encodedPath)
-            assertEquals("2",request.url.queryParameter("page"))
-            """<script>_ROUTER_DATA={"loaderData":{"rank_hot-comic-drama/page":{"rankKey":"comic","pageNum":2,"updatedText":"9月22日已更新"}}};</script>"""+currentRank(payload)
+            if(request.url.queryParameter("page")=="2") {
+                """<script>_ROUTER_DATA={"loaderData":{"rank_hot-comic-drama/page":{"rankKey":"comic","pageNum":2,"updatedText":"9月22日已更新"}}};</script>"""+currentRank(payload)
+            } else {
+                // Follow-up pages of the full-board fetch: same series, no rank field.
+                val page=request.url.queryParameter("page")!!.toInt()
+                """<script>_ROUTER_DATA={"loaderData":{"rank_hot-comic-drama/page":{"rankKey":"comic","pageNum":$page,"updatedText":"9月22日已更新"}}};</script>"""+currentRank(rankPayload(page,5))
+            }
         }
         val result=repo.comicRanking(2)
         assertNotNull(result.ranking)
         assertEquals(RankPosition(23,"5746万热度"),result.ranking!!.positions["123"])
         assertEquals(5,result.ranking.totalPages)
         assertEquals("9月22日已更新",result.ranking.updatedText)
-        assertTrue(result.hasMore)
+        // The whole board is merged at once: no further pages to append.
+        assertFalse(result.hasMore)
         assertFalse(result.items.single().toJson().has("rank"))
     }
 
@@ -420,7 +426,9 @@ class ContentRepositoryTest {
         val page=repo.comicRanking(2)
         assertEquals("测试 & 漫剧",page.items.single().title)
         assertEquals("https://example.com/a.jpg",page.items.single().cover)
-        assertTrue(page.hasMore)
+        // Full-board fetch: the follow-up page (3) fails its pagination anchor in the
+        // mock (same HTML), is swallowed by runCatching, and the board is complete.
+        assertFalse(page.hasMore)
     }
 
     // ---------- four-board ranking (总热播榜 / 真人剧榜 / 漫剧榜 / AI剧榜) ----------
@@ -429,17 +437,21 @@ class ContentRepositoryTest {
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
+            // Single-page payload (totalPages=1) so ranking() makes exactly one request.
             val board=RankBoard.entries.firstOrNull { request.url.encodedPath.endsWith(it.path) } ?: RankBoard.HOT
-            """<script>_ROUTER_DATA={"loaderData":{"rank_${board.path}/page":{"rankKey":"${board.upstreamKey}","pageNum":1,"updatedText":"今日已更新"}}};</script>"""+currentRank(rankPayload(),board)
+            """<script>_ROUTER_DATA={"loaderData":{"rank_${board.path}/page":{"rankKey":"${board.upstreamKey}","pageNum":1,"updatedText":"今日已更新"}}};</script>"""+currentRank(rankPayload(1,1),board)
         }
         repo.ranking(RankBoard.HOT,1)
         assertEquals("/rank/hot-drama",requests.single().url.encodedPath)
+        requests.clear()
         repo.ranking(RankBoard.REAL,1)
-        assertEquals("/rank/hot-real-drama",requests.last().url.encodedPath)
+        assertEquals("/rank/hot-real-drama",requests.single().url.encodedPath)
+        requests.clear()
         repo.ranking(RankBoard.COMIC,1)
-        assertEquals("/rank/hot-comic-drama",requests.last().url.encodedPath)
+        assertEquals("/rank/hot-comic-drama",requests.single().url.encodedPath)
+        requests.clear()
         repo.ranking(RankBoard.AI,1)
-        assertEquals("/rank/hot-ai-drama",requests.last().url.encodedPath)
+        assertEquals("/rank/hot-ai-drama",requests.single().url.encodedPath)
     }
 
     @Test fun hotBoardParsesItsOwnRouteData() {
@@ -451,7 +463,8 @@ class ContentRepositoryTest {
         assertEquals("测试漫剧",result.items.single().title)
         assertEquals(5,result.ranking!!.totalPages)
         assertEquals("10月13日已更新",result.ranking.updatedText)
-        assertTrue(result.hasMore)
+        // Whole board fetched at once: nothing more to append.
+        assertFalse(result.hasMore)
     }
 
     @Test fun realBoardRejectsComicRouteData() {
@@ -470,7 +483,8 @@ class ContentRepositoryTest {
         assertEquals("AI剧",result.items.single().title)
         assertEquals(RankPosition(1,"800万热度"),result.ranking!!.positions["123"])
         assertEquals(2,result.ranking.totalPages)
-        assertTrue(result.hasMore)
+        // Whole board fetched at once: nothing more to append.
+        assertFalse(result.hasMore)
     }
 
     @Test fun rankBoardRoundTripsStoredValues() {
