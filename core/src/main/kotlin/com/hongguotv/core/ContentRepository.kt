@@ -35,6 +35,9 @@ class SearchSessionExpiredException: IOException("搜索结果已过期，请从
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
     private val site = "https://hongguoduanju.com"
     private val webUa = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1"
+    /** Server-registered device identity: the 2026-10-27 crackdown rejects unregistered
+     *  device_ids on the App API (playback + landpage feed) with HTTP 200 + empty body. */
+    private val playbackSession = PlaybackDeviceSession.shared
 
     // ---------- shared HTTP helpers ----------
 
@@ -81,7 +84,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     private val streams = StreamScheduler(StreamSource.default(appApi, http, webUa, site))
 
     private fun appRequest(path: String, payload: String?): JSONObject =
-        appApi.request(path, payload, signed = true)
+        appApi.request(path, payload, signed = true, identity = playbackSession.profile(http))
 
     // ---------- danmaku (comment API, full signature chain) ----------
 

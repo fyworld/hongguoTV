@@ -57,6 +57,21 @@ internal class AppApiTransport(
             "${urlEscape(k)}=${urlEscape(v)}"
         }
     }
+
+    /** Current wall clock (ms) - the playback channel refreshes _rticket between retries. */
+    fun clockMs(): Long = clock()
+
+    /** Split a query string back into a map (for _rticket refresh on retry). */
+    fun parseQuery(url: String): Map<String,String> {
+        val query = url.substringAfter("?", "")
+        if (query.isEmpty()) return emptyMap()
+        return query.split("&").mapNotNull { pair ->
+            val key = pair.substringBefore('=')
+            val value = pair.substringAfter('=', "")
+            if (key.isEmpty()) null
+            else key to value
+        }.toMap()
+    }
     fun urlEscape(s: String): String {
         val out = StringBuilder()
         for (c in s) when {
@@ -88,8 +103,14 @@ internal class AppApiTransport(
      * X-Khronos/X-Gorgon pair was retired server-side along with the playback
      * endpoint migration (2026-10): catalog feeds now return HTTP 200 + empty
      * body for it. [signed]=false sends only the plain client headers.
+     *
+     * [identity] carries a server-registered device (PlaybackDeviceSession): the
+     * 2026-10-27 empty-body crackdown rejects unregistered device_ids on the
+     * landpage feed too, so feed calls pass the registered values + cookies here.
+     * Upstream pins the 73532 player versions on this endpoint either way.
      */
-    fun request(path: String, payload: String?, signed: Boolean = true): JSONObject {
+    fun request(path: String, payload: String?, signed: Boolean = true,
+                identity: PlaybackDeviceSession.Profile? = null): JSONObject {
         val body = payload?.toByteArray(Charsets.UTF_8)
         if (!signed) {
             val query = encodeQuery(queryProfile())
@@ -97,8 +118,14 @@ internal class AppApiTransport(
                 "User-Agent" to userAgent, "Accept" to "application/json", "X-XS-From-Web" to "0", "Sdk-Version" to "2")
             return requestUrl("$APP_BASE$path?$query", body, headers)
         }
-        val signed = signer.signPlayback("$APP_BASE$path", queryProfile(), body, userAgent)
-        return requestUrl(signed.url, body, signed.headers)
+        val values = if (identity != null) identity.values.toMutableMap().apply {
+            for (k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) this[k] = "73532"
+            this["version_name"] = "7.3.5.32"
+        } else queryProfile()
+        val signedReq = signer.signPlayback("$APP_BASE$path", values, body, userAgent)
+        val headers = signedReq.headers.toMutableMap()
+        if (identity != null && identity.cookie.isNotBlank()) headers["Cookie"] = identity.cookie
+        return requestUrl(signedReq.url, body, headers)
     }
 
     /**

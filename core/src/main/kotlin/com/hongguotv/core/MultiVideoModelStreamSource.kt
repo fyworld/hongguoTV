@@ -1,24 +1,31 @@
+// Adapted 2026-10-27 from tsukiyo-zero/hongguoTV kotlin-tv (GPL-3.0-only).
 // Kotlin port of upstream HongguoTV-Phone-TV-NoAds 6e43927 (multi_video_model/v1);
 // GPL-3.0-only. See kotlin-tv/NOTICE.md.
 package com.hongguotv.core
 
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaType
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.Locale
 
 /**
- * Primary channel (upstream 0.1.24 / 6e43927): the playback model endpoint moved to
- * /novel/player/multi_video_model/v1/ - the old /novel/player/video_model/v1/ now
- * returns HTTP 200 with an empty body for every request shape.
+ * Primary channel: the playback model endpoint /novel/player/multi_video_model/v1/.
  *
- * Differences carried over from the upstream fix:
+ * 2026-10-27: the server started rejecting unregistered devices - every signed request
+ * from a random device_id now returns HTTP 200 + an EMPTY body (the same treatment the
+ * old lightweight signature got). The fix follows upstream tsukiyo-zero/hongguoTV
+ * kotlin-tv: register the device once via /service/2/device_register/ (anonymous,
+ * ttEncrypt(gzip(json)) body, NO signature headers), then call the playback endpoint
+ * with the server-issued device_id/install_id in the query and the registration
+ * cookies attached. No x-gorgon chain on the playback call itself.
+ *
+ * Response shapes kept from the earlier migration:
  *  - request body: biz_param + mixed_video_id_map (slot key fixed "1004",
  *    video_platform fixed 1024; other values return code 100001)
- *  - the endpoint REQUIRES the full six-header signature chain
- *    (x-gorgon/x-khronos/x-ladon/x-argus/x-helios/x-medusa); any missing header
- *    yields HTTP 200 + empty body (no error code)
  *  - the response shape is not fixed: data[vid].video_model, data.video_model, or a
  *    single-key entry; video_model may carry video_list directly or only a
  *    fallback_api (plain GET -> video_info.data, addresses protected by key_seed)
@@ -26,10 +33,13 @@ import java.util.Locale
 internal class MultiVideoModelStreamSource(
     private val transport: AppApiTransport,
     private val http: OkHttpClient,
+    private val session: PlaybackDeviceSession = PlaybackDeviceSession.shared,
 ) : StreamSource {
     override val name = "multi-video-model"
 
-    private val signer = Signer()
+    /** Upstream pins this UA on the playback call (Android 9 SM-N9860 profile). */
+    private val playbackUa =
+        "com.phoenix.read/71532 (Linux; U; Android 9; SM-N9860; Build/PQ3A.190705.10241111;tt-ok/3.12.13.20)"
 
     /** Fallback_api hosts are pinned to the vendor's own domains (upstream keeps the same guard). */
     private val fallbackDomains = listOf("fqnovel.com", "snssdk.com")
@@ -45,16 +55,13 @@ internal class MultiVideoModelStreamSource(
                 .put("use_os_player", false)
                 .put("use_server_dns", false)
                 .put("video_platform", 1024))
-            .put("mixed_video_id_map", JSONObject().put("1004", org.json.JSONArray().put(id)))
+            .put("mixed_video_id_map", JSONObject().put("1004", JSONArray().put(id)))
         val body = payload.toString().toByteArray(Charsets.UTF_8)
-        // The six-header chain signs the FINAL url bytes; build the query first, bump
-        // _rticket until the hash branch leaves the server-rejected value 1.
-        val base = "${AppApiTransport.APP_BASE}$PATH"
-        // UA must match the query profile's version_code (73532) or risk control
-        // answers 110001.
-        val values = transport.queryProfile()
-        val signed = signer.signPlayback(base, values, body, transport.userAgent)
-        val data = transport.requestUrl(signed.url, body, signed.headers)
+        // Registered identity: server-issued device_id/install_id + registration cookies.
+        val identity = session.profile(http)
+        val query = transport.encodeQuery(identity.values + mapOf("_rticket" to transport.clockMs().toString()))
+        val url = "${AppApiTransport.APP_BASE}$PATH?$query"
+        val data = requestPlayback(url, body, identity.cookie)
         val map = data.optJSONObject("data") ?: throw IOException("播放信息为空")
         val model = resolveModel(map, id)
         if (hasVideoList(model)) return select(model, maxQuality, null)
@@ -72,6 +79,47 @@ internal class MultiVideoModelStreamSource(
         model.keys().forEach { k -> merged.put(k, model.get(k)) }
         inner.keys().forEach { k -> merged.put(k, inner.get(k)) }
         return select(merged, maxQuality, seed)
+    }
+
+    /**
+     * The playback call: registered query + cookies, no signature chain. Empty bodies
+     * are the server's "device not recognized" answer - retry a bounded number of
+     * times with a fresh _rticket before surfacing the error (upstream does the same).
+     */
+    private fun requestPlayback(url: String, body: ByteArray, cookie: String): JSONObject {
+        var lastError: IOException? = null
+        for (attempt in 0..2) {
+            val freshUrl = if (attempt == 0) url
+                else url.substringBefore("?") + "?" + transport.encodeQuery(
+                    transport.parseQuery(url) + mapOf("_rticket" to transport.clockMs().toString()))
+            try {
+                val request = Request.Builder().url(freshUrl)
+                    .header("User-Agent", playbackUa)
+                    .header("Accept", "application/json; charset=utf-8,application/x-protobuf")
+                    .header("Content-Type", "application/json; charset=utf-8")
+                    .apply { if (cookie.isNotBlank()) header("Cookie", cookie) }
+                    .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                return RequestScope.execute(http.newCall(request)) { response ->
+                    if (!response.isSuccessful) throw IOException("播放接口请求失败（HTTP ${response.code}）")
+                    val text = response.body?.string() ?: throw IOException("播放接口响应为空")
+                    if (text.isBlank()) throw EmptyPlaybackResponseException()
+                    val data = JSONObject(text)
+                    val code = data.optInt("code", data.optInt("Code", 0))
+                    if (code != 0) throw IOException("播放接口暂不可用（$code）")
+                    data
+                }
+            } catch (e: EmptyPlaybackResponseException) {
+                lastError = e
+                if (attempt < 2) Thread.sleep(700L * (attempt + 1))
+            } catch (e: IOException) {
+                // Transient network blips get one retry; everything else surfaces now.
+                val transient = e is java.net.SocketTimeoutException || e is java.net.SocketException
+                if (!transient || attempt > 0) throw e
+                lastError = e
+            }
+        }
+        throw lastError ?: IOException("播放接口返回空数据")
     }
 
     /** Three response shapes: data[vid].video_model, data.video_model, single-key entry. */
@@ -105,7 +153,7 @@ internal class MultiVideoModelStreamSource(
         val host = rawUrl.substringAfter("https://", "").substringBefore('/').lowercase(Locale.ROOT)
         if (!fallbackDomains.any { host == it || host.endsWith(".$it") }) throw IOException("红果片源地址不在允许的域名内")
         val request = Request.Builder().url(rawUrl)
-            .header("User-Agent", transport.userAgent)
+            .header("User-Agent", playbackUa)
             .header("Accept", "application/json")
             .build()
         return RequestScope.execute(http.newCall(request)) { response ->
@@ -162,3 +210,5 @@ internal class MultiVideoModelStreamSource(
         const val PATH = "/novel/player/multi_video_model/v1/"
     }
 }
+
+internal class EmptyPlaybackResponseException : IOException("播放接口暂时返回空响应，请稍后重试")

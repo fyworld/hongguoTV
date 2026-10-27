@@ -304,8 +304,14 @@ class ContentRepositoryTest {
 
     private fun repository(clock: () -> Long = System::currentTimeMillis, respond: (Request) -> String) = ContentRepository(
         OkHttpClient.Builder().addInterceptor { chain ->
+            // The App API now registers the device first (2026-10-27 crackdown on
+            // unregistered device_ids): answer the registration endpoint with a
+            // server-issued identity so feed/playback calls can proceed.
+            val body = if (chain.request().url.encodedPath == "/service/2/device_register/")
+                JSONObject().put("device_id","1905892595378490").put("install_id","1905892595382586").toString()
+            else respond(chain.request())
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
-                .code(200).message("OK").body(respond(chain.request()).toResponseBody()).build()
+                .code(200).message("OK").body(body.toResponseBody()).build()
         }.build(),clock
     )
 
