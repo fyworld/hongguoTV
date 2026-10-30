@@ -113,4 +113,20 @@ class AppUpdatesTest {
             assertTrue(url.endsWith("/fyworld/hongguoTV/releases/download/${update.tag}/${update.fileName}"))
         }
     }
+    @Test fun githubDirectFailsFastWhileMirrorsStayGenerous() {
+        // Mainland networks hang GitHub connections instead of refusing them, so the
+        // direct channel must give up quickly (8s check) and hand over to a mirror;
+        // the direct APK budget is floor + size at a minimal speed, never the full
+        // 5-minute client default.
+        assertEquals(UpdateMirrors.prefixes[0], UpdateMirrors.DIRECT_PREFIX)
+        assertTrue(UpdateMirrors.DIRECT_CHECK_TIMEOUT_MS in 1..10_000)
+        assertEquals(60_000L, UpdateMirrors.directDownloadTimeoutMs(0))
+        // 10 MB APK (the real-world size) -> 60s floor + ~102s at 100 KiB/s.
+        val tenMb = UpdateMirrors.directDownloadTimeoutMs(10L * 1024 * 1024)
+        assertTrue(tenMb in 120_000..300_000)
+        // Budget grows with size and stays bounded by floor + size/min-speed.
+        assertTrue(UpdateMirrors.directDownloadTimeoutMs(1024) > UpdateMirrors.directDownloadTimeoutMs(0))
+        assertEquals(60_000L + 1000L * 80L * 1024 * 1024 / (100L * 1024),
+            UpdateMirrors.directDownloadTimeoutMs(80L * 1024 * 1024))
+    }
 }

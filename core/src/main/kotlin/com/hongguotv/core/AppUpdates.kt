@@ -59,6 +59,13 @@ data class AppUpdate(val versionCode: Long, val versionName: String, val minSdk:
  *
  * Some mirrors reject plain non-browser user agents (verified: ghfast.top 403s a bare
  * "HongguoTV-Updater" UA), so every update request carries a browser UA.
+ *
+ * Timeout policy: GitHub direct is "best effort, fail fast". Mainland networks rarely
+ * refuse the connection outright - they let it hang until a timeout fires, which made
+ * every update check wait the full 25s call budget before reaching a mirror. The direct
+ * channel therefore gets a short leash (tiny JSON: 8s; APK: floor + size at a minimal
+ * acceptable speed) and hands over quickly, while the verified mirrors keep the
+ * generous client timeouts.
  */
 object UpdateMirrors {
     val prefixes: List<String> = listOf(
@@ -73,6 +80,17 @@ object UpdateMirrors {
      *  + path both resolve to a single hostname (the old removePrefix("https://") built
      *  doubled-host URLs like github.com/github.com/... which 404 on every channel). */
     fun downloadUrl(update: AppUpdate, prefix: String): String = prefix + update.downloadUrl.removePrefix("https://github.com")
+
+    const val DIRECT_PREFIX = "https://github.com"
+    /** update.json is a few hundred bytes: a reachable GitHub answers well within 8s. */
+    const val DIRECT_CHECK_TIMEOUT_MS = 8_000L
+    /** APK cap = floor + size at a minimal acceptable direct speed (10 MB -> ~163s),
+     *  so a throttled-to-death direct download hands over to a mirror instead of
+     *  crawling through the whole 5-minute client budget. */
+    const val DIRECT_DOWNLOAD_FLOOR_MS = 60_000L
+    const val DIRECT_DOWNLOAD_MIN_BYTES_PER_SEC = 100L * 1024
+    fun directDownloadTimeoutMs(size: Long): Long =
+        DIRECT_DOWNLOAD_FLOOR_MS + 1000L * size / DIRECT_DOWNLOAD_MIN_BYTES_PER_SEC
 }
 
 /** Streaming validation also protects a cached APK from partial downloads and stale metadata. */
@@ -131,7 +149,12 @@ class AppUpdateRepository : java.io.Closeable {
         for (prefix in UpdateMirrors.prefixes) {
             try {
                 val call = http.newCall(request("$prefix/${AppUpdate.REPOSITORY}/releases/latest/download/update.json"))
-                call.timeout().timeout(25, TimeUnit.SECONDS)
+                // GitHub direct: fail fast (mainland networks hang instead of refusing,
+                // so a long timeout just delays the handover to a mirror). Mirrors keep
+                // the generous 25s budget.
+                call.timeout().timeout(
+                    if (prefix == UpdateMirrors.DIRECT_PREFIX) UpdateMirrors.DIRECT_CHECK_TIMEOUT_MS
+                    else 25L, TimeUnit.SECONDS)
                 return call.execute().use { response ->
                     if (!response.isSuccessful) throw IOException(if (response.code == 404) "尚无可用的自动更新版本" else "无法检查更新，请稍后重试")
                     val bytes = response.body?.byteStream()?.use { input ->
@@ -153,7 +176,13 @@ class AppUpdateRepository : java.io.Closeable {
         var lastError: IOException? = null
         for (prefix in UpdateMirrors.prefixes) {
             try {
-                http.newCall(request(UpdateMirrors.downloadUrl(update, prefix))).execute().use { response ->
+                val call = http.newCall(request(UpdateMirrors.downloadUrl(update, prefix)))
+                // GitHub direct: bounded by floor + size at a minimal acceptable speed, so
+                // a throttled direct link hands over to a mirror instead of crawling
+                // through the 5-minute client budget. Mirrors keep the client default.
+                if (prefix == UpdateMirrors.DIRECT_PREFIX)
+                    call.timeout().timeout(UpdateMirrors.directDownloadTimeoutMs(update.size), TimeUnit.MILLISECONDS)
+                call.execute().use { response ->
                     if (!response.isSuccessful) throw IOException("安装包下载失败，请稍后重试")
                     val body = response.body ?: throw IOException("安装包为空")
                     if (body.contentLength() >= 0 && body.contentLength() != update.size) throw IOException("安装包长度异常")
