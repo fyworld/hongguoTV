@@ -110,21 +110,27 @@ internal class AppApiTransport(
      * Version pin: 73932 (the registration version) - the old 73532 pin started
      * getting empty bodies on the ai_series channel first (2026-10-30, AI 穿越
      * theme empty), then on short_play as well; the server is retiring it.
+     *
+     * [ua] overrides the client UA. The ai_series channel (2026-10-30) answers
+     * the phoenix.read UA with an empty body but serves the dragon.read UA
+     * (Fanqie's reader app, which carries the AI-drama feed) - upstream's
+     * RecommendationFeed pins the same dragon UA on this endpoint.
      */
     fun request(path: String, payload: String?, signed: Boolean = true,
-                identity: PlaybackDeviceSession.Profile? = null): JSONObject {
+                identity: PlaybackDeviceSession.Profile? = null,
+                ua: String = userAgent): JSONObject {
         val body = payload?.toByteArray(Charsets.UTF_8)
         if (!signed) {
             val query = encodeQuery(queryProfile())
             val headers = linkedMapOf(
-                "User-Agent" to userAgent, "Accept" to "application/json", "X-XS-From-Web" to "0", "Sdk-Version" to "2")
+                "User-Agent" to ua, "Accept" to "application/json", "X-XS-From-Web" to "0", "Sdk-Version" to "2")
             return requestUrl("$APP_BASE$path?$query", body, headers)
         }
         val values = if (identity != null) identity.values.toMutableMap().apply {
             for (k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) this[k] = "73932"
             this["version_name"] = "7.3.9.32"
         } else queryProfile()
-        val signedReq = signer.signPlayback("$APP_BASE$path", values, body, userAgent)
+        val signedReq = signer.signPlayback("$APP_BASE$path", values, body, ua)
         val headers = signedReq.headers.toMutableMap()
         if (identity != null && identity.cookie.isNotBlank()) headers["Cookie"] = identity.cookie
         return requestUrl(signedReq.url, body, headers)

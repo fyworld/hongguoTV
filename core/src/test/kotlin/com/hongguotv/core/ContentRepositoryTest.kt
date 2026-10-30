@@ -103,7 +103,7 @@ class ContentRepositoryTest {
             requests+=request
             JSONObject().put("code",0).put("data",JSONObject().put("video_data",JSONArray())).toString()
         }
-        repo.themeCatalog(ContentType.AI,Theme("chuanyue","穿越",feedCategory = "穿越"),1)
+        repo.themeCatalog(ContentType.SHORT,Theme("chuanyue","穿越",feedThemeId = "37"),1)
         val request=requests.single()
         assertEquals("73932",request.url.queryParameter("version_code"))
         assertEquals("73932",request.url.queryParameter("manifest_version_code"))
@@ -111,6 +111,25 @@ class ContentRepositoryTest {
         assertEquals("7.3.9.32",request.url.queryParameter("version_name"))
         assertEquals("73932",request.url.queryParameter("pv_player"))
         assertTrue(request.header("User-Agent")!!.startsWith("com.phoenix.read/73932 "))
+    }
+
+    @Test fun aiFeedRequestUsesTheDragonUa() {
+        // 2026-10-30 (later the same day): the ai_series channel answers the phoenix
+        // UA with an empty body even under the 73932 pin, but serves the dragon.read
+        // UA (Fanqie's reader app - upstream RecommendationFeed pins it there). The
+        // AI tab's 穿越 theme walks this channel, so its request must carry the
+        // dragon UA; the version pin stays 73932 (the registration version).
+        val requests=mutableListOf<Request>()
+        val repo=repository { request ->
+            requests+=request
+            JSONObject().put("code",0).put("data",JSONObject().put("video_data",JSONArray())).toString()
+        }
+        repo.themeCatalog(ContentType.AI,Theme("chuanyue","穿越",feedCategory = "穿越"),1)
+        val request=requests.single()
+        assertEquals("/reading/distribution/category/landpage/v/",request.url.encodedPath)
+        assertEquals("73932",request.url.queryParameter("version_code"))
+        assertEquals("7.3.9.32",request.url.queryParameter("version_name"))
+        assertTrue(request.header("User-Agent")!!.startsWith("com.dragon.read/"))
     }
 
     @Test fun homeParsesLandpageFeedAndPagination() {

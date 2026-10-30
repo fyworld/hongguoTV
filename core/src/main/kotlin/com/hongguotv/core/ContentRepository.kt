@@ -35,6 +35,9 @@ class SearchSessionExpiredException: IOException("搜索结果已过期，请从
 class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectTimeout(15,TimeUnit.SECONDS).readTimeout(30,TimeUnit.SECONDS).callTimeout(45,TimeUnit.SECONDS).build(), private val clock: () -> Long = System::currentTimeMillis) {
     private val site = "https://hongguoduanju.com"
     private val webUa = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1"
+    /** ai_series feed UA: the phoenix.read UA gets an empty body there (2026-10-30);
+     *  the dragon.read UA (Fanqie reader, upstream's RecommendationFeed) serves it. */
+    private val AI_FEED_UA = "com.dragon.read/73532 (Linux; U; Android 16; zh_CN; 25053RT47C)"
     /** Server-registered device identity: the 2026-10-27 crackdown rejects unregistered
      *  device_ids on the App API (playback + landpage feed) with HTTP 200 + empty body. */
     private val playbackSession = PlaybackDeviceSession.shared
@@ -85,6 +88,13 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
 
     private fun appRequest(path: String, payload: String?): JSONObject =
         appApi.request(path, payload, signed = true, identity = playbackSession.profile(http))
+
+    /** The ai_series landpage channel answers the phoenix.read UA with an empty body
+     *  (2026-10-30) but serves the dragon.read UA - Fanqie's reader app, which carries
+     *  the AI-drama feed (upstream RecommendationFeed pins the same UA there). */
+    private fun aiFeedRequest(payload: String): JSONObject =
+        appApi.request("/reading/distribution/category/landpage/v/", payload, signed = true,
+            identity = playbackSession.profile(http), ua = AI_FEED_UA)
 
     // ---------- danmaku (comment API, full signature chain) ----------
 
@@ -171,7 +181,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                     .put("gender", JSONArray()).put("category_dim_theme", JSONArray(themeIds))
                     .put("category_dim_role", JSONArray()).put("category_dim_epoch", JSONArray())
                     .put("online_time", JSONArray()).put("creation_status", JSONArray()))
-            val data = appRequest("/reading/distribution/category/landpage/v/", payload.toString())
+            val data = if (genre == "ai_series") aiFeedRequest(payload.toString())
+                else appRequest("/reading/distribution/category/landpage/v/", payload.toString())
             val rows = data.optJSONObject("data")?.optJSONArray("video_data") ?: throw IOException("首页数据暂不可用")
             all += valid(rows.objects().filter { categoryFilter==null || hasCategory(it,categoryFilter) }.map(::card))
             hasMore = data.optJSONObject("data")?.optBoolean("has_more", false) ?: false
