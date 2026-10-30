@@ -93,6 +93,26 @@ class ContentRepositoryTest {
         assertNotNull(request.url.queryParameter("_rticket"))
     }
 
+    @Test fun feedRequestPinsTheRegistrationVersion73932() {
+        // 2026-10-30: the server started returning empty bodies for the old 73532 pin
+        // (ai_series first - the AI tab's 穿越 theme went blank - then short_play).
+        // The feed must pin 73932, the version the device registers with, and the UA
+        // must follow (the signature chain binds UA to the query version_code).
+        val requests=mutableListOf<Request>()
+        val repo=repository { request ->
+            requests+=request
+            JSONObject().put("code",0).put("data",JSONObject().put("video_data",JSONArray())).toString()
+        }
+        repo.themeCatalog(ContentType.AI,Theme("chuanyue","穿越",feedCategory = "穿越"),1)
+        val request=requests.single()
+        assertEquals("73932",request.url.queryParameter("version_code"))
+        assertEquals("73932",request.url.queryParameter("manifest_version_code"))
+        assertEquals("73932",request.url.queryParameter("update_version_code"))
+        assertEquals("7.3.9.32",request.url.queryParameter("version_name"))
+        assertEquals("73932",request.url.queryParameter("pv_player"))
+        assertTrue(request.header("User-Agent")!!.startsWith("com.phoenix.read/73932 "))
+    }
+
     @Test fun homeParsesLandpageFeedAndPagination() {
         // 2026-10: every "全部" grid reads the website category page — the feed's cover
         // URLs switched to HEIC (API-28+ only, blank on Android 7/8 TVs), while the
