@@ -92,7 +92,9 @@ class AppUpdatesTest {
         file.writeBytes(ByteArray(bytes.size)); assertFalse(UpdateFiles.verify(file, update()))
     }
     @Test fun mirrorPrefixesAreFixedHttpsChannels() {
-        assertEquals(3, UpdateMirrors.prefixes.size)
+        // GitHub direct + four mainland mirrors (verified live 2026-10-30: all serve
+        // update.json and full APK bytes with Range support under a browser UA).
+        assertEquals(5, UpdateMirrors.prefixes.size)
         assertEquals("https://github.com", UpdateMirrors.prefixes[0])
         for (prefix in UpdateMirrors.prefixes) {
             assertTrue(prefix.startsWith("https://"))

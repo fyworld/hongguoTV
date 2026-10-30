@@ -52,13 +52,19 @@ data class AppUpdate(val versionCode: Long, val versionName: String, val minSdk:
 
 /**
  * Update channel resolution for mainland-China networks where GitHub is often unreachable.
- * Order: GitHub direct -> gh-proxy.com mirror -> ghproxy.net mirror. Each mirror proxies the
- * canonical GitHub URL, so the update.json content and APK bytes stay identical; the SHA-256
+ * Order: GitHub direct -> mainland mirrors (verified 2026-10-30: all four serve the real
+ * update.json AND full APK bytes with Range support). Each mirror proxies the canonical
+ * GitHub URL, so the update.json content and APK bytes stay identical; the SHA-256
  * verification in UpdateFiles.receive still guards against tampering or partial downloads.
+ *
+ * Some mirrors reject plain non-browser user agents (verified: ghfast.top 403s a bare
+ * "HongguoTV-Updater" UA), so every update request carries a browser UA.
  */
 object UpdateMirrors {
     val prefixes: List<String> = listOf(
         "https://github.com",
+        "https://ghfast.top/https://github.com",
+        "https://gh.llkk.cc/https://github.com",
         "https://gh-proxy.com/https://github.com",
         "https://ghproxy.net/https://github.com"
     )
@@ -110,11 +116,13 @@ class AppUpdateRepository : java.io.Closeable {
             val url = chain.request().url
             // Follow GitHub's CDN redirects, never cleartext or arbitrary manifest-provided hosts.
             // Mirror hosts are fixed constants, not derived from update.json, so they cannot be hijacked.
-            if (url.scheme != "https" || url.host !in setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "gh-proxy.com", "ghproxy.net"))
+            if (url.scheme != "https" || url.host !in setOf("github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "ghfast.top", "gh.llkk.cc", "gh-proxy.com", "ghproxy.net"))
                 throw IOException("更新下载地址不受支持")
             chain.proceed(chain.request())
         }.build()
-    private fun request(url: String) = Request.Builder().url(url).header("User-Agent", "HongguoTV-Updater")
+    /** Browser UA: several mirrors 403 plain client UAs (ghfast.top verified). */
+    private fun request(url: String) = Request.Builder().url(url)
+        .header("User-Agent", "Mozilla/5.0 (Linux; Android 7) HongguoTV-Updater")
         .header("Cache-Control", "no-cache").build()
     fun latest(): AppUpdate {
         // Try GitHub first, then mainland-friendly mirrors. First parseable response wins;
