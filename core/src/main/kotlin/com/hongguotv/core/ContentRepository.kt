@@ -164,6 +164,9 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // shelves and the short-drama grid always open with a proper page of content.
         // With a local category filter the raw feed is thinned out (only ~1 in 6 rows
         // carries 穿越), so the fill-up loop runs on every page, not just page 1.
+        // Follow-up rounds are fault-tolerant (2026-10-31): risk control can answer any
+        // single round with HTTP 200 + empty body; a mid-loop failure keeps the rows
+        // already collected instead of discarding the whole page.
         var cursor = synchronized(catalogCursors) { catalogCursors[cursorKey] }
         var offset = if (page == 1) 0 else cursor?.first ?: (page - 1) * 18
         var sessionId = if (page == 1) "" else cursor?.second ?: ""
@@ -181,9 +184,19 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
                     .put("gender", JSONArray()).put("category_dim_theme", JSONArray(themeIds))
                     .put("category_dim_role", JSONArray()).put("category_dim_epoch", JSONArray())
                     .put("online_time", JSONArray()).put("creation_status", JSONArray()))
-            val data = if (genre == "ai_series") aiFeedRequest(payload.toString())
+            val data = try {
+                if (genre == "ai_series") aiFeedRequest(payload.toString())
                 else appRequest("/reading/distribution/category/landpage/v/", payload.toString())
-            val rows = data.optJSONObject("data")?.optJSONArray("video_data") ?: throw IOException("首页数据暂不可用")
+            } catch (e: IOException) {
+                // A follow-up round hitting risk control (HTTP 200 + empty body) must not
+                // discard the rows already collected: the page returns what it has and
+                // reports no further pages. Only the FIRST round's failure propagates —
+                // an empty first round means the channel itself is unavailable.
+                if (round == 0) throw e
+                hasMore = false; break
+            }
+            val rows = data.optJSONObject("data")?.optJSONArray("video_data")
+                ?: if (round == 0) throw IOException("首页数据暂不可用") else { hasMore = false; break }
             all += valid(rows.objects().filter { categoryFilter==null || hasCategory(it,categoryFilter) }.map(::card))
             hasMore = data.optJSONObject("data")?.optBoolean("has_more", false) ?: false
             offset = data.optJSONObject("data")?.optInt("next_offset", offset + 18) ?: offset + 18
@@ -191,7 +204,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             synchronized(catalogCursors) { catalogCursors[cursorKey] = offset to sessionId }
             round++
             // Enough content, nothing more, or a safety cap on follow-up rounds.
-            val target = if (categoryFilter==null) 12 else 18
+            val target = 12
             if ((page != 1 && categoryFilter==null) || all.size >= target || !hasMore || round >= (if (categoryFilter==null) 3 else 6)) break
         }
         return CatalogPage(all, hasMore && page < 100)

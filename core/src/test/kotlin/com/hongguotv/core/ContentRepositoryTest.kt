@@ -132,6 +132,38 @@ class ContentRepositoryTest {
         assertTrue(request.header("User-Agent")!!.startsWith("com.dragon.read/"))
     }
 
+    @Test fun aiFeedMidLoopEmptyRoundKeepsCollectedRows() {
+        // 2026-10-31: risk control can answer ANY single fill-up round with HTTP 200 +
+        // empty body. The AI 穿越 page walks the ai_series feed with a local category
+        // filter (~1 in 6 rows carries the tag), so its fill-up loop spans several
+        // rounds — a mid-loop empty round must keep the rows already collected instead
+        // of discarding the whole page with "App 接口返回空数据". Only an empty FIRST
+        // round (channel unavailable) still propagates the error.
+        var round=0
+        val repo=repository { _ ->
+            round++
+            if(round==1) JSONObject().put("code",0).put("data",JSONObject()
+                .put("video_data",JSONArray().put(JSONObject()
+                    .put("series_id","770235").put("title","穿越剧A")
+                    .put("category_schema","[{\"category_id\":\"37\",\"name\":\"穿越\"}]")))
+                .put("has_more",true).put("next_offset",18).put("session_id","s1")).toString()
+            else "" // follow-up round: HTTP 200 + empty body (risk control)
+        }
+        val page=repo.themeCatalog(ContentType.AI,Theme("chuanyue","穿越",feedCategory = "穿越"),1)
+        assertEquals(listOf("770235"),page.items.map { it.id })
+        assertFalse(page.hasMore)
+        assertTrue(round>=2) // the loop actually attempted a follow-up round
+    }
+
+    @Test fun aiFeedFirstRoundEmptyStillThrows() {
+        // The fault tolerance must not mask a dead channel: an empty FIRST round means
+        // the feed itself is unavailable and the error still propagates.
+        val repo=repository { _ -> "" }
+        assertThrows(IOException::class.java) {
+            repo.themeCatalog(ContentType.AI,Theme("chuanyue","穿越",feedCategory = "穿越"),1)
+        }
+    }
+
     @Test fun homeParsesLandpageFeedAndPagination() {
         // 2026-10: every "全部" grid reads the website category page — the feed's cover
         // URLs switched to HEIC (API-28+ only, blank on Android 7/8 TVs), while the
