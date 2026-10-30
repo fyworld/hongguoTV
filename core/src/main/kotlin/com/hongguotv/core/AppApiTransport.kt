@@ -36,7 +36,7 @@ internal class AppApiTransport(
     private val signer = Signer(clock = { clock() })
 
     /** App client UA: must match the version_code/version_name in the query profile. */
-    val userAgent = "com.phoenix.read/73532 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
+    val userAgent = "com.phoenix.read/73932 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
 
     private fun newDeviceId(): String {
         // Server risk control rejects fixed/fake values with 110001; the App-side rule
@@ -89,8 +89,8 @@ internal class AppApiTransport(
      *  NO ts param: the landpage feed rejects queries carrying it (HTTP 200 empty body);
      *  the playback endpoint is ts-insensitive, so one profile serves both. */
     fun queryProfile(): Map<String,String> = linkedMapOf(
-        "aid" to "8662", "app_name" to "novelread", "version_code" to "73532", "version_name" to "7.3.5.32",
-        "manifest_version_code" to "73532", "update_version_code" to "73532", "channel" to "update_64",
+        "aid" to "8662", "app_name" to "novelread", "version_code" to "73932", "version_name" to "7.3.9.32",
+        "manifest_version_code" to "73932", "update_version_code" to "73932", "channel" to "update_64",
         "device_platform" to "android", "os" to "android", "ssmix" to "a", "device_type" to "25053RT47C",
         "device_brand" to "Redmi", "language" to "zh", "os_api" to "36", "os_version" to "16",
         "resolution" to "1280*2772", "dpi" to "520", "ac" to "wifi",
@@ -107,7 +107,9 @@ internal class AppApiTransport(
      * [identity] carries a server-registered device (PlaybackDeviceSession): the
      * 2026-10-27 empty-body crackdown rejects unregistered device_ids on the
      * landpage feed too, so feed calls pass the registered values + cookies here.
-     * Upstream pins the 73532 player versions on this endpoint either way.
+     * Version pin: 73932 (the registration version) - the old 73532 pin started
+     * getting empty bodies on the ai_series channel first (2026-10-30, AI 穿越
+     * theme empty), then on short_play as well; the server is retiring it.
      */
     fun request(path: String, payload: String?, signed: Boolean = true,
                 identity: PlaybackDeviceSession.Profile? = null): JSONObject {
@@ -119,8 +121,8 @@ internal class AppApiTransport(
             return requestUrl("$APP_BASE$path?$query", body, headers)
         }
         val values = if (identity != null) identity.values.toMutableMap().apply {
-            for (k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) this[k] = "73532"
-            this["version_name"] = "7.3.5.32"
+            for (k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) this[k] = "73932"
+            this["version_name"] = "7.3.9.32"
         } else queryProfile()
         val signedReq = signer.signPlayback("$APP_BASE$path", values, body, userAgent)
         val headers = signedReq.headers.toMutableMap()
