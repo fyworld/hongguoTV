@@ -155,7 +155,8 @@ class HomeScreen(
                 view.setOnClickListener { lastFocus=key; remember(key); card.entry?.let { open(it.series,it.resume) } ?: moreAction?.invoke() }
                 if(entry!=null) {
                     view.setOnLongClickListener { lastFocus=key; remember(key); card.entry?.let { actions(it.series,view) }; true }
-                    view.setOnKeyListener { _,code,event -> if(code==KeyEvent.KEYCODE_MENU) { if(event.action==KeyEvent.ACTION_UP) { lastFocus=key; remember(key); card.entry?.let { actions(it.series,view) } }; true } else false }
+                    // MENU handling lives in the unified key listener set at the end of
+                    // render() — it also drives the LEFT/RIGHT wrap-around there.
                 }
                 view.setOnFocusChangeListener { _,focused ->
                     view.background=shape(focused)
@@ -208,6 +209,25 @@ class HomeScreen(
             card.view.nextFocusRightId=row.cards[(j+1)%row.cards.size].view.id
             card.view.nextFocusUpId=if(i==0) top.id else rows[i-1].cards[j.coerceAtMost(rows[i-1].cards.lastIndex)].view.id
             card.view.nextFocusDownId=if(i==rows.lastIndex) refresh.id else rows[i+1].cards[j.coerceAtMost(rows[i+1].cards.lastIndex)].view.id
+            // The wrap-around jump must not pass through the HorizontalScrollView's
+            // key handling: HSV intercepts unconsumed LEFT/RIGHT and only moves focus
+            // when the explicit target lies within half a screen of the current scroll
+            // position — on a long shelf the jump back to the first card exceeds that
+            // distance, so the first press merely scrolled (the "press twice" bug).
+            // Consuming the key here and requesting focus directly bypasses the check;
+            // the focus listener then scrolls the row to the new card.
+            val wrapLeft=row.cards[(j-1+row.cards.size)%row.cards.size].view
+            val wrapRight=row.cards[(j+1)%row.cards.size].view
+            val entry=card.entry
+            card.view.setOnKeyListener { _,code,event ->
+                if(event.action!=KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+                when(code) {
+                    KeyEvent.KEYCODE_DPAD_LEFT -> { wrapLeft.requestFocus(); true }
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> { wrapRight.requestFocus(); true }
+                    KeyEvent.KEYCODE_MENU -> if(entry!=null) { lastFocus=card.key; remember(card.key); actions(entry.series,card.view); true } else false
+                    else -> false
+                }
+            }
         } }
         footer.forEachIndexed { i,v -> v.nextFocusUpId=if(i==0) rows.lastOrNull()?.cards?.firstOrNull()?.view?.id ?: top.id else footer[i-1].id; v.nextFocusDownId=footer.getOrNull(i+1)?.id ?: v.id }
         top.nextFocusDownId=firstId()
