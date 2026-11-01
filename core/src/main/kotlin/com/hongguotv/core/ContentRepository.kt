@@ -167,6 +167,11 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // Follow-up rounds are fault-tolerant (2026-10-31): risk control can answer any
         // single round with HTTP 200 + empty body; a mid-loop failure keeps the rows
         // already collected instead of discarding the whole page.
+        // The locally-filtered channel (ai_series) asks for 36 rows per round (verified
+        // live 2026-11-01: the server honours the limit and follows with next_offset=36):
+        // at ~1 in 6 rows carrying the tag, one round yields ~6 穿越 and two rounds fill
+        // the 12-item page — half the requests of the old 18-row rounds under edge-state
+        // risk control.
         var cursor = synchronized(catalogCursors) { catalogCursors[cursorKey] }
         var offset = if (page == 1) 0 else cursor?.first ?: (page - 1) * 18
         var sessionId = if (page == 1) "" else cursor?.second ?: ""
@@ -175,7 +180,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         var round = 0
         while (true) {
             val payload = JSONObject()
-                .put("req_scene", scene).put("offset", offset).put("limit", 18)
+                .put("req_scene", scene).put("offset", offset)
+                .put("limit", if (categoryFilter != null) 36 else 18)
                 .put("req_type", "only_content").put("need_selector_panel", false)
                 .put("client_req_type", if (offset > 0) 2 else 3)
                 .put("session_id", sessionId).put("filter_ids", "")
@@ -200,6 +206,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             all += valid(rows.objects().filter { categoryFilter==null || hasCategory(it,categoryFilter) }.map(::card))
             hasMore = data.optJSONObject("data")?.optBoolean("has_more", false) ?: false
             offset = data.optJSONObject("data")?.optInt("next_offset", offset + 18) ?: offset + 18
+            // The server honours the requested limit (36 on the filtered channel), but
+            // the fallback keeps the old 18-row step for any server that caps the page.
             sessionId = data.optJSONObject("data")?.str("session_id") ?: sessionId
             synchronized(catalogCursors) { catalogCursors[cursorKey] = offset to sessionId }
             round++

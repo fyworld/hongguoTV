@@ -5,6 +5,7 @@ import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.Buffer
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
@@ -153,6 +154,27 @@ class ContentRepositoryTest {
         assertEquals(listOf("770235"),page.items.map { it.id })
         assertFalse(page.hasMore)
         assertTrue(round>=2) // the loop actually attempted a follow-up round
+    }
+
+    @Test fun aiFeedFilteredChannelRequests36RowsPerRound() {
+        // 2026-11-01: the locally-filtered ai_series channel asks for 36 rows per round
+        // (live-verified: the server honours the limit, next_offset follows at 36). At
+        // ~1 in 6 rows carrying 穿越, one round yields ~6 items and two rounds fill the
+        // 12-item page — half the requests of 18-row rounds under edge-state risk
+        // control. Unfiltered channels (short_play home shelves) keep the 18-row round.
+        val requests=mutableListOf<Request>()
+        val repo=repository { request ->
+            requests+=request
+            JSONObject().put("code",0).put("data",JSONObject()
+                .put("video_data",JSONArray().put(JSONObject()
+                    .put("series_id","770235").put("title","穿越剧A")
+                    .put("category_schema","[{\"category_id\":\"37\",\"name\":\"穿越\"}]")))
+                .put("has_more",false).put("next_offset",36)).toString()
+        }
+        repo.themeCatalog(ContentType.AI,Theme("chuanyue","穿越",feedCategory = "穿越"),1)
+        val buffer=Buffer(); requests.single().body!!.writeTo(buffer)
+        val body=org.json.JSONObject(buffer.readUtf8())
+        assertEquals(36,body.getInt("limit"))
     }
 
     @Test fun aiFeedFirstRoundEmptyStillThrows() {
