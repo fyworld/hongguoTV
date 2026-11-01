@@ -71,6 +71,10 @@ class LibraryIndex(data: BackupData, updates: Map<String, FavoriteUpdate> = empt
         watchedIds = watchedIds - id
     }
     fun clearHistory() { historyRows = emptyList(); progressById.clear(); watchedIds = emptySet() }
+    fun clearFavorites() {
+        favoriteRows = emptyList(); favoriteIds = emptySet()
+        updateRows = emptyMap(); updateCount = 0
+    }
     fun observeFavorite(id: String, count: Int, now: Long, acknowledge: Boolean): Boolean {
         if (!favorite(id)) return false
         val previous = updateRows[id]

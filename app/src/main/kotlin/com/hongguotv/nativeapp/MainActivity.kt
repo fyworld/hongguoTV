@@ -639,6 +639,14 @@ class MainActivity: Activity() {
             heading.addView(text(if(tab==6) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
             if(tab==6) {
                 favoriteCheck=addButton(heading,"检查更新") { favoriteMonitor.check(force=true) }.apply { nextFocusUpId=nav[tab].id }
+                if(library.favorites().isNotEmpty()) {
+                    historyManage=addButton(heading,"管理收藏") {
+                        val rows=library.favorites()
+                        tvTools.choose("选择要管理的收藏",rows.map { it.title },historyManage,{ index -> manageFavorite(rows[index],historyManage) },"清空收藏") {
+                            tvTools.confirm("清空收藏","将删除本机全部收藏，观看记录会保留。",historyManage) { library.clearFavorites(); catalogFocus=""; showCatalog() }
+                        }
+                    }.apply { nextFocusUpId=nav[tab].id }
+                }
             }
             if(tab==7 && library.history().isNotEmpty()) {
                 historyManage=addButton(heading,"管理记录") {
@@ -1613,6 +1621,20 @@ class MainActivity: Activity() {
                 0 -> openDetail(series,true)
                 1 -> { library.setWatched(series.id,!library.watched(series.id)); catalogFocus=series.id; showCatalog() }
                 2 -> tvTools.confirm("删除观看记录","删除《${series.title}》的本机观看进度？收藏会保留。",anchor) { library.removeHistory(series.id); showCatalog() }
+            }
+        })
+    }
+    /** Favorite-page row management, mirroring manageHistory: open the detail page or
+     *  remove the favorite (watch progress is kept). Reached from 管理收藏 on tab 6. */
+    private fun manageFavorite(series: Series,anchor: View?) {
+        tvTools.choose(series.title,listOf("打开详情","取消收藏"),anchor,{ index ->
+            when(index) {
+                0 -> openDetail(series,false)
+                1 -> tvTools.confirm("取消收藏","取消收藏《${series.title}》？观看记录会保留。",anchor) {
+                    favoriteMonitor.stop()
+                    library.toggle(series)
+                    catalogFocus=""; showCatalog()
+                }
             }
         })
     }

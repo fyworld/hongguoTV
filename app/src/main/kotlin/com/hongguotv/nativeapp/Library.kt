@@ -121,6 +121,7 @@ class Library(context: Context) {
         if (it.added > 0) "新增 ${it.added} 集 · 更新至 ${it.total} 集" else "更新至 ${it.total} 集"
     } ?: "尚未检查更新"
     fun toggle(series: Series) = state().toggle(series).also { persist("favorites", "favoriteUpdates") }
+    fun clearFavorites() { state().clearFavorites(); persist("favorites", "favoriteUpdates") }
     fun toggleLater(series: Series) = state().toggleLater(series).also { persist("later") }
     fun save(progress: WatchProgress) { if (state().save(progress)) persist("progress") }
     fun setWatched(id: String, value: Boolean) { if (state().setWatched(id, value)) persist("watched") }
