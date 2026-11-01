@@ -164,6 +164,20 @@ class HomeScreen(
                         if(!restoring) {
                             loadNearbySelection()
                             if(lastRow!=shelf.key) scroll.post { if(revision==ticket && view.hasFocus()) reveal(block) }
+                            // Keep the focused card inside the shelf's visible window —
+                            // including the wrap-around jump back to the row's first card.
+                            scroll.post {
+                                if(revision==ticket && view.hasFocus()) {
+                                    val left=horizontal.scrollX
+                                    val right=left+horizontal.width-horizontal.paddingRight
+                                    val target=when {
+                                        view.left<left -> view.left
+                                        view.right>right -> view.right-horizontal.width+horizontal.paddingRight
+                                        else -> left
+                                    }
+                                    if(target!=left) horizontal.smoothScrollTo(target.coerceAtLeast(0),0)
+                                }
+                            }
                         }
                         lastRow=shelf.key
                     } else if(deselected!=null) {
@@ -187,7 +201,11 @@ class HomeScreen(
             contents.addView(next,LayoutParams(-1,-2).apply { topMargin=dp(8) }); footer+=next; moreButton=next
         }
         rows.forEachIndexed { i,row -> row.cards.forEachIndexed { j,card ->
-            card.view.nextFocusLeftId=row.cards[(j-1).coerceAtLeast(0)].view.id; card.view.nextFocusRightId=row.cards[(j+1).coerceAtMost(row.cards.lastIndex)].view.id
+            // Wrap-around within the shelf row: pressing right past the last card jumps
+            // to the first (and vice versa). The explicit ID chain keeps geometric
+            // search out of the loop entirely.
+            card.view.nextFocusLeftId=row.cards[(j-1+row.cards.size)%row.cards.size].view.id
+            card.view.nextFocusRightId=row.cards[(j+1)%row.cards.size].view.id
             card.view.nextFocusUpId=if(i==0) top.id else rows[i-1].cards[j.coerceAtMost(rows[i-1].cards.lastIndex)].view.id
             card.view.nextFocusDownId=if(i==rows.lastIndex) refresh.id else rows[i+1].cards[j.coerceAtMost(rows[i+1].cards.lastIndex)].view.id
         } }
