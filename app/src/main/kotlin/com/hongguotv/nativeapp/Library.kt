@@ -31,6 +31,8 @@ class Library(context: Context) {
     private var index: LibraryIndex? = null
     private val homes = mutableMapOf<ContentType, CatalogPage>()
     private val homeSavedAt = mutableMapOf<ContentType, Long>()
+    private val themes = mutableMapOf<String, CatalogPage>()
+    private val themeSavedAt = mutableMapOf<String, Long>()
     private var loading = false
     private var closed = false
     private val readyCallbacks = mutableListOf<() -> Unit>()
@@ -55,6 +57,8 @@ class Library(context: Context) {
                 val now = System.currentTimeMillis()
                 val cached = mutableMapOf<ContentType, CatalogPage>()
                 val stamps = mutableMapOf<ContentType, Long>()
+                val cachedThemes = mutableMapOf<String, CatalogPage>()
+                val themeStamps = mutableMapOf<String, Long>()
                 val migration = homePrefs.edit()
                 val oldKeys = mutableListOf<String>()
                 ContentType.entries.forEach { type ->
@@ -68,19 +72,42 @@ class Library(context: Context) {
                     }
                     if (legacy != null) oldKeys += key
                 }
+                // Theme snapshots share the same prefs file and the same 7-day TTL.
+                // Keep the newest few only — the strip holds ~20 themes and stale ones
+                // must not crowd the file.
+                homePrefs.all.forEach { (key, raw) ->
+                    if (key.startsWith("theme-") && raw is String) {
+                        CatalogSnapshot.decode(raw, now)?.let { page ->
+                            cachedThemes[key.removePrefix("theme-")] = page
+                            themeStamps[key.removePrefix("theme-")] = org.json.JSONObject(raw).getLong("savedAt")
+                        }
+                    }
+                }
+                if (cachedThemes.size > 6) {
+                    val keep = themeStamps.entries.sortedByDescending { it.value }.take(6).map { it.key }.toHashSet()
+                    cachedThemes.keys.retainAll(keep)
+                    themeStamps.keys.retainAll(keep)
+                    homePrefs.edit().also { edit -> cachedThemes.keys.forEach { edit.remove("theme-$it") } }.commit()
+                }
                 // Only remove legacy cache after the separate cache has been committed.
                 if (oldKeys.isNotEmpty() && migration.commit()) {
                     prefs.edit().also { edit -> oldKeys.forEach(edit::remove) }.commit()
                 }
-                Triple(loaded, cached, stamps)
+                listOf(loaded, cached, stamps, cachedThemes, themeStamps)
             }
             main.post {
                 loading = false
                 if (closed) { readyCallbacks.clear(); errorCallbacks.clear(); return@post }
                 val ready = readyCallbacks.toList(); readyCallbacks.clear()
                 val errors = errorCallbacks.toList(); errorCallbacks.clear()
-                result.onSuccess { (loaded, cached, stamps) ->
+                result.onSuccess { parts ->
+                    @Suppress("UNCHECKED_CAST") val loaded = parts[0] as LibraryIndex
+                    @Suppress("UNCHECKED_CAST") val cached = parts[1] as Map<ContentType, CatalogPage>
+                    @Suppress("UNCHECKED_CAST") val stamps = parts[2] as Map<ContentType, Long>
+                    @Suppress("UNCHECKED_CAST") val cachedThemes = parts[3] as Map<String, CatalogPage>
+                    @Suppress("UNCHECKED_CAST") val themeStamps = parts[4] as Map<String, Long>
                     index = loaded; homes.putAll(cached); homeSavedAt.putAll(stamps)
+                    themes.putAll(cachedThemes); themeSavedAt.putAll(themeStamps)
                     ready.forEach { it() }
                 }.onFailure { failure -> errors.forEach { it(failure) } }
             }
@@ -147,6 +174,25 @@ class Library(context: Context) {
         homes[type] = CatalogPage(retained, hasMore)
         homeSavedAt[type] = now
         homeWrites.submit(mapOf("home-${type.storedValue}" to { CatalogSnapshot.encode(retained, hasMore, now) }))
+    }
+    /** Theme list cache: same shape/TTL as the home cache, keyed "type:slug" (e.g.
+     *  "short:chuanyue"). Switching to a theme renders this instantly while the
+     *  refresh runs in the background — identical to the 全部 tab's behavior. */
+    fun cachedTheme(type: ContentType, slug: String): CatalogPage? {
+        state()
+        val key = "${type.storedValue}:$slug"
+        val age = System.currentTimeMillis() - (themeSavedAt[key] ?: return null)
+        return themes[key].takeIf { age in 0..7 * 24 * 60 * 60 * 1000L }
+    }
+    fun cacheTheme(type: ContentType, slug: String, items: List<Series>, hasMore: Boolean) {
+        state()
+        if (items.isEmpty()) return
+        val key = "${type.storedValue}:$slug"
+        val now = System.currentTimeMillis()
+        val retained = items.take(30).map { it.copy(description = it.description.take(1500)) }
+        themes[key] = CatalogPage(retained, hasMore)
+        themeSavedAt[key] = now
+        homeWrites.submit(mapOf("theme-$key" to { CatalogSnapshot.encode(retained, hasMore, now) }))
     }
     var maxQuality: Int
         get() = state().settings.quality

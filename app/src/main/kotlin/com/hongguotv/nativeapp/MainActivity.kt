@@ -492,8 +492,14 @@ class MainActivity: Activity() {
         if(fetch) {
             // Theme mode: the persistent home cache holds the 全部 feed, not the theme's
             // list — showing it while loading would look like the filter is not applied.
-            val cached=if((tab==0 || tab==1 || tab==2 || tab==3) && page==1 && themeSlug.isBlank()) library.cachedHome(tabContentType()) else null
+            // The theme's own persistent snapshot (7-day TTL) is fine to show, though:
+            // switching themes renders it instantly while the refresh runs, same as 全部.
+            val cached=if(page==1 && themeSlug.isNotBlank()) library.cachedTheme(tabContentType(),themeSlug)
+                else if((tab==0 || tab==1 || tab==2 || tab==3) && page==1 && themeSlug.isBlank()) library.cachedHome(tabContentType()) else null
             catalog=cached?.items ?: emptyList(); hasMore=cached?.hasMore ?: false; ranking=null; homeFromCache=cached!=null
+            // Theme mode: the in-memory session cache (10 min) already rendered the list
+            // without fetching; only a real background fetch shows the loading grid.
+            if(cached!=null && page==1 && themeSlug.isNotBlank()) homeFromCache=true
             // Home shelves need every content type; seed them from the per-type caches.
             if(tab==0 && page==1) {
                 homeShort=library.cachedHome(ContentType.SHORT)?.items ?: emptyList()
@@ -558,6 +564,8 @@ class MainActivity: Activity() {
                             if(focused && themeSlug!="" && !rebuildingGrid) switchTheme("")
                             // Focus back on the theme bar: collapse the title preview row.
                             if(focused) selectionPreview?.blank()
+                            // Wrap-around landed on 全部: scroll the strip back to its start.
+                            if(focused) scroll.post { scroll.smoothScrollTo(0,0) }
                         }
                     }
                 themes.forEach { theme ->
@@ -577,13 +585,14 @@ class MainActivity: Activity() {
                             }
                         }
                 }
-                // Explicit left/right chain: the first/last buttons lock (pressing right
-                // past the last theme stays put) — Android's geometric search would
-                // otherwise escape upward to the nav bar on a short strip.
+                // Explicit left/right chain, wrap-around: pressing right past the last
+                // theme jumps to the first (and vice versa). The explicit IDs keep
+                // Android's geometric search out of the loop entirely — it never
+                // escapes upward to the nav bar on a short strip.
                 val ordered=themeButtons.values.toList()
                 ordered.forEachIndexed { index,view ->
-                    view.nextFocusLeftId=if(index==0) view.id else ordered[index-1].id
-                    view.nextFocusRightId=if(index==ordered.lastIndex) view.id else ordered[index+1].id
+                    view.nextFocusLeftId=if(index==0) ordered.last().id else ordered[index-1].id
+                    view.nextFocusRightId=if(index==ordered.lastIndex) ordered.first().id else ordered[index+1].id
                 }
                 bar.addView(scroll,lp(0,dp(46)).apply { weight=1f })
                 container.addView(bar)
@@ -710,6 +719,9 @@ class MainActivity: Activity() {
                     if(cacheKey!=null) {
                         val themeResult=if(requestTab==1) shortResult else if(requestTab==2) comicResult else aiResult
                         catalogCache[cacheKey]=System.currentTimeMillis() to CatalogState(requestPage,themeResult.items,themeResult.hasMore,null)
+                        // Persistent theme snapshot (7-day TTL): next app start / theme
+                        // switch renders it instantly while the refresh runs in background.
+                        library.cacheTheme(requestType,requestTheme,themeResult.items,themeResult.hasMore)
                     }
                     when(requestTab) {
                         1 -> if(requestThemeObj==null) catalogCache["short"]=System.currentTimeMillis() to CatalogState(requestPage,shortResult.items,shortResult.hasMore,shortResult.ranking)

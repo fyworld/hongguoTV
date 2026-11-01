@@ -361,18 +361,86 @@ class ContentRepositoryTest {
         // 10-row pagination — far beyond the feed channel, and immune to the App-API
         // risk control). Rows are filtered to genre=205 so the tab stays real-drama
         // only; comic (203) and AI (207) rows that leak into the search are dropped.
+        // 2026-11-02: one theme page merges 3 search pages (~27 filtered rows) so the
+        // grid matches the category pages' 24-row depth.
+        val requests=mutableListOf<Request>()
         val repo=repository { request ->
-            if(request.url.encodedPath=="/api/search/result")
-                """{"searchList":[
-                    {"video_data":{"series_id":"111","series_title":"真人穿越","genre":205,"category_list":[{"category_id":"37","name":"穿越"}]}},
-                    {"video_data":{"series_id":"222","series_title":"漫剧混入","genre":203,"category_list":[{"category_id":"37","name":"穿越"}]}},
-                    {"video_data":{"series_id":"333","series_title":"AI混入","genre":207,"category_list":[{"category_id":"37","name":"穿越"}]}}
-                ],"totalCount":3,"hasMore":true}"""
+            if(request.url.encodedPath=="/api/search/result") {
+                requests+=request
+                val searchPage=request.url.queryParameter("page")!!.toInt()
+                when(searchPage) {
+                    1 -> """{"searchList":[
+                        {"video_data":{"series_id":"111","series_title":"真人穿越一","genre":205}},
+                        {"video_data":{"series_id":"222","series_title":"漫剧混入","genre":203}},
+                        {"video_data":{"series_id":"333","series_title":"AI混入","genre":207}}
+                    ],"totalCount":3,"hasMore":true}"""
+                    2 -> """{"searchList":[
+                        {"video_data":{"series_id":"444","series_title":"真人穿越二","genre":205}},
+                        {"video_data":{"series_id":"555","series_title":"真人穿越三","genre":205}}
+                    ],"totalCount":3,"hasMore":true}"""
+                    3 -> """{"searchList":[
+                        {"video_data":{"series_id":"666","series_title":"真人穿越四","genre":205}}
+                    ],"totalCount":3,"hasMore":false}"""
+                    4 -> """{"searchList":[
+                        {"video_data":{"series_id":"444","series_title":"真人穿越二","genre":205}},
+                        {"video_data":{"series_id":"555","series_title":"真人穿越三","genre":205}}
+                    ],"totalCount":3,"hasMore":true}"""
+                    5 -> """{"searchList":[
+                        {"video_data":{"series_id":"666","series_title":"真人穿越四","genre":205}}
+                    ],"totalCount":3,"hasMore":true}"""
+                    6 -> """{"searchList":[
+                        {"video_data":{"series_id":"777","series_title":"真人穿越五","genre":205}}
+                    ],"totalCount":3,"hasMore":false}"""
+                    else -> throw AssertionError("search page $searchPage out of the 3-page merge window")
+                }
+            }
             else throw AssertionError("real 穿越 must not hit the App feed: "+request.url)
         }
         val page=repo.themeCatalog(ContentType.SHORT,Theme("chuanyue","穿越",searchKeyword = "穿越"),1)
-        assertEquals(listOf("111"),page.items.map { it.id })
+        assertEquals(listOf("111","444","555","666"),page.items.map { it.id })
         assertTrue(page.hasMore)
+        // Theme page 2 walks search pages 4-6.
+        requests.clear()
+        val second=repo.themeCatalog(ContentType.SHORT,Theme("chuanyue","穿越",searchKeyword = "穿越"),2)
+        assertEquals(listOf("444","555","666","777"),second.items.map { it.id })
+        assertEquals(listOf(4,5,6),requests.map { it.url.queryParameter("page")!!.toInt() })
+    }
+
+    @Test fun searchThemeMidMergeFailureKeepsCollectedRowsAndScrollsOn() {
+        // A search page failing mid-merge (page 2 of 3) keeps the rows already
+        // collected and keeps hasMore true so the infinite scroll can retry deeper.
+        val repo=repository { request ->
+            if(request.url.encodedPath=="/api/search/result") {
+                val searchPage=request.url.queryParameter("page")!!.toInt()
+                when(searchPage) {
+                    1 -> """{"searchList":[
+                        {"video_data":{"series_id":"111","series_title":"真人穿越一","genre":205}}
+                    ],"hasMore":true}"""
+                    2 -> throw IOException("mid-merge network failure")
+                    3 -> """{"searchList":[
+                        {"video_data":{"series_id":"666","series_title":"真人穿越四","genre":205}}
+                    ],"hasMore":false}"""
+                    else -> throw AssertionError("unexpected search page $searchPage")
+                }
+            }
+            else throw AssertionError("unexpected "+request.url)
+        }
+        val page=repo.themeCatalog(ContentType.SHORT,Theme("chuanyue","穿越",searchKeyword = "穿越"),1)
+        assertEquals(listOf("111","666"),page.items.map { it.id })
+        assertTrue(page.hasMore)
+    }
+
+    @Test fun searchThemeFirstSearchPageFailureStillThrows() {
+        // The first search page of the merge window failing means the theme itself
+        // cannot load — the error surfaces (same contract as before the merge).
+        val repo=repository { request ->
+            if(request.url.encodedPath=="/api/search/result") throw IOException("search down")
+            else throw AssertionError("unexpected "+request.url)
+        }
+        try {
+            repo.themeCatalog(ContentType.SHORT,Theme("chuanyue","穿越",searchKeyword = "穿越"),1)
+            fail("expected the theme page to fail when the first search page fails")
+        } catch(e: IOException) { assertEquals("穿越数据结构已变化",e.message) }
     }
 
     @Test fun themesAppendSearchBackedChuanyue() {

@@ -288,14 +288,33 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      * it: the real-drama 穿越 walks this chain with a genre=205 filter so the tab
      * stays real-drama-only while the search's 215-hit, 10-row true pagination
      * (vs the feed channel's risk-control-sensitive ~36/round) provides the depth.
+     *
+     * 2026-11-02: the search serves only 10 rows/page — after the genre filter a
+     * theme page carried ~9 cards while every other theme's category page carries
+     * 24, so the grid looked thin. Each theme page now merges 3 search pages
+     * (~27 filtered rows): same depth as the category pages, and the infinite
+     * scroll still walks the search's true pagination underneath.
      */
     private fun searchTheme(keyword: String, page: Int, type: ContentType, genreFilter: Int? = null): CatalogPage {
-        val data = searchResult(keyword, page)
-        val rows = data.optJSONArray("searchList") ?: throw IOException("${keyword}数据结构已变化")
-        val items = valid(rows.objects()
-            .filter { genreFilter == null || it.optJSONObject("video_data")?.optInt("genre", -1) == genreFilter }
-            .mapNotNull { it.optJSONObject("video_data")?.let(::card) })
-        return CatalogPage(items, data.optBoolean("hasMore", false) && page < 100)
+        val searchPages = 3
+        val first = (0 until searchPages).map { offset ->
+            val searchPage = (page - 1) * searchPages + 1 + offset
+            runCatching { searchResult(keyword, searchPage) }
+                .getOrNull()?.let { data ->
+                    val rows = data.optJSONArray("searchList") ?: return@let null
+                    rows.objects()
+                        .filter { genreFilter == null || it.optJSONObject("video_data")?.optInt("genre", -1) == genreFilter }
+                        .mapNotNull { it.optJSONObject("video_data")?.let(::card) }
+                        .let { items -> items to data.optBoolean("hasMore", false) }
+                }
+        }
+        // First search page failing means the theme itself cannot load — surface the error.
+        if (first[0] == null) throw IOException("${keyword}数据结构已变化")
+        val items = valid(first.mapNotNull { it?.first }.flatten())
+        // hasMore: the deepest fetched search page still had more (or it was skipped
+        // after a mid-loop failure — keep scrolling so the user can retry deeper).
+        val hasMore = first.mapNotNull { it?.second }.any { it } || first.any { it == null }
+        return CatalogPage(items, hasMore && page < 100)
     }
 
     /** The four website boards: 总热播榜 / 真人剧榜 / 漫剧榜 / AI剧榜.
