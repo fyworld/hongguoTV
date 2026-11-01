@@ -67,10 +67,13 @@ internal object ThemeCategory {
      *  they route to the feed (feedThemeId) or the search (searchKeyword) instead. */
     internal val searchBackedSlugs = setOf(chuanyueSlug)
 
-    /** Appends the search/feed-backed themes that a parsed site list is missing. */
+    /** Prepends the search/feed-backed themes that a parsed site list is missing.
+     *  穿越 leads the strip (right after 全部) instead of trailing 24 site themes:
+     *  it is the theme users actually browse (three rounds of empty-feed reports were
+     *  all about it), and on a TV remote a buried 26th button is effectively hidden. */
     internal fun withSearchBacked(themes: List<Theme>, type: ContentType): List<Theme> {
         val known=themes.map { it.slug }.toHashSet()
-        return themes + searchBacked(type).filterNot { it.slug in known }
+        return searchBacked(type).filterNot { it.slug in known } + themes
     }
 
     fun fallback(type: ContentType): List<Theme> =
@@ -106,12 +109,17 @@ internal object ThemeCategory {
         return null
     }
 
-    /** Series page for one theme; validates pagination like ComicRank does. */
+    /** Series page for one theme; validates pagination like ComicRank does.
+     *  An EMPTY category (totalPages=0, no rows - e.g. 动作冒险 carries no real-drama
+     *  content as of 2026-11) is a valid empty page, not an error: the grid shows the
+     *  empty state instead of a misleading 分页信息异常 toast. */
     fun parse(html: String, page: Int, theme: Theme, type: ContentType): CatalogPage {
         val node=routeNode(html)
         val rows=node.optJSONArray("recommendList") ?: throw IOException("${theme.label}数据格式已变化")
         val pagination=node.optJSONObject("pagination") ?: throw IOException("${theme.label}分页信息缺失")
         val totalPages=pagination.optInt("totalPages",0)
+        if(rows.length()==0 && totalPages==0)
+            return CatalogPage(emptyList(),false,null,"")
         if(totalPages<1 || pagination.optInt("pageNum",page)!=page) throw IOException("${theme.label}分页信息异常")
         val items=rows.objects().map { row ->
             val count=row.optInt("episode_cnt",row.optJSONObject("series_episode_info")?.optInt("episode_cnt",0) ?: 0)

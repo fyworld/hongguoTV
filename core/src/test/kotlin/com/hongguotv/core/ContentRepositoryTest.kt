@@ -222,6 +222,21 @@ class ContentRepositoryTest {
         assertEquals("第2页",result.items.single().title)
     }
 
+    @Test fun emptyWebsiteCategoryIsAnEmptyPageNotAnError() {
+        // 2026-11-01: 动作冒险 on the real-drama tab carries NO content on the site
+        // (probed live: total=0, totalPages=0, recommendList=0 rows) - that is a valid
+        // empty page, not a 分页信息异常 error. The grid shows its empty state instead
+        // of a misleading retry toast.
+        val repo=repository {
+            """<script>_ROUTER_DATA={"loaderData":{"category_$":{"isSuccess":true,
+                "recommendList":[],
+                "pagination":{"total":0,"pageNum":1,"pageSize":24,"totalPages":0}}}};</script>"""
+        }
+        val result=repo.themeCatalog(ContentType.SHORT,Theme("action-adventure","动作冒险"),1)
+        assertTrue(result.items.isEmpty())
+        assertFalse(result.hasMore)
+    }
+
     @Test fun homeRejectsInvalidRows() {
         val repo=repository {
             """<script>_ROUTER_DATA={"loaderData":{"category_$":{"isSuccess":true,
@@ -372,18 +387,18 @@ class ContentRepositoryTest {
         }
         val themes=repo.themes(ContentType.SHORT)
         assertTrue(themes.any { it.slug=="chuanyue" && it.label=="穿越" })
-        assertEquals("穿越",themes.last().label)
-        // Routing (2026-11-01): real tab -> website search (215 hits, true pagination);
-        // comic tab -> feed theme 37; AI tab -> feed with local category filter.
-        assertEquals("穿越",themes.last().searchKeyword)
-        assertNull(themes.last().feedThemeId)
+        // 穿越 leads the strip (a buried 26th button is effectively hidden on a TV
+        // remote); routing (2026-11-01): real tab -> website search (215 hits, true
+        // pagination); comic tab -> feed theme 37; AI tab -> feed with local filter.
+        assertEquals("穿越",themes.first { it.slug=="chuanyue" }.searchKeyword)
+        assertNull(themes.first { it.slug=="chuanyue" }.feedThemeId)
         val comicThemes=repo.themes(ContentType.COMIC)
-        assertEquals("37",comicThemes.last().feedThemeId)
-        assertNull(comicThemes.last().searchKeyword)
+        assertEquals("37",comicThemes.first { it.slug=="chuanyue" }.feedThemeId)
+        assertNull(comicThemes.first { it.slug=="chuanyue" }.searchKeyword)
         val aiThemes=repo.themes(ContentType.AI)
         assertTrue(aiThemes.any { it.slug=="chuanyue" })
-        assertNull(aiThemes.last().feedThemeId)
-        assertEquals("穿越",aiThemes.last().feedCategory)
+        assertNull(aiThemes.first { it.slug=="chuanyue" }.feedThemeId)
+        assertEquals("穿越",aiThemes.first { it.slug=="chuanyue" }.feedCategory)
     }
 
     @Test fun fallbackChuanyueRoutesToSearchNotCategory404() {
