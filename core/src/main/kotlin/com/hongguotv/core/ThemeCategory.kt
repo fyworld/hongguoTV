@@ -46,16 +46,22 @@ internal object ThemeCategory {
         "wealthy-family" to "豪门", "wonder" to "奇幻", "sci-fi" to "科幻", "adventure" to "冒险")
 
     /** Themes the site does not expose as category pages (2026-10): the official app
-     *  offers 穿越 filtering, but the website selector list omits it. On the real-drama
-     *  and comic feeds the landpage API honours category_dim_theme=37 and paginates
-     *  properly; the AI feed IGNORES the numeric filter (verified: it returns the comic
-     *  list), so AI 穿越 walks the ai_series feed and filters rows locally by their
-     *  category_schema tag (穿越) — the feed carries ~1 in 6 tagged rows and paginates
-     *  indefinitely, far beyond the 10-row website search. */
+     *  offers 穿越 filtering, but the website selector list omits it. Routing per tab
+     *  (re-verified 2026-11-01 by probing the search + the dragon feed):
+     *  - real-drama tab: the WEBSITE SEARCH for 穿越 (215 hits, true 10-row pagination,
+     *    ~29/30 rows genre=205) — far more content than the feed channel and immune to
+     *    the App-API risk control that kept cutting the feed loops short; rows are
+     *    filtered locally to genre=205 so the tab stays real-drama-only.
+     *  - comic tab: the landpage feed with category_dim_theme=37 (the search carries
+     *    almost no comic rows — 1 in 30 — so the feed is the only usable source).
+     *  - AI tab: the ai_series feed with a local category_schema filter — the website
+     *    search carries NO AI dramas at all (probed 30 rows, zero genre=207), so the
+     *    feed is the only source; ~1 in 6 feed rows carries the tag. */
     private val chuanyueSlug = "chuanyue"
     internal fun searchBacked(type: ContentType): List<Theme> = when(type) {
         ContentType.AI -> listOf(Theme(chuanyueSlug,"穿越",feedCategory = "穿越"))
-        else -> listOf(Theme(chuanyueSlug,"穿越",feedThemeId = "37"))
+        ContentType.COMIC -> listOf(Theme(chuanyueSlug,"穿越",feedThemeId = "37"))
+        else -> listOf(Theme(chuanyueSlug,"穿越",searchKeyword = "穿越"))
     }
     /** Slugs that must never hit /category/{type}/{slug} (their category pages are 404s):
      *  they route to the feed (feedThemeId) or the search (searchKeyword) instead. */

@@ -250,13 +250,13 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
 
     /** One theme's series page.
-     *  Feed-backed themes (穿越 on real/comic tabs) route to the landpage feed with a
-     *  numeric category_dim_theme filter — the website search's ?page= is ignored (it
-     *  only ever renders 10 rows), so the feed is the only chain that paginates.
-     *  On the AI tab the server IGNORES the theme filter (verified: it returns the
-     *  comic list), so 穿越 there walks the AI feed and filters rows locally by their
-     *  category_schema tag. The slug check is defensive: a stale cached Theme without
-     *  either marker must still route away from /category/{type}/chuanyue (a 404). */
+     *  Routing (re-verified 2026-11-01): 穿越 has no website category page (404) and
+     *  splits three ways — real-drama tab: website search + genre=205 filter (215 hits,
+     *  true pagination, risk-control-free); comic tab: landpage feed theme 37 (the
+     *  search carries almost no comic rows); AI tab: ai_series feed with a local
+     *  category_schema filter (the search carries NO AI rows at all). Other themes keep
+     *  their website category pages. The slug check is defensive: a stale cached Theme
+     *  without any marker must still route away from /category/{type}/chuanyue. */
     fun themeCatalog(type: ContentType, theme: Theme, page: Int = 1): CatalogPage {
         require(theme.slug.matches(Regex("[a-z0-9-]{1,40}")) && page in 1..100)
         if(theme.feedThemeId!=null && type!=ContentType.AI)
@@ -264,7 +264,8 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         if(theme.feedCategory!=null)
             return feedPage(page, feedGenre(type), feedScene(type), emptyList(), theme.feedCategory)
         if(theme.searchKeyword!=null || theme.slug in ThemeCategory.searchBackedSlugs)
-            return searchTheme(theme.searchKeyword ?: theme.label,page,type)
+            return searchTheme(theme.searchKeyword ?: theme.label,page,type,
+                if(type==ContentType.SHORT) 205 else null)
         return ThemeCategory.parse(webText("$site/category/${categoryPath(type)}/${theme.slug}?page=$page"),page,theme,type)
     }
 
@@ -280,12 +281,21 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      * search mixes real and AI dramas and carries no reliable per-type marker (the
      * category_list id system differs per page, genre is always 205), so the results
      * are shown unfiltered — same approach as the phone-version's keyword themes.
+     *
+     * 2026-11-01: the "genre is always 205" note was a stale observation from the old
+     * SSR page — the XHR endpoint DOES carry a usable genre (205 real-drama, 203 comic,
+     * 207 AI; probed 30 rows for 穿越: 29x205, 1x203, 0x207). Theme routing now uses
+     * it: the real-drama 穿越 walks this chain with a genre=205 filter so the tab
+     * stays real-drama-only while the search's 215-hit, 10-row true pagination
+     * (vs the feed channel's risk-control-sensitive ~36/round) provides the depth.
      */
-    private fun searchTheme(keyword: String, page: Int, type: ContentType): CatalogPage {
+    private fun searchTheme(keyword: String, page: Int, type: ContentType, genreFilter: Int? = null): CatalogPage {
         val data = searchResult(keyword, page)
         val rows = data.optJSONArray("searchList") ?: throw IOException("${keyword}数据结构已变化")
-        val items = valid(rows.objects().mapNotNull { it.optJSONObject("video_data")?.let(::card) })
-        return CatalogPage(items, data.optBoolean("hasMore", false) && items.isNotEmpty() && page < 100)
+        val items = valid(rows.objects()
+            .filter { genreFilter == null || it.optJSONObject("video_data")?.optInt("genre", -1) == genreFilter }
+            .mapNotNull { it.optJSONObject("video_data")?.let(::card) })
+        return CatalogPage(items, data.optBoolean("hasMore", false) && page < 100)
     }
 
     /** The four website boards: 总热播榜 / 真人剧榜 / 漫剧榜 / AI剧榜.
