@@ -14,11 +14,18 @@ import java.io.IOException
 
 class ContentRepositoryTest {
     private fun streamRepository(vararg variants: Triple<Int,String,String>) = repository { request ->
-        val rows=JSONObject()
-        variants.forEachIndexed { index,(height,codec,url) ->
-            rows.put("video_$index",JSONObject().put("video_meta",JSONObject().put("vheight",height).put("codec_type",codec)).put("main_url",url))
+        // The playback model tries the video_tab endpoint first (2026-11-02); these
+        // fixtures verify the OLD path's behavior, so answer the new endpoint with a
+        // business error to push the flow back to the old POST chain.
+        if (request.url.encodedPath.startsWith("/reading/bookapi/video_tab/"))
+            """{"code":100103,"message":"PARAM_INVALID","data":null}"""
+        else {
+            val rows=JSONObject()
+            variants.forEachIndexed { index,(height,codec,url) ->
+                rows.put("video_$index",JSONObject().put("video_meta",JSONObject().put("vheight",height).put("codec_type",codec)).put("main_url",url))
+            }
+            JSONObject().put("code",0).put("data",JSONObject().put("video_model",JSONObject().put("video_list",rows))).toString()
         }
-        JSONObject().put("code",0).put("data",JSONObject().put("video_model",JSONObject().put("video_list",rows))).toString()
     }
 
     @Test fun incompatibleByteVc2DoesNotBecomeAudioOnlyPlayback() {
@@ -51,6 +58,69 @@ class ContentRepositoryTest {
         assertTrue(requests.any { it.url.encodedPath=="/video/public/123/360p.mp4" })
     }
 
+    @Test fun videoModelStringIsAccepted() {
+        val repo=repository { request ->
+            if(request.url.encodedPath.startsWith("/reading/bookapi/video_tab/"))
+                """{"code":100103,"message":"PARAM_INVALID","data":null}"""
+            else {
+                val rows=JSONObject()
+                rows.put("video_0",JSONObject().put("video_meta",JSONObject().put("vheight",720).put("codec_type","h264")).put("main_url","https://example.com/avc"))
+                JSONObject().put("code",0).put("data",JSONObject().put("video_model",JSONObject().put("video_list",rows).toString())).toString()
+            }
+        }
+        assertEquals("720P",repo.stream("123",1080).quality)
+    }
+
+    @Test fun videoTabEndpointServesPlaybackFirst() {
+        // 2026-11-02: the old POST /novel/player path is retired server-side (all
+        // eight api5/api3 domains return 200 + 0 bytes); the official client reads
+        // GET /reading/bookapi/video_tab/multi_video_model/v1/ with snake_case params
+        // (missing any returns 100103). A healthy video_tab answer must serve the
+        // playback WITHOUT touching the old POST path.
+        val requests=mutableListOf<Request>()
+        val repo=repository { request ->
+            requests+=request
+            if(request.url.encodedPath=="/reading/bookapi/video_tab/multi_video_model/v1/") {
+                // The endpoint's documented shape: data.video_model_data[id].video_model
+                // (object or JSON string), five-tier video_list, spade_a keys.
+                JSONObject().put("code",0).put("data",JSONObject()
+                    .put("video_model_data",JSONObject().put("123",JSONObject()
+                        .put("video_model",JSONObject().put("video_list",JSONObject()
+                            .put("v0",JSONObject().put("video_meta",JSONObject().put("vheight",720).put("codec_type","bytevc2")).put("main_url","https://example.com/vtab-720"))
+                            .put("v1",JSONObject().put("video_meta",JSONObject().put("vheight",1080).put("codec_type","bytevc1")).put("main_url","https://example.com/vtab-1080")))))))
+                    .toString()
+            }
+            else throw AssertionError("video_tab hit must not fall back to the old path: "+request.url)
+        }
+        val result=repo.stream("123",1080)
+        assertEquals("https://example.com/vtab-1080",result.url)
+        assertEquals("1080P",result.quality)
+        assertTrue(requests.none { it.url.encodedPath.startsWith("/novel/player/") })
+    }
+
+    @Test fun videoTabFailureFallsBackToOldPath() {
+        // Any video_tab failure (business code, empty body, shape mismatch, network
+        // error) falls back to the old POST flow; the old path's retry and identity
+        // semantics stay unchanged.
+        val requests=mutableListOf<Request>()
+        val repo=repository { request ->
+            requests+=request
+            if(request.url.encodedPath.startsWith("/reading/bookapi/video_tab/"))
+                """{"code":100103,"message":"PARAM_INVALID","data":null}"""
+            else if(request.url.encodedPath=="/novel/player/multi_video_model/v1/") {
+                val rows=JSONObject()
+                rows.put("video_0",JSONObject().put("video_meta",JSONObject().put("vheight",1080).put("codec_type","h264")).put("main_url","https://example.com/old-1080"))
+                JSONObject().put("code",0).put("data",JSONObject().put("video_model",JSONObject().put("video_list",rows))).toString()
+            }
+            else throw AssertionError("unexpected "+request.url)
+        }
+        val result=repo.stream("123",1080)
+        assertEquals("https://example.com/old-1080",result.url)
+        assertEquals("1080P",result.quality)
+        assertTrue(requests.any { it.url.encodedPath=="/reading/bookapi/video_tab/multi_video_model/v1/" })
+        assertTrue(requests.any { it.url.encodedPath=="/novel/player/multi_video_model/v1/" })
+    }
+
     @Test fun legacyMissingCodecLabelKeepsQualityLimit() {
         val repo=streamRepository(Triple(720,"","https://example.com/legacy"),Triple(1080,"bytevc1","https://example.com/hevc"))
         assertEquals("720P",repo.stream("123",720).quality)
@@ -60,15 +130,6 @@ class ContentRepositoryTest {
         val repo=streamRepository(Triple(1080,"bytevc1","https://example.com/hevc"),Triple(720,"h264","https://example.com/avc"))
         assertEquals("720P",repo.stream("123",1080).quality)
         assertEquals("https://example.com/avc",repo.stream("123",1080).url)
-    }
-
-    @Test fun videoModelStringIsAccepted() {
-        val repo=repository { request ->
-            val rows=JSONObject()
-            rows.put("video_0",JSONObject().put("video_meta",JSONObject().put("vheight",720).put("codec_type","h264")).put("main_url","https://example.com/avc"))
-            JSONObject().put("code",0).put("data",JSONObject().put("video_model",JSONObject().put("video_list",rows).toString())).toString()
-        }
-        assertEquals("720P",repo.stream("123",1080).quality)
     }
 
     @Test fun appRequestCarriesSignatureHeaders() {

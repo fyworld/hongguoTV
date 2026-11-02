@@ -23,6 +23,18 @@ import java.util.Locale
  * with the server-issued device_id/install_id in the query and the registration
  * cookies attached. No x-gorgon chain on the playback call itself.
  *
+ * 2026-11-02: the server retired the POST /novel/player path entirely - all eight
+ * api5/api3 domains return HTTP 200 + 0 bytes for every request variant (upstream
+ * probed official UA, full signature headers, empty body, no cookie, h2/h1.1,
+ * browser and curl fingerprints). The official client now reads
+ * GET /reading/bookapi/video_tab/multi_video_model/v1/ (found in its RpcOperation;
+ * params are GetVideoModelRequest's snake_case fields - missing any returns
+ * 100103 PARAM_INVALID). This source tries the video_tab endpoint first (single
+ * attempt, main domain); on any failure it falls back to the old POST flow, whose
+ * empty-response retry and identity semantics stay unchanged. Known limits: the
+ * new endpoint serves bytevc2 lows + bytevc1 1080P only (after the bytevc2 filter
+ * just 1080P remains) and takes one video_id per call.
+ *
  * Response shapes kept from the earlier migration:
  *  - request body: biz_param + mixed_video_id_map (slot key fixed "1004",
  *    video_platform fixed 1024; other values return code 100001)
@@ -45,6 +57,10 @@ internal class MultiVideoModelStreamSource(
     private val fallbackDomains = listOf("fqnovel.com", "snssdk.com")
 
     override fun stream(id: String, maxQuality: Int, type: ContentType): StreamInfo {
+        // Official client's current endpoint first (2026-11-02): the old POST path is
+        // retired server-side; video_tab serves the five-tier model on the same
+        // registered identity. Any failure falls through to the old flow below.
+        tabVideoModel(id, maxQuality)?.let { return it }
         val payload = JSONObject()
             .put("biz_param", JSONObject()
                 .put("detail_page_version", 0)
@@ -79,6 +95,54 @@ internal class MultiVideoModelStreamSource(
         model.keys().forEach { k -> merged.put(k, model.get(k)) }
         inner.keys().forEach { k -> merged.put(k, inner.get(k)) }
         return select(merged, maxQuality, seed)
+    }
+
+    /**
+     * The official client's current playback-model endpoint:
+     * GET /reading/bookapi/video_tab/multi_video_model/v1/ (2026-11-02).
+     *
+     * Single attempt on the main domain - the old POST flow below still has its own
+     * bounded retry, so re-trying here buys nothing. Any failure (non-zero code, empty
+     * body, unexpected shape, network error) returns null and the caller falls back;
+     * empty-response semantics stay owned by the old path.
+     */
+    private fun tabVideoModel(id: String, maxQuality: Int): StreamInfo? {
+        val extra = "&video_id=$id&video_id_type=0&device_level=1&need_all_video_definition=1" +
+            "&need_mp4_align=0&use_os_player=0&video_platform=1024&source=0&from_video_id="
+        return try {
+            val identity = session.profile(http)
+            val query = transport.encodeQuery(identity.values + mapOf("_rticket" to transport.clockMs().toString()))
+            val request = Request.Builder()
+                .url("${AppApiTransport.APP_BASE}$TAB_PATH?$query$extra")
+                .header("User-Agent", playbackUa)
+                .header("Accept", "application/json; charset=utf-8")
+                .apply { if (identity.cookie.isNotBlank()) header("Cookie", identity.cookie) }
+                .get()
+                .build()
+            val text = RequestScope.execute(http.newCall(request)) { response ->
+                if (!response.isSuccessful) throw IOException("video_tab HTTP ${response.code}")
+                response.body?.string().orEmpty()
+            }
+            val root = JSONObject(text)
+            if (root.optInt("code", root.optInt("Code", -1)) != 0) return null
+            val data = root.optJSONObject("data") ?: return null
+            val rows = data.optJSONObject("video_model_data") ?: data
+            val row = rows.optJSONObject(id)
+                ?: rows.keys().asSequence().mapNotNull { rows.optJSONObject(it) }.firstOrNull()
+                ?: return null
+            val raw = row.opt("video_model") ?: return null
+            val model = when (raw) {
+                is JSONObject -> raw
+                is String -> runCatching { JSONObject(raw) }.getOrNull()
+                else -> null
+            } ?: return null
+            if (!hasVideoList(model)) return null
+            select(model, maxQuality, null)
+        } catch (e: IOException) {
+            null
+        } catch (e: RuntimeException) {
+            null
+        }
     }
 
     /**
@@ -208,6 +272,9 @@ internal class MultiVideoModelStreamSource(
 
     companion object {
         const val PATH = "/novel/player/multi_video_model/v1/"
+
+        /** Official client's current playback-model path (2026-11-02 migration). */
+        const val TAB_PATH = "/reading/bookapi/video_tab/multi_video_model/v1/"
     }
 }
 
