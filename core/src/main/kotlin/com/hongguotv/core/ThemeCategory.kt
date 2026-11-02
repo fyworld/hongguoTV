@@ -13,11 +13,8 @@ import java.io.IOException
  * [feedThemeId] marks an App-feed-backed theme: the landpage feed accepts a numeric
  * category_dim_theme id (穿越=37) and paginates properly (the website search does
  * not — its ?page= is ignored and it only ever renders 10 rows).
- * [feedCategory] marks a locally-filtered feed theme: the AI channel ignores the
- * numeric theme filter, so its 穿越 walks the ai_series feed and keeps only the
- * rows whose category_schema carries the tag name.
  */
-data class Theme(val slug: String, val label: String, val searchKeyword: String? = null, val feedThemeId: String? = null, val feedCategory: String? = null)
+data class Theme(val slug: String, val label: String, val searchKeyword: String? = null, val feedThemeId: String? = null)
 
 /**
  * Parses the website's theme sub-category pages (/category/real-drama/{theme},
@@ -47,25 +44,40 @@ internal object ThemeCategory {
 
     /** Themes the site does not expose as category pages (2026-10): the official app
      *  offers 穿越 filtering, but the website selector list omits it. Routing per tab
-     *  (re-verified 2026-11-01 by probing the search + the dragon feed):
+     *  (re-verified 2026-11-02 by probing the search, the dragon feed and the AI
+     *  category page):
      *  - real-drama tab: the WEBSITE SEARCH for 穿越 (215 hits, true 10-row pagination,
      *    ~29/30 rows genre=205) — far more content than the feed channel and immune to
      *    the App-API risk control that kept cutting the feed loops short; rows are
      *    filtered locally to genre=205 so the tab stays real-drama-only.
      *  - comic tab: the landpage feed with category_dim_theme=37 (the search carries
      *    almost no comic rows — 1 in 30 — so the feed is the only usable source).
-     *  - AI tab: the ai_series feed with a local category_schema filter — the website
-     *    search carries NO AI dramas at all (probed 30 rows, zero genre=207), so the
-     *    feed is the only source; ~1 in 6 feed rows carries the tag. */
+     *  - AI tab: the WEBSITE CATEGORY PAGE /category/ai-drama/chuanyue (2026-11-02
+     *    probe: 25 items, true pagination). The site's own AI selector list omits 穿越
+     *    (the parsed strip never carried it — the old code's injected feedCategory
+     *    theme was the only 穿越 button), so a marker-less theme is injected here:
+     *    it falls through themeCatalog to the plain category-page route. The old
+     *    ai_series-feed local filter grew unusable: the feed's 穿越 density collapsed
+     *    (a 36-row round yields ~1 tagged row) while the feed channel itself stays
+     *    risk-control-sensitive. The category page is neither. */
     private val chuanyueSlug = "chuanyue"
     internal fun searchBacked(type: ContentType): List<Theme> = when(type) {
-        ContentType.AI -> listOf(Theme(chuanyueSlug,"穿越",feedCategory = "穿越"))
+        // Marker-less: the AI 穿越 category page exists, so the injected theme needs
+        // no routing marker — it walks /category/ai-drama/chuanyue like every other
+        // site theme. (The site's parsed AI strip omits 穿越, hence the injection.)
+        ContentType.AI -> listOf(Theme(chuanyueSlug,"穿越"))
         ContentType.COMIC -> listOf(Theme(chuanyueSlug,"穿越",feedThemeId = "37"))
         else -> listOf(Theme(chuanyueSlug,"穿越",searchKeyword = "穿越"))
     }
     /** Slugs that must never hit /category/{type}/{slug} (their category pages are 404s):
-     *  they route to the feed (feedThemeId) or the search (searchKeyword) instead. */
-    internal val searchBackedSlugs = setOf(chuanyueSlug)
+     *  they route to the feed (feedThemeId) or the search (searchKeyword) instead.
+     *  Per-type: the AI tab's 穿越 DOES have a category page, so it is not in the
+     *  AI set — only the real-drama and comic tabs divert their 穿越 away. */
+    internal fun searchBackedSlugs(type: ContentType): Set<String> = when(type) {
+        ContentType.AI -> emptySet()
+        ContentType.COMIC -> setOf(chuanyueSlug)
+        else -> setOf(chuanyueSlug)
+    }
 
     /** Prepends the search/feed-backed themes that a parsed site list is missing.
      *  穿越 leads the strip (right after 全部) instead of trailing 24 site themes:
