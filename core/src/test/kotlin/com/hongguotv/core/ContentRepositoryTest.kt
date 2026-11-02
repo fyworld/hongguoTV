@@ -133,8 +133,9 @@ class ContentRepositoryTest {
     }
 
     @Test fun appRequestCarriesSignatureHeaders() {
-        // The landpage feed still serves theme filtering (穿越 category_dim_theme=37),
-        // so its requests must carry the six-header signature chain.
+        // The landpage feed path (feedPage) must carry the six-header signature chain.
+        // No tab injects a feedThemeId theme anymore (穿越 retired 2026-11-02), but a
+        // stale Library-cached one still routes here — the mechanism must stay signed.
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
@@ -157,9 +158,9 @@ class ContentRepositoryTest {
 
     @Test fun feedRequestPinsTheRegistrationVersion73932() {
         // 2026-10-30: the server started returning empty bodies for the old 73532 pin
-        // (ai_series first - the AI tab's 穿越 theme went blank - then short_play).
-        // The feed must pin 73932, the version the device registers with, and the UA
-        // must follow (the signature chain binds UA to the query version_code).
+        // (ai_series first, then short_play). The feed must pin 73932, the version the
+        // device registers with, and the UA must follow (the signature chain binds UA
+        // to the query version_code). Stale feedThemeId themes still exercise this.
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
@@ -175,7 +176,7 @@ class ContentRepositoryTest {
         assertTrue(request.header("User-Agent")!!.startsWith("com.phoenix.read/73932 "))
     }
 
-    @Test fun aiFeedMidLoopEmptyRoundKeepsCollectedRows() {
+    @Test fun feedMidLoopEmptyRoundKeepsCollectedRows() {
         // 2026-10-31: risk control can answer ANY single fill-up round with HTTP 200 +
         // empty body. The feed's fill-up loop spans several rounds (the server may
         // return 5/14/23 rows per call) — a mid-loop empty round must keep the rows
@@ -196,7 +197,7 @@ class ContentRepositoryTest {
         assertTrue(round>=2) // the loop actually attempted a follow-up round
     }
 
-    @Test fun aiFeedFirstRoundEmptyStillThrows() {
+    @Test fun feedFirstRoundEmptyStillThrows() {
         // The fault tolerance must not mask a dead channel: an empty FIRST round means
         // the feed itself is unavailable and the error still propagates.
         val repo=repository { _ -> "" }
@@ -313,12 +314,13 @@ class ContentRepositoryTest {
     }
 
     @Test fun searchBackedThemeServesSearchResults() {
-        // A theme with an explicit searchKeyword (defensive routing path) serves the
-        // website search. The real-drama tab filters rows to genre=205 (comic 203 / AI
-        // 207 rows that leak into the search are dropped); the XHR endpoint paginates
-        // for real (10 rows/page with hasMore), so hasMore follows the endpoint's
-        // answer. The AI tab's 穿越 no longer carries a searchKeyword (2026-11-02: it
-        // walks its category page), so this defensive path belongs to the real tab.
+        // A theme with an explicit searchKeyword (stale-cache defensive routing path)
+        // serves the website search. The real-drama tab filters rows to genre=205
+        // (comic 203 / AI 207 rows that leak into the search are dropped); the XHR
+        // endpoint paginates for real (10 rows/page with hasMore), so hasMore follows
+        // the endpoint's answer. No tab injects a searchKeyword theme anymore
+        // (穿越 retired 2026-11-02), but Library's disk cache can still hand one
+        // over for up to 7 days after an upgrade.
         val repo=repository { request ->
             assertEquals("/api/search/result",request.url.encodedPath)
             assertEquals("穿越",request.url.queryParameter("query"))
@@ -333,35 +335,35 @@ class ContentRepositoryTest {
         assertFalse(real.hasMore)
     }
 
-    @Test fun aiChuanyueWalksTheWebsiteCategoryPage() {
-        // 2026-11-02: the AI tab's 穿越 moved to its website category page
-        // /category/ai-drama/chuanyue (live probe: 25 items, true pagination). The
-        // old ai_series-feed local filter grew unusable — the feed's 穿越 density
-        // collapsed (a 36-row round yields ~1 tagged row) while the channel stays
-        // risk-control-sensitive. The injected theme carries NO routing marker, so
-        // it falls through themeCatalog to the plain category-page route.
-        val requests=mutableListOf<Request>()
+    @Test fun noTabCarriesAChuanyueButton() {
+        // 2026-11-02 (user decision after the full-source diagnosis): the 穿越 theme
+        // is retired from EVERY tab. Background: real tab's search route worked but is
+        // retired along with the rest; the comic feed route is intermittently
+        // risk-controlled (18 rows one minute, empty the next — re-verified twice in
+        // 15 minutes); the AI tab has NO usable source at all (category page 404,
+        // search's full 108-row walk carries 0 genre=207 rows, ai_series feed
+        // IP-blocked). The strips show exactly what the site's selector lists carry.
         val repo=repository { request ->
-            requests+=request
             """<script>_ROUTER_DATA={"loaderData":{"category_$":{"isSuccess":true,
-                "recommendList":[
-                    {"series_id":"111","series_name":"AI穿越剧一","series_cover":"https:\\u002F\\u002Fexample.com\\u002Fa.jpg","episode_cnt":80},
-                    {"series_id":"222","series_name":"AI穿越剧二","series_cover":"https:\\u002F\\u002Fexample.com\\u002Fb.jpg","episode_cnt":60}],
-                "pagination":{"total":25,"pageNum":1,"pageSize":24,"totalPages":2}}}};</script>"""
+                "selectorList":[{"row_id":1,"items":[
+                    {"selector_item_id":"romance","show_name":"爱情"},
+                    {"selector_item_id":"period","show_name":"年代"},
+                    {"selector_item_id":"comeback","show_name":"逆袭"},
+                    {"selector_item_id":"legend","show_name":"传奇"}]}]}}}};</script>"""
         }
-        val page=repo.themeCatalog(ContentType.AI,Theme("chuanyue","穿越"),1)
-        assertEquals(listOf("111","222"),page.items.map { it.id })
-        assertEquals("AI穿越剧一",page.items.first().title)
-        assertTrue(page.hasMore)
-        assertEquals("/category/ai-drama/chuanyue",requests.single().url.encodedPath)
-        assertEquals("1",requests.single().url.queryParameter("page"))
+        for(type in listOf(ContentType.SHORT,ContentType.COMIC,ContentType.AI)) {
+            assertFalse("$type strip must not carry a 穿越 button",repo.themes(type).any { it.slug=="chuanyue" })
+            assertFalse("$type fallback must not carry 穿越",ThemeCategory.fallback(type).any { it.slug=="chuanyue" })
+        }
+        // The site's own themes still parse through.
+        assertEquals(listOf("romance","period","comeback","legend"),repo.themes(ContentType.SHORT).map { it.slug })
     }
 
     @Test fun comicFeedBackedChuanyueUsesTheLandpageThemeFilter() {
-        // 穿越 on the comic tab routes to the landpage feed with the numeric
-        // category_dim_theme id 37 — the search carries almost no comic rows (1 in 30
-        // probed), so the feed is the only usable source there. The real-drama tab
-        // moved to the website search (see realChuanyueWalksTheSearchWithGenreFilter).
+        // Stale-cache defensive route: a Library-cached comic 穿越 theme (feedThemeId
+        // 37, retired from the strip 2026-11-02) still walks the landpage feed with
+        // the numeric category_dim_theme filter — the mechanism must keep working for
+        // the disk cache's 7-day tail.
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
@@ -379,12 +381,10 @@ class ContentRepositoryTest {
     }
 
     @Test fun realChuanyueWalksTheSearchWithGenreFilter() {
-        // 2026-11-01: the real-drama 穿越 walks the website search (215 hits, true
-        // 10-row pagination — far beyond the feed channel, and immune to the App-API
-        // risk control). Rows are filtered to genre=205 so the tab stays real-drama
-        // only; comic (203) and AI (207) rows that leak into the search are dropped.
-        // 2026-11-02: one theme page merges 3 search pages (~27 filtered rows) so the
-        // grid matches the category pages' 24-row depth.
+        // Stale-cache defensive route: a Library-cached real-drama 穿越 theme
+        // (searchKeyword, retired from the strip 2026-11-02) still walks the website
+        // search with the genre=205 filter (comic 203 / AI 207 rows dropped) and the
+        // 3-page merge window (one theme page ≈ the category pages' 24-row depth).
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             if(request.url.encodedPath=="/api/search/result") {
@@ -465,8 +465,10 @@ class ContentRepositoryTest {
         } catch(e: IOException) { assertEquals("穿越数据结构已变化",e.message) }
     }
 
-    @Test fun themesAppendSearchBackedChuanyue() {
-        // The site's parsed theme list omits 穿越; themes() appends it either way.
+    @Test fun themesShowNoInjectedChuanyueOnAnyTab() {
+        // 2026-11-02: no tab's strip carries 穿越 anymore (retired after the
+        // full-source diagnosis — see noTabCarriesAChuanyueButton). themes() must
+        // return exactly what the site's selector list parses, nothing appended.
         val repo=repository { request ->
             """<script>_ROUTER_DATA={"loaderData":{"category_$":{"isSuccess":true,
                 "selectorList":[{"row_id":1,"items":[
@@ -475,62 +477,27 @@ class ContentRepositoryTest {
                     {"selector_item_id":"comeback","show_name":"逆袭"},
                     {"selector_item_id":"legend","show_name":"传奇"}]}]}}}};</script>"""
         }
-        val themes=repo.themes(ContentType.SHORT)
-        assertTrue(themes.any { it.slug=="chuanyue" && it.label=="穿越" })
-        // 穿越 leads the strip (a buried 26th button is effectively hidden on a TV
-        // remote); routing (2026-11-02): real tab -> website search (215 hits, true
-        // pagination); comic tab -> feed theme 37; AI tab -> its own website category
-        // page (no marker — the injected theme falls through to the category route).
-        assertEquals("穿越",themes.first { it.slug=="chuanyue" }.searchKeyword)
-        assertNull(themes.first { it.slug=="chuanyue" }.feedThemeId)
-        val comicThemes=repo.themes(ContentType.COMIC)
-        assertEquals("37",comicThemes.first { it.slug=="chuanyue" }.feedThemeId)
-        assertNull(comicThemes.first { it.slug=="chuanyue" }.searchKeyword)
-        val aiThemes=repo.themes(ContentType.AI)
-        assertTrue(aiThemes.any { it.slug=="chuanyue" })
-        // The AI 穿越 carries NO routing marker: /category/ai-drama/chuanyue exists
-        // (25 items, true pagination — probed 2026-11-02), so it routes like every
-        // plain site theme.
-        assertNull(aiThemes.first { it.slug=="chuanyue" }.searchKeyword)
-        assertNull(aiThemes.first { it.slug=="chuanyue" }.feedThemeId)
+        for(type in listOf(ContentType.SHORT,ContentType.COMIC,ContentType.AI))
+            assertFalse("$type strip must carry no injected 穿越",repo.themes(type).any { it.slug=="chuanyue" })
     }
 
-    @Test fun fallbackChuanyueRoutesToSearchNotCategory404() {
-        // Regression (v1.0.50): when themes() falls back to the built-in list, 穿越
-        // must still route away from /category/real-drama/chuanyue (a 404) —
-        // search-backed (genre 205) on the real tab, feed-backed (theme 37) on comic.
-        // The AI tab's 穿越 DOES have a category page (25 items, probed 2026-11-02),
-        // so its fallback theme carries no marker and walks the plain category route.
+    @Test fun staleChuanyueRoutesToSearchNotCategory404() {
+        // Defensive slug routing (kept after the 2026-11-02 穿越 retirement): a
+        // stale cached Theme WITHOUT any marker (Library disk cache, 7-day TTL)
+        // must never hit /category/real-drama/chuanyue (a 404) — it falls through
+        // to the search chain with the genre=205 filter.
         val repo=repository { request ->
             if(request.url.encodedPath=="/api/search/result")
                 """{"searchList":[
                     {"video_data":{"series_id":"111","series_title":"穿越剧","genre":205,"category_list":[{"category_id":"37","name":"穿越"}]}},
                     {"video_data":{"series_id":"333","series_title":"漫剧穿越","genre":203,"category_list":[{"category_id":"37","name":"穿越"}]}}
                 ],"totalCount":2,"hasMore":false}"""
-            else JSONObject().put("code",0).put("data",JSONObject()
-                .put("video_data",JSONArray().put(JSONObject()
-                    .put("series_id","111").put("title","穿越剧")))
-                .put("has_more",false).put("next_offset",18)).toString()
+            else throw AssertionError("stale 穿越 must not hit the category page: "+request.url)
         }
-        val fallbackThemes=ThemeCategory.fallback(ContentType.SHORT)
-        val chuanyue=fallbackThemes.first { it.slug=="chuanyue" }
-        assertNotNull("fallback must carry searchKeyword on the real tab",chuanyue.searchKeyword)
-        val page=repo.themeCatalog(ContentType.SHORT,chuanyue,1)
+        val stale=Theme("chuanyue","穿越")
+        val page=repo.themeCatalog(ContentType.SHORT,stale,1)
         // genre=203 rows (comic) are filtered out on the real-drama tab.
         assertEquals(listOf("111"),page.items.map { it.id })
-        // Defensive slug routing: even a stale Theme without any marker never hits
-        // the 404 category page — it falls through to the search chain.
-        val stale=Theme("chuanyue","穿越")
-        val page2=repo.themeCatalog(ContentType.SHORT,stale,1)
-        assertEquals(listOf("111"),page2.items.map { it.id })
-        val comicFallback=ThemeCategory.fallback(ContentType.COMIC).first { it.slug=="chuanyue" }
-        assertNotNull("comic fallback must carry feedThemeId",comicFallback.feedThemeId)
-        val aiFallback=ThemeCategory.fallback(ContentType.AI).first { it.slug=="chuanyue" }
-        // AI fallback: marker-less (its category page exists), so it must NOT be
-        // diverted by the defensive slug check — /category/ai-drama/chuanyue is live.
-        assertNull("AI fallback must be marker-less (its category page exists)",aiFallback.searchKeyword)
-        assertNull(aiFallback.feedThemeId)
-        assertFalse("AI fallback must not divert to the search chain",aiFallback.slug in ThemeCategory.searchBackedSlugs(ContentType.AI))
     }
 
     private fun repository(clock: () -> Long = System::currentTimeMillis, respond: (Request) -> String) = ContentRepository(

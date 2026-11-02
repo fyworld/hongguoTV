@@ -59,8 +59,11 @@ fun main(args: Array<String>) {
     }
     if(args.contains("--comicfeed")) {
         // Live verification: comic "全部" from the website category catalog (800
-        // entries, 34 pages), chuanyue via the landpage theme filter (real/comic)
-        // and via the locally-filtered ai_series feed (AI).
+        // entries, 34 pages) + the theme strips. The 穿越 theme is retired from
+        // every tab (2026-11-02: no stable source — comic feed intermittently
+        // risk-controlled, AI has no source at all), so the strips must carry
+        // exactly the site's own selector lists; the stale-cache defensive route
+        // (marker-less 穿越 -> search chain) must still work underneath.
         try {
             val home=repository.home(type=ContentType.COMIC)
             check(home.items.isNotEmpty())
@@ -75,32 +78,30 @@ fun main(args: Array<String>) {
             }
             for(type in listOf(ContentType.SHORT,ContentType.COMIC,ContentType.AI)) {
                 val themes=repository.themes(type)
-                val chuanyue=themes.first { it.slug=="chuanyue" }
-                val page=repository.themeCatalog(type,chuanyue)
-                val page2=repository.themeCatalog(type,chuanyue,2)
-                val fresh2=page2.items.filterNot { it.id in page.items.map { it.id }.toSet() }
-                println("${type.label}Chuanyue: p1=${page.items.size}; p2=${page2.items.size}; freshOnP2=${fresh2.size}; hasMore=${page.hasMore}/${page2.hasMore}; top3=${page.items.take(3).joinToString(" / ") { it.title }}")
+                check(themes.none { it.slug=="chuanyue" }) { "$type strip still carries 穿越" }
+                println("${type.label}Themes=${themes.size}; chuanyueAbsent=true; first=${themes.first().label}")
             }
+            // Stale-cache defensive route still works: a marker-less 穿越 theme
+            // routes to the search chain (never the 404 category page).
+            val stale=Theme("chuanyue","穿越")
+            val stalePage=repository.themeCatalog(ContentType.SHORT,stale)
+            println("staleChuanyueRoutesToSearch: items=${stalePage.items.size}; hasMore=${stalePage.hasMore}")
         } finally {
             repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
         }
         return
     }
     if(args.contains("--ai")) {
-        // Live verification of the AI feed channel + the search-backed 穿越 theme.
+        // Live verification of the AI tab: home grid + theme strip. The 穿越 theme
+        // is retired from every tab (2026-11-02), so this probe verifies its
+        // absence on the AI strip.
         try {
             val home=repository.home(type=ContentType.AI)
             check(home.items.isNotEmpty())
             println("aiHome=${home.items.size}; hasMore=${home.hasMore}; top5=${home.items.take(5).joinToString(" / ") { it.title }}")
             val themes=repository.themes(ContentType.AI)
-            println("aiThemes=${themes.size}; last=${themes.last().label}(${themes.last().slug})")
-            val chuanyue=themes.first { it.slug=="chuanyue" }
-            val page=repository.themeCatalog(ContentType.AI,chuanyue)
-            println("aiChuanyue=${page.items.size}; hasMore=${page.hasMore}; top5=${page.items.take(5).joinToString(" / ") { it.title }}")
-            val realThemes=repository.themes(ContentType.SHORT)
-            val realChuanyue=realThemes.first { it.slug=="chuanyue" }
-            val realPage=repository.themeCatalog(ContentType.SHORT,realChuanyue)
-            println("shortChuanyue=${realPage.items.size}; hasMore=${realPage.hasMore}; top5=${realPage.items.take(5).joinToString(" / ") { it.title }}")
+            check(themes.none { it.slug=="chuanyue" })
+            println("aiThemes=${themes.size}; chuanyueAbsent=true; last=${themes.last().label}(${themes.last().slug})")
         } finally {
             repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown()
         }

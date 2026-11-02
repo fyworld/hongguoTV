@@ -223,16 +223,11 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     }
 
     /** One theme's series page.
-     *  Routing (re-verified 2026-11-02): 穿越 splits three ways — real-drama tab:
-     *  website search + genre=205 filter (215 hits, true pagination, risk-control-free);
-     *  comic tab: landpage feed theme 37 (the search carries almost no comic rows);
-     *  AI tab: the website category page /category/ai-drama/chuanyue (25 items, true
-     *  pagination — the feed channel's 穿越 density collapsed and it stays
-     *  risk-control-sensitive). The AI 穿越 theme carries NO routing marker: its
-     *  category page exists, so it falls through to the plain category-page route
-     *  like every site theme. Other themes keep their website category pages. The
-     *  slug check is defensive: a stale cached Theme without any marker must still
-     *  route away from a 404 page. */
+     *  Routing (2026-11-02): the 穿越 theme is retired from every tab — no tab's
+     *  strip carries it anymore. The routing markers and the defensive slug check
+     *  stay for stale caches: a Library disk-cached 穿越 theme (7-day TTL) must
+     *  still route to the search chain instead of a 404 category page. Fresh themes
+     *  all walk their website category pages. */
     fun themeCatalog(type: ContentType, theme: Theme, page: Int = 1): CatalogPage {
         require(theme.slug.matches(Regex("[a-z0-9-]{1,40}")) && page in 1..100)
         if(theme.feedThemeId!=null && type!=ContentType.AI)

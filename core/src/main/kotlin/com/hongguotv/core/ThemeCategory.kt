@@ -26,8 +26,9 @@ data class Theme(val slug: String, val label: String, val searchKeyword: String?
  */
 internal object ThemeCategory {
     // Fallback theme lists (verified 2026-10): real-drama 24, comic-drama 8, ai-drama 8.
-    // 穿越 is NOT listed here: it is search-backed (searchBacked below) and must never
-    // appear as a plain category-page theme — /category/{type}/chuanyue is a 404.
+    // 穿越 is NOT listed here: retired from every tab on 2026-11-02 (no stable source
+    // — see searchBacked below), and it must never appear as a plain category-page
+    // theme — /category/{type}/chuanyue is a 404 on all three paths.
     private val fallbackReal = listOf(
         "romance" to "爱情", "period" to "年代", "comeback" to "逆袭", "legend" to "传奇",
         "growth" to "成长", "family" to "家庭", "clan" to "家族", "cute-kids" to "萌宝",
@@ -42,37 +43,26 @@ internal object ThemeCategory {
         "creative" to "脑洞", "fantasy" to "玄幻", "drama" to "剧情", "apocalypse" to "末世",
         "wealthy-family" to "豪门", "wonder" to "奇幻", "sci-fi" to "科幻", "adventure" to "冒险")
 
-    /** Themes the site does not expose as category pages (2026-10): the official app
-     *  offers 穿越 filtering, but the website selector list omits it. Routing per tab
-     *  (re-verified 2026-11-02 by probing the search, the dragon feed and the AI
-     *  category page):
-     *  - real-drama tab: the WEBSITE SEARCH for 穿越 (215 hits, true 10-row pagination,
-     *    ~29/30 rows genre=205) — far more content than the feed channel and immune to
-     *    the App-API risk control that kept cutting the feed loops short; rows are
-     *    filtered locally to genre=205 so the tab stays real-drama-only.
-     *  - comic tab: the landpage feed with category_dim_theme=37 (the search carries
-     *    almost no comic rows — 1 in 30 — so the feed is the only usable source).
-     *  - AI tab: the WEBSITE CATEGORY PAGE /category/ai-drama/chuanyue (2026-11-02
-     *    probe: 25 items, true pagination). The site's own AI selector list omits 穿越
-     *    (the parsed strip never carried it — the old code's injected feedCategory
-     *    theme was the only 穿越 button), so a marker-less theme is injected here:
-     *    it falls through themeCatalog to the plain category-page route. The old
-     *    ai_series-feed local filter grew unusable: the feed's 穿越 density collapsed
-     *    (a 36-row round yields ~1 tagged row) while the feed channel itself stays
-     *    risk-control-sensitive. The category page is neither. */
+    /** 2026-11-02: the 穿越 theme is RETIRED from every tab (user decision after the
+     *  full-source diagnosis). Background for the record:
+     *  - real-drama tab: the website search served it (215 hits, genre=205 filter,
+     *    true pagination) — worked, but retired along with the rest.
+     *  - comic tab: the landpage feed with category_dim_theme=37 — intermittently
+     *    risk-controlled (18 pure rows one minute, empty body the next; re-verified
+     *    twice within 15 minutes on 2026-11-02).
+     *  - AI tab: NO usable source at all — /category/ai-drama/chuanyue is a 404,
+     *    the search's full 108-row walk for 穿越 carries ZERO genre=207 rows, and
+     *    the ai_series feed channel is IP-risk-controlled to empty bodies.
+     *  No theme is injected on any tab; the strip shows exactly what the site's own
+     *  selector list carries. The routing markers and the defensive slug check
+     *  below stay: stale cached 穿越 themes (Library disk cache, 7-day TTL) must
+     *  still route to the search instead of a 404 category page. */
     private val chuanyueSlug = "chuanyue"
-    internal fun searchBacked(type: ContentType): List<Theme> = when(type) {
-        // Marker-less: the AI 穿越 category page exists, so the injected theme needs
-        // no routing marker — it walks /category/ai-drama/chuanyue like every other
-        // site theme. (The site's parsed AI strip omits 穿越, hence the injection.)
-        ContentType.AI -> listOf(Theme(chuanyueSlug,"穿越"))
-        ContentType.COMIC -> listOf(Theme(chuanyueSlug,"穿越",feedThemeId = "37"))
-        else -> listOf(Theme(chuanyueSlug,"穿越",searchKeyword = "穿越"))
-    }
+    internal fun searchBacked(@Suppress("UNUSED_PARAMETER") type: ContentType): List<Theme> = emptyList()
     /** Slugs that must never hit /category/{type}/{slug} (their category pages are 404s):
-     *  they route to the feed (feedThemeId) or the search (searchKeyword) instead.
-     *  Per-type: the AI tab's 穿越 DOES have a category page, so it is not in the
-     *  AI set — only the real-drama and comic tabs divert their 穿越 away. */
+     *  defensive routing for stale cached themes — they divert to the search chain.
+     *  No tab injects 穿越 anymore (2026-11-02), but Library's disk cache can still
+     *  hand a stale one to themeCatalog for up to 7 days after an upgrade. */
     internal fun searchBackedSlugs(type: ContentType): Set<String> = when(type) {
         ContentType.AI -> emptySet()
         ContentType.COMIC -> setOf(chuanyueSlug)
