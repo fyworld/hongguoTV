@@ -3,6 +3,7 @@
 // GPL-3.0-only. See kotlin-tv/NOTICE.md.
 package com.hongguotv.core
 
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -46,6 +47,8 @@ internal class MultiVideoModelStreamSource(
     private val transport: AppApiTransport,
     private val http: OkHttpClient,
     private val session: PlaybackDeviceSession = PlaybackDeviceSession.shared,
+    /** Retry backoff injection point (tests pass a no-op so empty rounds stay instant). */
+    private val sleep: (Long) -> Unit = Thread::sleep,
 ) : StreamSource {
     override val name = "multi-video-model"
 
@@ -56,11 +59,24 @@ internal class MultiVideoModelStreamSource(
     /** Fallback_api hosts are pinned to the vendor's own domains (upstream keeps the same guard). */
     private val fallbackDomains = listOf("fqnovel.com", "snssdk.com")
 
+    // 空响应身份屏蔽自愈状态（2026-11-01 事件实测：屏蔽按设备身份生效，换域名与新连接
+    // 无法逃逸，全新身份即时恢复）。连续整轮空响应达到阈值时轮换一次身份；任何一次成功
+    // 即复位。本类实例与 ContentRepository 同生命周期（主播放链单实例存活），prefetch
+    // 用的短命 ContentRepository 自带独立实例，计数互不串扰。
+    private val identityLock = Any()
+    private var emptyRounds = 0
+    private var rotatedThisPeriod = false
+
     override fun stream(id: String, maxQuality: Int, type: ContentType): StreamInfo {
         // Official client's current endpoint first (2026-11-02): the old POST path is
         // retired server-side; video_tab serves the five-tier model on the same
         // registered identity. Any failure falls through to the old flow below.
-        tabVideoModel(id, maxQuality)?.let { return it }
+        tabVideoModel(id, maxQuality)?.let {
+            // Any success (tab included) proves the identity works - reset the
+            // empty-round state so a later incident starts counting fresh.
+            resetIdentityHealing()
+            return it
+        }
         val payload = JSONObject()
             .put("biz_param", JSONObject()
                 .put("detail_page_version", 0)
@@ -73,11 +89,23 @@ internal class MultiVideoModelStreamSource(
                 .put("video_platform", 1024))
             .put("mixed_video_id_map", JSONObject().put("1004", JSONArray().put(id)))
         val body = payload.toString().toByteArray(Charsets.UTF_8)
+        // Identity-blocklist self-healing (upstream b597f28, 2026-11-01 event probes:
+        // empty responses block per device identity - no host or connection escape,
+        // a fresh identity recovers instantly): after two consecutive fully-empty
+        // rounds, rotate the anonymous identity once before this round.
+        maybeRotateIdentity()
         // Registered identity: server-issued device_id/install_id + registration cookies.
         val identity = session.profile(http)
         val query = transport.encodeQuery(identity.values + mapOf("_rticket" to transport.clockMs().toString()))
         val url = "${AppApiTransport.APP_BASE}$PATH?$query"
-        val data = requestPlayback(url, body, identity.cookie)
+        val data = try {
+            requestPlayback(url, body, identity.cookie)
+        } catch (error: EmptyPlaybackResponseException) {
+            // A fully-empty round counts toward rotation; tag the error once this
+            // failure period has rotated (screenshot shows "已换身份仍失败").
+            throw if (noteEmptyRound()) EmptyPlaybackResponseException("rotated=1") else error
+        }
+        resetIdentityHealing()
         val map = data.optJSONObject("data") ?: throw IOException("播放信息为空")
         val model = resolveModel(map, id)
         if (hasVideoList(model)) return select(model, maxQuality, null)
@@ -88,13 +116,42 @@ internal class MultiVideoModelStreamSource(
         val info = outer.optJSONObject("video_info")
         val inner = info?.optJSONObject("data") ?: outer.optJSONObject("data")
             ?: throw IOException("红果 App 接口未返回本集片源模型")
-        val seed = inner.str("key_seed").takeIf { it.isNotEmpty() }?.let { s ->
-            runCatching { decode64(s) }.getOrNull() ?: throw IOException("红果 App 媒体地址密钥无效")
-        }
+        // ByteVC2-compat model (upstream 265472f, issue #56): when EVERY offered variant
+        // is bytevc2/bvc2 (TV decoders can't handle them), re-request the same fallback
+        // URL with codec_type=0 + force_codec=h264 once - the official player's compat
+        // path. The params don't guarantee h264 (issue #56 actually returned hvc1), so
+        // selection below still judges by the actual codec labels.
         val merged = JSONObject()
         model.keys().forEach { k -> merged.put(k, model.get(k)) }
-        inner.keys().forEach { k -> merged.put(k, inner.get(k)) }
+        val compatInner = bytevc2CompatModel(inner, fallback)
+        val source = compatInner ?: inner
+        val seed = source.str("key_seed").takeIf { it.isNotEmpty() }?.let { s ->
+            runCatching { decode64(s) }.getOrNull() ?: throw IOException("红果 App 媒体地址密钥无效")
+        }
+        source.keys().forEach { k -> merged.put(k, source.get(k)) }
         return select(merged, maxQuality, seed)
+    }
+
+    /**
+     * All-bytevc2 fallback compat request (upstream 265472f): returns the compat
+     * model's data object when every offered variant is bytevc2/bvc2, else null
+     * (keep the original). At most one extra request, no retry loop.
+     */
+    private fun bytevc2CompatModel(inner: JSONObject, fallback: String): JSONObject? {
+        val videoList = inner.optJSONObject("video_list") ?: return null
+        val offered = videoList.keys().asSequence().mapNotNull { videoList.optJSONObject(it) }.toList()
+        if (offered.isEmpty()) return null
+        if (!offered.all {
+                it.str("main_url").isNotBlank() &&
+                    it.str("codec_type").lowercase(Locale.ROOT) in setOf("bytevc2", "bvc2")
+            }) return null
+        val compatible = fallback.toHttpUrl().newBuilder()
+            .setQueryParameter("codec_type", "0")
+            .setQueryParameter("force_codec", "h264")
+            .build().toString()
+        val outer = fallbackJson(compatible)
+        return outer.optJSONObject("video_info")?.optJSONObject("data")
+            ?: outer.optJSONObject("data")
     }
 
     /**
@@ -146,6 +203,39 @@ internal class MultiVideoModelStreamSource(
     }
 
     /**
+     * Rotate the anonymous identity once per failure period: after two consecutive
+     * fully-empty rounds (each round = 3 attempts across the retry loop below, so
+     * two rounds ≈ 8 requests over ~25s in upstream terms) and before the next
+     * round starts. Whether the re-registration succeeds or not, this failure
+     * period never rotates again; any success resets the whole state.
+     */
+    private fun maybeRotateIdentity() {
+        val shouldRotate = synchronized(identityLock) {
+            emptyRounds >= IDENTITY_ROTATE_ROUNDS && !rotatedThisPeriod
+        }
+        if (!shouldRotate) return
+        // Network I/O outside the lock; success or failure, this period is done rotating.
+        session.rotate(http)
+        synchronized(identityLock) { rotatedThisPeriod = true }
+    }
+
+    /** One more fully-empty round: returns true when this period has already rotated. */
+    private fun noteEmptyRound(): Boolean {
+        synchronized(identityLock) {
+            emptyRounds += 1
+            return rotatedThisPeriod
+        }
+    }
+
+    /** Any playback success (tab or POST path) resets the healing state. */
+    private fun resetIdentityHealing() {
+        synchronized(identityLock) {
+            emptyRounds = 0
+            rotatedThisPeriod = false
+        }
+    }
+
+    /**
      * The playback call: registered query + cookies, no signature chain. Empty bodies
      * are the server's "device not recognized" answer - retry a bounded number of
      * times with a fresh _rticket before surfacing the error (upstream does the same).
@@ -175,7 +265,7 @@ internal class MultiVideoModelStreamSource(
                 }
             } catch (e: EmptyPlaybackResponseException) {
                 lastError = e
-                if (attempt < 2) Thread.sleep(700L * (attempt + 1))
+                if (attempt < 2) sleep(700L * (attempt + 1))
             } catch (e: IOException) {
                 // Transient network blips get one retry; everything else surfaces now.
                 val transient = e is java.net.SocketTimeoutException || e is java.net.SocketException
@@ -275,7 +365,11 @@ internal class MultiVideoModelStreamSource(
 
         /** Official client's current playback-model path (2026-11-02 migration). */
         const val TAB_PATH = "/reading/bookapi/video_tab/multi_video_model/v1/"
+
+        /** Consecutive fully-empty rounds before one identity rotation (upstream b597f28). */
+        internal const val IDENTITY_ROTATE_ROUNDS = 2
     }
 }
 
-internal class EmptyPlaybackResponseException : IOException("播放接口暂时返回空响应，请稍后重试")
+internal class EmptyPlaybackResponseException(val detail: String? = null) :
+    IOException("播放接口暂时返回空响应，请稍后重试" + (if (detail != null) "（$detail）" else ""))

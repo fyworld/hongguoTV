@@ -57,7 +57,7 @@ class PlaybackDeviceSession(
 
     internal data class Profile(val values: Map<String, String>, val cookie: String)
 
-    private val cdid = UUID.randomUUID().toString()
+    private var cdid = UUID.randomUUID().toString()
     private var ready: Profile? = null
 
     @Synchronized
@@ -66,6 +66,34 @@ class PlaybackDeviceSession(
             return it
         }
         if (Thread.currentThread().isInterrupted) throw InterruptedIOException("播放请求已取消")
+        return toProfile(registerDevice(http)).also { ready = it }
+    }
+
+    /**
+     * 空响应身份屏蔽自愈（2026-11-01 事件实测：屏蔽按设备身份生效，换域名与新连接无法逃逸，
+     * 全新身份即时恢复）：立即重新注册一次匿名设备。成功则替换内存身份（cdid 一并换新）并返回
+     * true；注册失败、中断或结果非法保留原身份返回 false。沿用同一注册流程，不做指纹伪造；
+     * 频次由调用方约束（同一连续失败期至多一次）。
+     */
+    @Synchronized
+    internal fun rotate(http: OkHttpClient): Boolean {
+        if (Thread.currentThread().isInterrupted) return false
+        val device =
+            try {
+                register(http) ?: return false
+            } catch (error: InterruptedIOException) {
+                Thread.currentThread().interrupt()
+                return false
+            } catch (error: IOException) {
+                return false
+            }
+        if (!validDevice(device)) return false
+        cdid = UUID.randomUUID().toString()
+        ready = toProfile(device)
+        return true
+    }
+
+    private fun registerDevice(http: OkHttpClient): DeviceRegister.Registered {
         val device =
             try {
                 register(http) ?: throw PlaybackDeviceRegistrationException()
@@ -74,24 +102,29 @@ class PlaybackDeviceSession(
             } catch (error: IOException) {
                 throw PlaybackDeviceRegistrationException(error)
             }
-        val validId = Regex("[1-9][0-9]{0,29}")
-        if (!validId.matches(device.deviceId) || !validId.matches(device.installId))
-            throw PlaybackDeviceRegistrationException()
+        if (!validDevice(device)) throw PlaybackDeviceRegistrationException()
         if (Thread.currentThread().isInterrupted) throw InterruptedIOException("播放请求已取消")
-        return Profile(
-                VendorConstants.device +
-                    mapOf(
-                        "device_id" to device.deviceId,
-                        "iid" to device.installId,
-                        "cdid" to cdid,
-                    ),
-                device.cookies
-                    .filterKeys {
-                        it in setOf("install_id", "ttreq", "store-region", "store-region-src")
-                    }
-                    .entries
-                    .joinToString("; ") { (name, value) -> "$name=$value" },
-            )
-            .also { ready = it }
+        return device
     }
+
+    private fun validDevice(device: DeviceRegister.Registered) =
+        validId.matches(device.deviceId) && validId.matches(device.installId)
+
+    private fun toProfile(device: DeviceRegister.Registered): Profile =
+        Profile(
+            VendorConstants.device +
+                mapOf(
+                    "device_id" to device.deviceId,
+                    "iid" to device.installId,
+                    "cdid" to cdid,
+                ),
+            device.cookies
+                .filterKeys {
+                    it in setOf("install_id", "ttreq", "store-region", "store-region-src")
+                }
+                .entries
+                .joinToString("; ") { (name, value) -> "$name=$value" },
+        )
 }
+
+private val validId = Regex("[1-9][0-9]{0,29}")

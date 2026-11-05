@@ -11,7 +11,7 @@ import java.util.concurrent.TimeUnit
  */
 class StreamLiveProbeTest {
     @org.junit.Test
-    @org.junit.Ignore("live probe - run explicitly when needed (shares device id, trips rate limits in the full suite)")
+    @org.junit.Ignore("hits the live API - run manually only")
     fun probe() {
         val http = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
         val transport = AppApiTransport(http)
