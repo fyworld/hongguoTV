@@ -149,7 +149,12 @@ internal class AppApiTransport(
             if (!response.isSuccessful) throw IOException("App 接口请求失败（HTTP ${response.code}）")
             val text = response.body?.string() ?: throw IOException("App 接口响应为空")
             if (text.isEmpty()) throw IOException("App 接口返回空数据")
-            val data = JSONObject(text)
+            // 2026-11-05 event: some networks got a non-empty, non-JSON body (risk-control
+            // HTML). JSONException is a RuntimeException - wrap it so the channel loop
+            // and the app see an IOException with a user-facing message instead.
+            val data = try { JSONObject(text) } catch (e: org.json.JSONException) {
+                throw IOException("App 接口返回了无法解析的内容", e)
+            }
             val code = data.optInt("code", data.optInt("Code", 0))
             if (code != 0) throw IOException("App 接口暂不可用（$code）")
             data

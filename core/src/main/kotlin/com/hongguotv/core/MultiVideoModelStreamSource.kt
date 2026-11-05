@@ -258,7 +258,12 @@ internal class MultiVideoModelStreamSource(
                     if (!response.isSuccessful) throw IOException("播放接口请求失败（HTTP ${response.code}）")
                     val text = response.body?.string() ?: throw IOException("播放接口响应为空")
                     if (text.isBlank()) throw EmptyPlaybackResponseException()
-                    val data = JSONObject(text)
+                    // 2026-11-05 event: non-empty non-JSON bodies (risk-control HTML) on
+                    // some networks - wrap the parse failure so the channel loop sees an
+                    // IOException instead of an escaping JSONException.
+                    val data = try { JSONObject(text) } catch (e: org.json.JSONException) {
+                        throw IOException("播放接口返回了无法解析的内容", e)
+                    }
                     val code = data.optInt("code", data.optInt("Code", 0))
                     if (code != 0) throw IOException("播放接口暂不可用（$code）")
                     data
@@ -314,7 +319,9 @@ internal class MultiVideoModelStreamSource(
             if (!response.isSuccessful) throw IOException("红果片源接口 HTTP ${response.code}")
             val text = response.body?.string() ?: throw IOException("红果片源接口返回空正文")
             if (text.isEmpty()) throw IOException("红果片源接口返回空正文")
-            JSONObject(text)
+            try { JSONObject(text) } catch (e: org.json.JSONException) {
+                throw IOException("红果片源接口返回了无法解析的内容", e)
+            }
         }
     }
 

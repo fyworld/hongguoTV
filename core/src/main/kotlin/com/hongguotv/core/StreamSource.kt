@@ -40,6 +40,12 @@ interface StreamSource {
 /**
  * Runs the fallback chain: first channel that resolves wins; failures are logged and
  * skipped. Throws the last channel's error when everything fails.
+ *
+ * 2026-11-05: also catches RuntimeException. The 2026-11-05 server event returned
+ * non-empty, non-JSON bodies (risk-control HTML) on some networks - JSONObject(text)
+ * threw JSONException, a RuntimeException that used to escape this loop and kill the
+ * whole chain before later channels (public MP4) could run. Parse failures are
+ * channel failures, not app crashes.
  */
 internal class StreamScheduler(private val sources: List<StreamSource>) {
     private val log = java.util.logging.Logger.getLogger("com.hongguotv.core.stream")
@@ -52,6 +58,9 @@ internal class StreamScheduler(private val sources: List<StreamSource>) {
             } catch (e: IOException) {
                 last = e
                 log.warning("channel ${source.name} failed for $id: $e")
+            } catch (e: RuntimeException) {
+                last = IOException("播放通道 ${source.name} 返回了无法解析的内容", e)
+                log.warning("channel ${source.name} parse failure for $id: $e")
             }
         }
         throw last ?: IOException("没有可用的播放通道")
