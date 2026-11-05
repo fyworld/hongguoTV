@@ -1981,6 +1981,18 @@ class MainActivity: Activity() {
         val decoding=problem is PlaybackException && problem.errorCode in 3000..4999
         val retryable=if(problem is PlaybackException) problem.errorCode in 2000..2999 || problem.errorCode==PlaybackException.ERROR_CODE_TIMEOUT else problem is java.io.IOException
         playbackText.text=if(decoding) "电视无法解码当前视频，可尝试更低清晰度。" else "播放失败，可重试或切换清晰度。"
+        // Structured diagnostic line (upstream 2026-11-01 design): model / Android /
+        // app version / recovery count / error category. A screenshot of this line
+        // pinpoints the failure stage - the generic message above folds everything.
+        val category=when {
+            problem is PlaybackException -> "exo=${problem.errorCodeName}"
+            problem.message?.contains("空响应")==true -> "empty${problem.message?.substringAfter("（")?.substringBefore("）")?.let { " $it" } ?: ""}"
+            problem.message?.contains("注册失败")==true -> "register"
+            else -> problem.javaClass.simpleName
+        }
+        val diag="${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE} · v${BuildConfig.VERSION_NAME} · 恢复 ${recovery.attempts}/3 · $category"
+        controls.addView(text(diag,12f,muted).apply { setPadding(0,dp(6),0,dp(2)) })
+        android.util.Log.w("HongguoTV","Playback failure: ${problem.javaClass.simpleName}"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else "")+" [$diag]")
         val actions=row(); controls.addView(actions)
         addButton(actions,"立即重试") { playEpisode(episodeIndex,retryPosition,retryAutoplay) }.requestFocus()
         addButton(actions,"尝试 720P") { library.maxQuality=720; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
