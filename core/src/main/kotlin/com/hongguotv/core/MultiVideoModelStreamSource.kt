@@ -95,11 +95,15 @@ internal class MultiVideoModelStreamSource(
         // rounds, rotate the anonymous identity once before this round.
         maybeRotateIdentity()
         // Registered identity: server-issued device_id/install_id + registration cookies.
+        // Signed playback (2026-11-05 event): the server now REQUIRES the six-header
+        // chain (x-gorgon/x-khronos/x-ladon/x-argus/x-helios/x-medusa) on playback
+        // calls - UA+Cookie-only requests get HTTP 200 + empty body, while the same
+        // request signed returns full data (differential probe verified: 0B unsigned
+        // vs 17.5KB signed on the same episode). The danmaku endpoint has used this
+        // chain all along, which is why it kept working through the event.
         val identity = session.profile(http)
-        val query = transport.encodeQuery(identity.values + mapOf("_rticket" to transport.clockMs().toString()))
-        val url = "${AppApiTransport.APP_BASE}$PATH?$query"
         val data = try {
-            requestPlayback(url, body, identity.cookie)
+            requestPlayback(payload.toString(), identity)
         } catch (error: EmptyPlaybackResponseException) {
             // A fully-empty round counts toward rotation; tag the error once this
             // failure period has rotated (screenshot shows "已换身份仍失败").
@@ -162,18 +166,29 @@ internal class MultiVideoModelStreamSource(
      * bounded retry, so re-trying here buys nothing. Any failure (non-zero code, empty
      * body, unexpected shape, network error) returns null and the caller falls back;
      * empty-response semantics stay owned by the old path.
+     *
+     * 2026-11-05: signed with the six-header chain (same event as the POST path) -
+     * the unsigned GET started returning empty bodies while the same request signed
+     * returns full data.
      */
     private fun tabVideoModel(id: String, maxQuality: Int): StreamInfo? {
-        val extra = "&video_id=$id&video_id_type=0&device_level=1&need_all_video_definition=1" +
-            "&need_mp4_align=0&use_os_player=0&video_platform=1024&source=0&from_video_id="
+        val identity = session.profile(http)
+        val extra = mapOf(
+            "video_id" to id, "video_id_type" to "0", "device_level" to "1",
+            "need_all_video_definition" to "1", "need_mp4_align" to "0",
+            "use_os_player" to "0", "video_platform" to "1024", "source" to "0",
+            "from_video_id" to "")
         return try {
-            val identity = session.profile(http)
-            val query = transport.encodeQuery(identity.values + mapOf("_rticket" to transport.clockMs().toString()))
-            val request = Request.Builder()
-                .url("${AppApiTransport.APP_BASE}$TAB_PATH?$query$extra")
-                .header("User-Agent", playbackUa)
-                .header("Accept", "application/json; charset=utf-8")
-                .apply { if (identity.cookie.isNotBlank()) header("Cookie", identity.cookie) }
+            // signPlayback builds base + "?" + encoded query itself (fresh _rticket,
+            // branch-1 avoidance); the six headers ride on the returned Request.
+            val signed = transport.sign(
+                "${AppApiTransport.APP_BASE}$TAB_PATH", identity.values + extra, null, playbackUa)
+            val request = okhttp3.Request.Builder()
+                .url(signed.url)
+                .apply {
+                    signed.headers.forEach { (k, v) -> header(k, v) }
+                    if (identity.cookie.isNotBlank()) header("Cookie", identity.cookie)
+                }
                 .get()
                 .build()
             val text = RequestScope.execute(http.newCall(request)) { response ->
@@ -236,40 +251,22 @@ internal class MultiVideoModelStreamSource(
     }
 
     /**
-     * The playback call: registered query + cookies, no signature chain. Empty bodies
-     * are the server's "device not recognized" answer - retry a bounded number of
-     * times with a fresh _rticket before surfacing the error (upstream does the same).
+     * The legacy playback call (signed, 2026-11-05): registered identity + six-header
+     * signature chain. Empty bodies are the server's "device not recognized / request
+     * shape rejected" answer - retry a bounded number of times with a fresh signature
+     * before surfacing the error.
      */
-    private fun requestPlayback(url: String, body: ByteArray, cookie: String): JSONObject {
+    private fun requestPlayback(payload: String, identity: PlaybackDeviceSession.Profile): JSONObject {
         var lastError: IOException? = null
         for (attempt in 0..2) {
-            val freshUrl = if (attempt == 0) url
-                else url.substringBefore("?") + "?" + transport.encodeQuery(
-                    transport.parseQuery(url) + mapOf("_rticket" to transport.clockMs().toString()))
             try {
-                val request = Request.Builder().url(freshUrl)
-                    .header("User-Agent", playbackUa)
-                    .header("Accept", "application/json; charset=utf-8,application/x-protobuf")
-                    .header("Content-Type", "application/json; charset=utf-8")
-                    .apply { if (cookie.isNotBlank()) header("Cookie", cookie) }
-                    .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
-                    .build()
-                return RequestScope.execute(http.newCall(request)) { response ->
-                    if (!response.isSuccessful) throw IOException("播放接口请求失败（HTTP ${response.code}）")
-                    val text = response.body?.string() ?: throw IOException("播放接口响应为空")
-                    if (text.isBlank()) throw EmptyPlaybackResponseException()
-                    // 2026-11-05 event: non-empty non-JSON bodies (risk-control HTML) on
-                    // some networks - wrap the parse failure so the channel loop sees an
-                    // IOException instead of an escaping JSONException.
-                    val data = try { JSONObject(text) } catch (e: org.json.JSONException) {
-                        throw IOException("播放接口返回了无法解析的内容", e)
-                    }
-                    val code = data.optInt("code", data.optInt("Code", 0))
-                    if (code != 0) throw IOException("播放接口暂不可用（$code）")
-                    data
-                }
+                // Each attempt signs fresh (new _rticket + timestamp-bound headers).
+                return transport.request(PATH, payload, signed = true, identity = identity, ua = playbackUa)
             } catch (e: EmptyPlaybackResponseException) {
                 lastError = e
+                if (attempt < 2) sleep(700L * (attempt + 1))
+            } catch (e: AppApiEmptyResponseException) {
+                lastError = EmptyPlaybackResponseException()
                 if (attempt < 2) sleep(700L * (attempt + 1))
             } catch (e: IOException) {
                 // Transient network blips get one retry; everything else surfaces now.

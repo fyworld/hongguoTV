@@ -98,6 +98,22 @@ internal class AppApiTransport(
         "_rticket" to clock().toString())
 
     /**
+     * Six-header signature for playback channels (2026-11-05 event): the server now
+     * requires the full signature chain on playback calls - unsigned requests get
+     * HTTP 200 + empty body while the same request signed returns full data. The
+     * danmaku endpoint has used this chain all along (which is why it survived the
+     * event). Returns the signed URL + headers; the caller sends it however it
+     * needs (GET for video_tab, POST for the legacy path).
+     */
+    fun sign(base: String, values: Map<String, String>, body: ByteArray?, ua: String): Signer.Request {
+        val pinned = values.toMutableMap().apply {
+            for (k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) this[k] = "73932"
+            this["version_name"] = "7.3.9.32"
+        }
+        return signer.signPlayback(base, pinned, body, ua)
+    }
+
+    /**
      * One App API call. [signed]=true adds the full six-header signature chain
      * (x-gorgon/x-khronos/x-ladon/x-argus/x-helios/x-medusa) - the lightweight
      * X-Khronos/X-Gorgon pair was retired server-side along with the playback
@@ -148,7 +164,7 @@ internal class AppApiTransport(
         return RequestScope.execute(http.newCall(builder.build())) { response ->
             if (!response.isSuccessful) throw IOException("App 接口请求失败（HTTP ${response.code}）")
             val text = response.body?.string() ?: throw IOException("App 接口响应为空")
-            if (text.isEmpty()) throw IOException("App 接口返回空数据")
+            if (text.isEmpty()) throw AppApiEmptyResponseException()
             // 2026-11-05 event: some networks got a non-empty, non-JSON body (risk-control
             // HTML). JSONException is a RuntimeException - wrap it so the channel loop
             // and the app see an IOException with a user-facing message instead.
@@ -165,3 +181,6 @@ internal class AppApiTransport(
         const val APP_BASE = "https://api5-normal-sinfonlineb.fqnovel.com"
     }
 }
+
+/** Typed empty response from the App API (risk-control shape: HTTP 200 + 0 bytes). */
+internal class AppApiEmptyResponseException : IOException("App 接口暂时返回空响应，请稍后重试")
