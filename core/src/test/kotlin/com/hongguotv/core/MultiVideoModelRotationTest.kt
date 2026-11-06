@@ -1,6 +1,7 @@
 package com.hongguotv.core
 
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
@@ -66,8 +67,10 @@ class MultiVideoModelRotationTest {
     fun successfulPlaybackResetsIdentityRotationStateForTheNextIncident() {
         val registrations = AtomicInteger()
         val session = PlaybackDeviceSession { registrations.incrementAndGet(); DeviceRegister.Registered("333", "444") }
-        // Tab recovers on the 3rd stream() call (identity unblocked), then blocked again.
-        val tabCalls = AtomicInteger()
+        // The tab endpoint serves the ROTATED identity once (registrations==2, first
+        // tab call after rotation), then blocks again - modeling the upstream finding
+        // that a fresh identity recovers instantly but can be re-blocked later.
+        val recoveredOnce = AtomicBoolean(false)
         val http = OkHttpClient.Builder()
             .addInterceptor { chain ->
                 val request = chain.request()
@@ -75,8 +78,10 @@ class MultiVideoModelRotationTest {
                 when {
                     path == "/service/2/device_register/" ->
                         respond(request, """{"device_id":"333","install_id":"444"}""", setCookie = true)
-                    path == MultiVideoModelStreamSource.TAB_PATH ->
-                        respond(request, if (tabCalls.incrementAndGet() == 3) tabModel() else "")
+                    path == MultiVideoModelStreamSource.TAB_PATH -> {
+                        val fresh = registrations.get() == 2 && recoveredOnce.compareAndSet(false, true)
+                        respond(request, if (fresh) tabModel() else "")
+                    }
                     else -> respond(request, "")
                 }
             }
@@ -88,9 +93,9 @@ class MultiVideoModelRotationTest {
         assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertEquals(1, registrations.get())
-        // ...then the tab endpoint recovers: the rotation fires FIRST (fresh identity,
-        // registrations=2) and the tab call succeeds on it - success resets the healing
-        // state (upstream 94187f7: rotate before the preferred endpoint).
+        // ...then the rotation fires FIRST (fresh identity, registrations=2) and the
+        // tab call succeeds on it - success resets the healing state (upstream
+        // 94187f7: rotate before the preferred endpoint).
         val recovered = source.stream("123", 1080, ContentType.SHORT)
         assertEquals("https://example.test/video", recovered.url)
         assertEquals(2, registrations.get()) // rotation preceded the successful tab call

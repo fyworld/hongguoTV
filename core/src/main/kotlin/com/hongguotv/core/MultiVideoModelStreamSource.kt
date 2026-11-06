@@ -166,10 +166,15 @@ internal class MultiVideoModelStreamSource(
      * The official client's current playback-model endpoint:
      * GET /reading/bookapi/video_tab/multi_video_model/v1/ (2026-11-02).
      *
-     * Single attempt on the main domain - the old POST flow below still has its own
-     * bounded retry, so re-trying here buys nothing. Any failure (non-zero code, empty
-     * body, unexpected shape, network error) returns null and the caller falls back;
-     * empty-response semantics stay owned by the old path.
+     * Cross-host retry (upstream PlayRetryPlan, issue #38 probes 2026-10-31): empty
+     * responses come in short clustered windows tied to "identity x path" - retries
+     * on the same connection/host never escape (2026-11-06 hammer probe: same
+     * identity, 1st request 17.6KB then 11 consecutive empties; fresh identity
+     * recovered instantly). Each attempt rotates the host (b -> hl -> lf -> b) and
+     * forces a fresh connection, so a retry lands on a different backend path.
+     * Any failure (non-zero code, empty body, unexpected shape, network error)
+     * returns null and the caller falls back; empty-response semantics stay owned
+     * by the old path.
      *
      * 2026-11-05: signed with the six-header chain (same event as the POST path) -
      * the unsigned GET started returning empty bodies while the same request signed
@@ -182,43 +187,52 @@ internal class MultiVideoModelStreamSource(
             "need_all_video_definition" to "1", "need_mp4_align" to "0",
             "use_os_player" to "0", "video_platform" to "1024", "source" to "0",
             "from_video_id" to "")
-        return try {
-            // signPlayback builds base + "?" + encoded query itself (fresh _rticket,
-            // branch-1 avoidance); the six headers ride on the returned Request.
-            val signed = transport.sign(
-                "${AppApiTransport.APP_BASE}$TAB_PATH", identity.values + extra, null, playbackUa)
-            val request = okhttp3.Request.Builder()
-                .url(signed.url)
-                .apply {
-                    signed.headers.forEach { (k, v) -> header(k, v) }
-                    if (identity.cookie.isNotBlank()) header("Cookie", identity.cookie)
+        for (attempt in 0 until PLAY_HOSTS.size) {
+            val host = PLAY_HOSTS[attempt % PLAY_HOSTS.size]
+            val result = try {
+                // signPlayback builds base + "?" + encoded query itself (fresh _rticket,
+                // branch-1 avoidance); the six headers ride on the returned Request.
+                val signed = transport.sign(
+                    "https://$host$TAB_PATH", identity.values + extra, null, playbackUa)
+                val request = okhttp3.Request.Builder()
+                    .url(signed.url)
+                    .apply {
+                        signed.headers.forEach { (k, v) -> header(k, v) }
+                        if (identity.cookie.isNotBlank()) header("Cookie", identity.cookie)
+                        if (attempt > 0) header("Connection", "close")
+                    }
+                    .get()
+                    .build()
+                val text = RequestScope.execute(http.newCall(request)) { response ->
+                    if (!response.isSuccessful) throw IOException("video_tab HTTP ${response.code}")
+                    response.body?.string().orEmpty()
                 }
-                .get()
-                .build()
-            val text = RequestScope.execute(http.newCall(request)) { response ->
-                if (!response.isSuccessful) throw IOException("video_tab HTTP ${response.code}")
-                response.body?.string().orEmpty()
+                val root = JSONObject(text)
+                if (root.optInt("code", root.optInt("Code", -1)) != 0) return null
+                val data = root.optJSONObject("data") ?: return null
+                val rows = data.optJSONObject("video_model_data") ?: data
+                val row = rows.optJSONObject(id)
+                    ?: rows.keys().asSequence().mapNotNull { rows.optJSONObject(it) }.firstOrNull()
+                    ?: return null
+                val raw = row.opt("video_model") ?: return null
+                val model = when (raw) {
+                    is JSONObject -> raw
+                    is String -> runCatching { JSONObject(raw) }.getOrNull()
+                    else -> null
+                } ?: return null
+                if (!hasVideoList(model)) return null
+                select(model, maxQuality, null)
+            } catch (e: IOException) {
+                if (Thread.currentThread().isInterrupted) return null
+                if (attempt < PLAY_HOSTS.size - 1) sleep(700L * (attempt + 1))
+                null
+            } catch (e: RuntimeException) {
+                if (attempt < PLAY_HOSTS.size - 1) sleep(700L * (attempt + 1))
+                null
             }
-            val root = JSONObject(text)
-            if (root.optInt("code", root.optInt("Code", -1)) != 0) return null
-            val data = root.optJSONObject("data") ?: return null
-            val rows = data.optJSONObject("video_model_data") ?: data
-            val row = rows.optJSONObject(id)
-                ?: rows.keys().asSequence().mapNotNull { rows.optJSONObject(it) }.firstOrNull()
-                ?: return null
-            val raw = row.opt("video_model") ?: return null
-            val model = when (raw) {
-                is JSONObject -> raw
-                is String -> runCatching { JSONObject(raw) }.getOrNull()
-                else -> null
-            } ?: return null
-            if (!hasVideoList(model)) return null
-            select(model, maxQuality, null)
-        } catch (e: IOException) {
-            null
-        } catch (e: RuntimeException) {
-            null
+            if (result != null) return result
         }
+        return null
     }
 
     /**
@@ -259,13 +273,23 @@ internal class MultiVideoModelStreamSource(
      * signature chain. Empty bodies are the server's "device not recognized / request
      * shape rejected" answer - retry a bounded number of times with a fresh signature
      * before surfacing the error.
+     *
+     * Cross-host retry (upstream PlayRetryPlan): each attempt rotates the host
+     * (b -> hl -> lf) and forces a fresh connection - empty-response windows are
+     * tied to "identity x path", so a different host escapes the blocked path.
      */
     private fun requestPlayback(payload: String, identity: PlaybackDeviceSession.Profile): JSONObject {
         var lastError: IOException? = null
         for (attempt in 0..2) {
             try {
-                // Each attempt signs fresh (new _rticket + timestamp-bound headers).
-                return transport.request(PATH, payload, signed = true, identity = identity, ua = playbackUa)
+                // Each attempt signs fresh (new _rticket + timestamp-bound headers) on a
+                // rotated host; retries force a new TCP+TLS connection.
+                val host = PLAY_HOSTS[attempt % PLAY_HOSTS.size]
+                val data = transport.requestUrl(
+                    "https://$host$PATH",
+                    payload.toByteArray(Charsets.UTF_8),
+                    signedPlaybackHeaders(PATH, identity, payload.toByteArray(Charsets.UTF_8), host))
+                return data
             } catch (e: EmptyPlaybackResponseException) {
                 lastError = e
                 if (attempt < 2) sleep(700L * (attempt + 1))
@@ -280,6 +304,20 @@ internal class MultiVideoModelStreamSource(
             }
         }
         throw lastError ?: IOException("播放接口返回空数据")
+    }
+
+    /** Build the signed headers for a POST playback call on the given host. */
+    private fun signedPlaybackHeaders(
+        path: String,
+        identity: PlaybackDeviceSession.Profile,
+        body: ByteArray,
+        host: String,
+    ): Map<String, String> {
+        val signed = transport.sign("https://$host$path", identity.values, body, playbackUa)
+        val headers = signed.headers.toMutableMap()
+        if (identity.cookie.isNotBlank()) headers["Cookie"] = identity.cookie
+        headers["Connection"] = "close"
+        return headers
     }
 
     /** Three response shapes: data[vid].video_model, data.video_model, single-key entry. */
@@ -373,6 +411,16 @@ internal class MultiVideoModelStreamSource(
 
         /** Official client's current playback-model path (2026-11-02 migration). */
         const val TAB_PATH = "/reading/bookapi/video_tab/multi_video_model/v1/"
+
+        /**
+         * Playback host rotation (upstream PlayRetryPlan, issue #38): empty-response
+         * windows are tied to "identity x path" - rotating the host (b -> hl -> lf)
+         * and forcing a fresh connection lets retries land on a different backend.
+         */
+        internal val PLAY_HOSTS = listOf(
+            "api5-normal-sinfonlineb.fqnovel.com",
+            "api5-normal-hl.fqnovel.com",
+            "api5-normal-lf.fqnovel.com")
 
         /** Consecutive fully-empty rounds before one identity rotation (upstream b597f28). */
         internal const val IDENTITY_ROTATE_ROUNDS = 2
