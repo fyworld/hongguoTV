@@ -60,13 +60,69 @@ class PlaybackDeviceSession(
     private var cdid = UUID.randomUUID().toString()
     private var ready: Profile? = null
 
+    /**
+     * Persisted identity (2026-11-06 TV report): every cold start used to register
+     * a BRAND-NEW device - a TV restarted a few times a day looks like a farm of
+     * throwaway devices to risk control, and the freshly issued identity may be
+     * pre-flagged. A real client registers ONCE and keeps its identity forever.
+     * The store is a small JSON file the app injects (core is pure JVM); when
+     * present it is loaded lazily before the first registration, and every new
+     * registration is written back. Rotation replaces the stored identity too.
+     */
+    @Volatile private var store: java.io.File? = null
+
+    /** Inject the persistence file (app calls this once at startup, before playback). */
+    fun persistTo(file: java.io.File) {
+        store = file
+    }
+
+    private fun loadPersisted(): DeviceRegister.Registered? {
+        val file = store ?: return null
+        val saved = runCatching {
+            org.json.JSONObject(file.readText(Charsets.UTF_8))
+        }.getOrNull() ?: return null
+        val device = saved.optString("device_id")
+        val install = saved.optString("install_id")
+        if (device.isBlank() || install.isBlank() || device == "0" || install == "0") return null
+        val cookies = linkedMapOf<String, String>()
+        saved.optJSONObject("cookies")?.let { jar ->
+            for (key in jar.keys()) jar.optString(key).takeIf { it.isNotBlank() }?.let { cookies[key] = it }
+        }
+        return DeviceRegister.Registered(device, install, saved.optString("device_token"), false, cookies)
+    }
+
+    private fun savePersisted(device: DeviceRegister.Registered) {
+        val file = store ?: return
+        runCatching {
+            val json = org.json.JSONObject()
+                .put("device_id", device.deviceId)
+                .put("install_id", device.installId)
+                .put("device_token", device.deviceToken)
+                .put("cookies", org.json.JSONObject(device.cookies as Map<*, *>))
+            file.parentFile?.mkdirs()
+            val tmp = java.io.File(file.parentFile, file.name + ".tmp")
+            tmp.writeText(json.toString(), Charsets.UTF_8)
+            if (!tmp.renameTo(file)) {
+                file.writeText(json.toString(), Charsets.UTF_8)
+                tmp.delete()
+            }
+        }
+    }
+
     @Synchronized
     internal fun profile(http: OkHttpClient): Profile {
         ready?.let {
             return it
         }
         if (Thread.currentThread().isInterrupted) throw InterruptedIOException("播放请求已取消")
-        return toProfile(registerDevice(http)).also { ready = it }
+        // A persisted identity survives app restarts (register once, keep forever -
+        // the official client behavior). Only register when nothing is stored.
+        loadPersisted()?.let { device ->
+            return toProfile(device).also { ready = it }
+        }
+        val device = registerDevice(http)
+        savePersisted(device)
+        return toProfile(device).also { ready = it }
     }
 
     /**
@@ -90,6 +146,7 @@ class PlaybackDeviceSession(
         if (!validDevice(device)) return false
         cdid = UUID.randomUUID().toString()
         ready = toProfile(device)
+        savePersisted(device)
         return true
     }
 

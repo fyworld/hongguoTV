@@ -21,6 +21,7 @@ internal class Signer(
 ) {
     private val processStarted: Long = clock()
     data class Request(val url: String, val headers: Map<String, String>, val body: ByteArray?)
+
     private fun rand() = (random() * 4294967296.0).toLong().toInt()
     private fun unsigned(v: Int) = v.toLong() and 0xffffffffL
     private fun varint(value: Long): ByteArray {
@@ -292,6 +293,25 @@ internal class Signer(
         error("无法生成播放签名")
     }
     companion object {
+        /**
+         * Process-wide shared signer context (upstream 1b53a1e, 2026-11-06 event):
+         * the process nonce and start time must stay STABLE for the whole app life -
+         * a real client process generates ONE nonce at boot. Every short-lived
+         * prefetch repository used to build its own Signer, so the server saw the
+         * same device_id "restarting its process" every few minutes - a risk-control
+         * flag (upstream's bounded sampling: with a stable context 4/4 rounds got
+         * models; with per-request signers 2/4 rounds went fully empty).
+         * The signature itself is still computed fresh per request (timestamp,
+         * body digest, random salt) - only the process identity is shared.
+         */
+        @Volatile
+        private var sharedContext: Signer? = null
+
+        /** The one process-stable signer; created lazily on first playback call. */
+        @Synchronized
+        internal fun shared(clock: () -> Long): Signer =
+            sharedContext ?: Signer(clock).also { sharedContext = it }
+
         val BRANCH2_SV = intArrayOf(
             0xa7aefe20.toInt(),0x7149f1d6.toInt(),0x47e4ca07.toInt(),0xe9b58f67.toInt(),0x93b924de.toInt(),0xc614d0f5.toInt(),0x38afe0ef.toInt(),0xb2bbad73.toInt(),
             0xe24444c3.toInt(),0x9d3aec9b.toInt(),0xdf7b37e4.toInt(),0xd8b16d40.toInt(),0xf8ac31b8.toInt(),0x76b9a90b.toInt(),0x31d833ee.toInt(),0x953fce64.toInt(),

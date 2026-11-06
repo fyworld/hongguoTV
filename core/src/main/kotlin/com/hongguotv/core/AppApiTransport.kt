@@ -32,8 +32,12 @@ internal class AppApiTransport(
     /** Upstream 6e43927 live probe pins iid to the device id; independent random
      *  install ids get flagged by risk control (110001). */
     private val installId = deviceId
-    /** Six-header signature chain (shared with the playback channel). */
-    private val signer = Signer(clock = { clock() })
+    /** Six-header signature chain (shared with the playback channel).
+     *  Process-stable context (upstream 1b53a1e): every transport instance -
+     *  including the short-lived prefetch repositories - shares ONE signer so the
+     *  process nonce / start time never change mid-app-life (per-instance signers
+     *  made the server see constant "process restarts" and flag the identity). */
+    private val signer = Signer.shared { clock() }
 
     /** App client UA: must match the version_code/version_name in the query profile. */
     val userAgent = "com.phoenix.read/73932 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
