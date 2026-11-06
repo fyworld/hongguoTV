@@ -460,12 +460,13 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
 
     // ---------- stream: channel scheduler (App API first, public MP4 fallback) ----------
 
-    fun stream(id: String, maxQuality: Int = 1080, type: ContentType = ContentType.SHORT): StreamInfo {
+    fun stream(id: String, maxQuality: Int = 1080, type: ContentType = ContentType.SHORT, metadataAhead: List<String> = emptyList()): StreamInfo {
         require(id.matches(Regex("[0-9]{1,30}")))
+        require(metadataAhead.size <= 2 && metadataAhead.all { it.matches(Regex("[0-9]{1,30}")) })
         // Channels live in StreamSource implementations; when an endpoint changes,
         // fix the affected channel (or add a new one to StreamSource.default) - this
         // method and the app never change.
-        return streams.stream(id, maxQuality, type)
+        return streams.stream(id, maxQuality, type, metadataAhead)
     }
 
     companion object {

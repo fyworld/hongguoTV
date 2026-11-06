@@ -19,7 +19,7 @@ internal class PublicMp4StreamSource(
 ) : StreamSource {
     override val name = "public-mp4"
 
-    override fun stream(id: String, maxQuality: Int, type: ContentType): StreamInfo {
+    override fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>): StreamInfo {
         val url = "$site/video/public/$id/360p.mp4"
         // Probe with a 1-byte range so a dead link fails fast instead of mid-playback.
         val probe = Request.Builder().url(url).header("User-Agent", webUa).header("Referer", "$site/")

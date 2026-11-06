@@ -67,7 +67,48 @@ internal class MultiVideoModelStreamSource(
     private var emptyRounds = 0
     private var rotatedThisPeriod = false
 
-    override fun stream(id: String, maxQuality: Int, type: ContentType): StreamInfo {
+    // Upcoming-episode model cache (upstream streamLadder): one batched POST reads the
+    // current episode plus the next two; switching episodes then costs ZERO requests.
+    // Entries live 60s in memory, claimed on read (a retry never reuses a stale URL).
+    private data class UpcomingModel(val entry: JSONObject, val savedAt: Long)
+    private val upcomingLock = Any()
+    private val upcomingModels = LinkedHashMap<String, UpcomingModel>()
+
+    /** Claim a cached model for this episode (null when absent/expired). */
+    private fun claimUpcoming(id: String): JSONObject? = synchronized(upcomingLock) {
+        val now = System.currentTimeMillis()
+        upcomingModels.entries.removeAll { now - it.value.savedAt !in 0..60_000 }
+        return upcomingModels.remove(id)?.entry
+    }
+
+    /** Cache the batched response's rows for the NEXT episodes (max 6 entries). */
+    private fun cacheUpcoming(map: JSONObject, ids: List<String>) {
+        synchronized(upcomingLock) {
+            for (next in ids.drop(1)) {
+                val row = map.optJSONObject(next) ?: continue
+                val model = row.opt("video_model")
+                val valid = (model is JSONObject || (model is String && model.isNotBlank())) &&
+                    row.toString().toByteArray(Charsets.UTF_8).size <= 256 * 1024
+                if (valid) upcomingModels[next] = UpcomingModel(row, System.currentTimeMillis())
+            }
+            while (upcomingModels.size > 6) upcomingModels.remove(upcomingModels.keys.first())
+        }
+    }
+
+    override fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>): StreamInfo {
+        // Batched read (upstream streamLadder): the caller passes the next episodes so
+        // one POST covers current + next two; switching then needs no fresh request.
+        // The cache also serves the recovery retries of the SAME episode (a failed
+        // playback retries with a cached model instead of burning another request
+        // against the quota).
+        claimUpcoming(id)?.let { cached ->
+            try {
+                val model = cached.optJSONObject("video_model") ?: JSONObject(cached.str("video_model"))
+                if (hasVideoList(model)) return select(model, maxQuality, null)
+            } catch (_: Exception) {
+                // A stale/invalid cached row falls through to a fresh request.
+            }
+        }
         // Identity rotation moved BEFORE the preferred endpoint (upstream 94187f7):
         // the tab GET is the first request of the round - a blocked identity wastes
         // it. Rotating first lets the fresh identity serve the tab call directly.
@@ -81,6 +122,9 @@ internal class MultiVideoModelStreamSource(
             resetIdentityHealing()
             return it
         }
+        // Batch: current episode + up to two ahead (upstream streamLadder) - the
+        // response rows for the next episodes land in the upcoming cache.
+        val ids = (listOf(id) + metadataAhead.take(2)).distinct()
         val payload = JSONObject()
             .put("biz_param", JSONObject()
                 .put("detail_page_version", 0)
@@ -91,7 +135,7 @@ internal class MultiVideoModelStreamSource(
                 .put("use_os_player", false)
                 .put("use_server_dns", false)
                 .put("video_platform", 1024))
-            .put("mixed_video_id_map", JSONObject().put("1004", JSONArray().put(id)))
+            .put("mixed_video_id_map", JSONObject().put("1004", JSONArray(ids)))
         val body = payload.toString().toByteArray(Charsets.UTF_8)
         // Identity-blocklist self-healing (upstream b597f28, 2026-11-01 event probes:
         // empty responses block per device identity - no host or connection escape,
@@ -115,6 +159,7 @@ internal class MultiVideoModelStreamSource(
         }
         resetIdentityHealing()
         val map = data.optJSONObject("data") ?: throw IOException("播放信息为空")
+        cacheUpcoming(map, ids)
         val model = resolveModel(map, id)
         if (hasVideoList(model)) return select(model, maxQuality, null)
         // Second shape: only a fallback_api URL; plain GET (no signature) -> video_info.data.

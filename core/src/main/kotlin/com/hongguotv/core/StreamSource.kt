@@ -18,8 +18,14 @@ interface StreamSource {
     /** Stable identifier for logging ("app-api", "public-mp4", ...). */
     val name: String
 
-    /** Resolve the playback address for one episode. */
-    fun stream(id: String, maxQuality: Int, type: ContentType): StreamInfo
+    /**
+     * Resolve the playback address for one episode. [metadataAhead] lists the next
+     * episodes (at most 2) so a channel MAY batch them into one request and cache
+     * the models - switching episodes then costs no fresh request (2026-11-06
+     * event: the server grants each identity only ~1 request per host path, so
+     * request economy is the difference between playing and failing).
+     */
+    fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList()): StreamInfo
 
     companion object {
         /**
@@ -50,11 +56,11 @@ interface StreamSource {
 internal class StreamScheduler(private val sources: List<StreamSource>) {
     private val log = java.util.logging.Logger.getLogger("com.hongguotv.core.stream")
 
-    fun stream(id: String, maxQuality: Int, type: ContentType): StreamInfo {
+    fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList()): StreamInfo {
         var last: IOException? = null
         for (source in sources) {
             try {
-                return source.stream(id, maxQuality, type)
+                return source.stream(id, maxQuality, type, metadataAhead)
             } catch (e: IOException) {
                 last = e
                 log.warning("channel ${source.name} failed for $id: $e")

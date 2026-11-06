@@ -20,7 +20,7 @@ internal class AppApiStreamSource(private val transport: AppApiTransport) : Stre
 
     private fun playbackContentType(type: ContentType) = if (type == ContentType.COMIC) 1004 else 1
 
-    override fun stream(id: String, maxQuality: Int, type: ContentType): StreamInfo {
+    override fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>): StreamInfo {
         val payload = JSONObject()
             .put("video_id", id).put("content_type", playbackContentType(type))
             .put("biz_param", JSONObject().put("need_all_video_definition", true).put("video_platform", 3))

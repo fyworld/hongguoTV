@@ -12,11 +12,11 @@ import org.junit.Test
  */
 class StreamSchedulerTest {
     private class ThrowingChannel(override val name: String, private val error: () -> Nothing) : StreamSource {
-        override fun stream(id: String, maxQuality: Int, type: ContentType): StreamInfo = error()
+        override fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>): StreamInfo = error()
     }
 
     private class FixedChannel(override val name: String) : StreamSource {
-        override fun stream(id: String, maxQuality: Int, type: ContentType): StreamInfo =
+        override fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>): StreamInfo =
             StreamInfo("https://example.test/video", null, "720P")
     }
 
