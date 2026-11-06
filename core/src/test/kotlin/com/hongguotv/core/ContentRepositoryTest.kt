@@ -77,6 +77,7 @@ class ContentRepositoryTest {
         // GET /reading/bookapi/video_tab/multi_video_model/v1/ with snake_case params
         // (missing any returns 100103). A healthy video_tab answer must serve the
         // playback WITHOUT touching the old POST path.
+        PlaybackRoutes.shared.reset() // process-wide route health - start clean
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
@@ -102,6 +103,7 @@ class ContentRepositoryTest {
         // Any video_tab failure (business code, empty body, shape mismatch, network
         // error) falls back to the old POST flow; the old path's retry and identity
         // semantics stay unchanged.
+        PlaybackRoutes.shared.reset() // process-wide route health - start clean
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request

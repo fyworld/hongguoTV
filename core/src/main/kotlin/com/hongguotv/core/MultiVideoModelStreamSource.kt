@@ -47,6 +47,9 @@ internal class MultiVideoModelStreamSource(
     private val transport: AppApiTransport,
     private val http: OkHttpClient,
     private val session: PlaybackDeviceSession = PlaybackDeviceSession.shared,
+    /** Route health memory; process-wide by default so the prefetch's fresh
+     *  repository reuses the route the main playback just succeeded on. */
+    private val routes: PlaybackRoutes = PlaybackRoutes.shared,
     /** Retry backoff injection point (tests pass a no-op so empty rounds stay instant). */
     private val sleep: (Long) -> Unit = Thread::sleep,
 ) : StreamSource {
@@ -215,11 +218,17 @@ internal class MultiVideoModelStreamSource(
             "need_all_video_definition" to "1", "need_mp4_align" to "0",
             "use_os_player" to "0", "video_platform" to "1024", "source" to "0",
             "from_video_id" to "")
-        for (attempt in 0 until PLAY_HOSTS.size) {
-            val host = PLAY_HOSTS[attempt % PLAY_HOSTS.size]
+        // Route health plan (upstream 0.1.26 PlaybackRoutes): the GET route leads,
+        // a route that just answered empty is skipped for 30s, and the route the
+        // main playback last succeeded on comes first - the prefetch then lands
+        // its single request on a known-good path instead of re-walking hosts.
+        val plan = routes.plan().filter { it.get }
+        for ((attempt, route) in plan.withIndex()) {
+            val host = route.host
+            var emptyBody = false
             val result = try {
                 // signPlayback builds base + "?" + encoded query itself (fresh _rticket,
-                // branch-1 avoidance); the six headers ride on the returned Request.
+                // branch-0 signing); the six headers ride on the returned Request.
                 val signed = transport.sign(
                     "https://$host$TAB_PATH", identity.values + extra, null, playbackUa)
                 val request = okhttp3.Request.Builder()
@@ -235,32 +244,46 @@ internal class MultiVideoModelStreamSource(
                     if (!response.isSuccessful) throw IOException("video_tab HTTP ${response.code}")
                     response.body?.string().orEmpty()
                 }
-                val root = JSONObject(text)
-                if (root.optInt("code", root.optInt("Code", -1)) != 0) return null
-                val data = root.optJSONObject("data") ?: return null
-                val rows = data.optJSONObject("video_model_data") ?: data
-                val row = rows.optJSONObject(id)
-                    ?: rows.keys().asSequence().mapNotNull { rows.optJSONObject(it) }.firstOrNull()
-                    ?: return null
-                val raw = row.opt("video_model") ?: return null
-                val model = when (raw) {
-                    is JSONObject -> raw
-                    is String -> runCatching { JSONObject(raw) }.getOrNull()
-                    else -> null
-                } ?: return null
-                if (!hasVideoList(model)) return null
-                select(model, maxQuality, null)
+                if (text.isEmpty()) {
+                    emptyBody = true
+                    null
+                } else parseTabModel(text, id, maxQuality)
             } catch (e: IOException) {
                 if (Thread.currentThread().isInterrupted) return null
-                if (attempt < PLAY_HOSTS.size - 1) sleep(700L * (attempt + 1))
+                routes.failed(route, emptyAnswer = e is AppApiEmptyResponseException || e is EmptyPlaybackResponseException)
+                if (attempt < plan.size - 1) sleep(700L * (attempt + 1))
                 null
             } catch (e: RuntimeException) {
-                if (attempt < PLAY_HOSTS.size - 1) sleep(700L * (attempt + 1))
+                routes.failed(route, emptyAnswer = false)
+                if (attempt < plan.size - 1) sleep(700L * (attempt + 1))
                 null
             }
-            if (result != null) return result
+            if (result != null) {
+                routes.success(route)
+                return result
+            }
+            if (emptyBody) routes.failed(route, emptyAnswer = true)
         }
         return null
+    }
+
+    /** Parse the tab GET response; null on any shape mismatch (caller falls back). */
+    private fun parseTabModel(text: String, id: String, maxQuality: Int): StreamInfo? {
+        val root = JSONObject(text)
+        if (root.optInt("code", root.optInt("Code", -1)) != 0) return null
+        val data = root.optJSONObject("data") ?: return null
+        val rows = data.optJSONObject("video_model_data") ?: data
+        val row = rows.optJSONObject(id)
+            ?: rows.keys().asSequence().mapNotNull { rows.optJSONObject(it) }.firstOrNull()
+            ?: return null
+        val raw = row.opt("video_model") ?: return null
+        val model = when (raw) {
+            is JSONObject -> raw
+            is String -> runCatching { JSONObject(raw) }.getOrNull()
+            else -> null
+        } ?: return null
+        if (!hasVideoList(model)) return null
+        return select(model, maxQuality, null)
     }
 
     /**
@@ -277,6 +300,11 @@ internal class MultiVideoModelStreamSource(
         if (!shouldRotate) return
         // Network I/O outside the lock; success or failure, this period is done rotating.
         session.rotate(http)
+        // A fresh identity starts with a clean route-health picture (upstream keeps
+        // routes per Profile - rotation hands over brand-new routes): the empty
+        // answers that triggered the rotation belonged to the OLD identity, and the
+        // GET route must stay reachable for the new one.
+        routes.reset()
         synchronized(identityLock) { rotatedThisPeriod = true }
     }
 
@@ -302,29 +330,34 @@ internal class MultiVideoModelStreamSource(
      * shape rejected" answer - retry a bounded number of times with a fresh signature
      * before surfacing the error.
      *
-     * Cross-host retry (upstream PlayRetryPlan): each attempt rotates the host
-     * (b -> hl -> lf) and forces a fresh connection - empty-response windows are
-     * tied to "identity x path", so a different host escapes the blocked path.
+     * Route health (upstream 0.1.26): POST routes come from the shared PlaybackRoutes
+     * plan - a route that just answered empty is skipped for 30s, and the route that
+     * last succeeded is tried first.
      */
     private fun requestPlayback(payload: String, identity: PlaybackDeviceSession.Profile): JSONObject {
         var lastError: IOException? = null
-        for (attempt in 0..2) {
+        val plan = routes.plan().filter { !it.get }.take(3)
+        for ((attempt, route) in plan.withIndex()) {
             try {
                 // Each attempt signs fresh (new _rticket + timestamp-bound headers) on a
                 // rotated host; retries force a new TCP+TLS connection.
-                val host = PLAY_HOSTS[attempt % PLAY_HOSTS.size]
+                val host = route.host
                 val data = transport.requestUrl(
                     "https://$host$PATH",
                     payload.toByteArray(Charsets.UTF_8),
                     signedPlaybackHeaders(PATH, identity, payload.toByteArray(Charsets.UTF_8), host))
+                routes.success(route)
                 return data
             } catch (e: EmptyPlaybackResponseException) {
+                routes.failed(route, emptyAnswer = true)
                 lastError = e
-                if (attempt < 2) sleep(700L * (attempt + 1))
+                if (attempt < plan.size - 1) sleep(700L * (attempt + 1))
             } catch (e: AppApiEmptyResponseException) {
+                routes.failed(route, emptyAnswer = true)
                 lastError = EmptyPlaybackResponseException()
-                if (attempt < 2) sleep(700L * (attempt + 1))
+                if (attempt < plan.size - 1) sleep(700L * (attempt + 1))
             } catch (e: IOException) {
+                routes.failed(route, emptyAnswer = false)
                 // Transient network blips get one retry; everything else surfaces now.
                 val transient = e is java.net.SocketTimeoutException || e is java.net.SocketException
                 if (!transient || attempt > 0) throw e

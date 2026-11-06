@@ -35,7 +35,8 @@ class MultiVideoModelRotationTest {
         .build()
 
     private fun source(http: OkHttpClient, session: PlaybackDeviceSession) =
-        MultiVideoModelStreamSource(AppApiTransport(http), http, session, sleep = {})
+        MultiVideoModelStreamSource(AppApiTransport(http), http, session,
+            routes = PlaybackRoutes { 0L }, sleep = {})
 
     @Test
     fun twoConsecutiveEmptyRoundsRotateIdentityOnceAndTagSubsequentFailures() {
