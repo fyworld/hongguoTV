@@ -69,31 +69,10 @@ internal class MultiVideoModelStreamSource(
 
     // Upcoming-episode model cache (upstream streamLadder): one batched POST reads the
     // current episode plus the next two; switching episodes then costs ZERO requests.
-    // Entries live 60s in memory, claimed on read (a retry never reuses a stale URL).
-    private data class UpcomingModel(val entry: JSONObject, val savedAt: Long)
-    private val upcomingLock = Any()
-    private val upcomingModels = LinkedHashMap<String, UpcomingModel>()
-
-    /** Claim a cached model for this episode (null when absent/expired). */
-    private fun claimUpcoming(id: String): JSONObject? = synchronized(upcomingLock) {
-        val now = System.currentTimeMillis()
-        upcomingModels.entries.removeAll { now - it.value.savedAt !in 0..60_000 }
-        return upcomingModels.remove(id)?.entry
-    }
-
-    /** Cache the batched response's rows for the NEXT episodes (max 6 entries). */
-    private fun cacheUpcoming(map: JSONObject, ids: List<String>) {
-        synchronized(upcomingLock) {
-            for (next in ids.drop(1)) {
-                val row = map.optJSONObject(next) ?: continue
-                val model = row.opt("video_model")
-                val valid = (model is JSONObject || (model is String && model.isNotBlank())) &&
-                    row.toString().toByteArray(Charsets.UTF_8).size <= 256 * 1024
-                if (valid) upcomingModels[next] = UpcomingModel(row, System.currentTimeMillis())
-            }
-            while (upcomingModels.size > 6) upcomingModels.remove(upcomingModels.keys.first())
-        }
-    }
+    // Process-wide shared (2026-11-06 TV report): the prefetch worker's short-lived
+    // ContentRepository must see the main playback's cached rows - an instance cache
+    // would force a fresh POST per episode and burn the per-identity quota.
+    private val upcoming: UpcomingModelCache = UpcomingModelCache.shared
 
     override fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>): StreamInfo {
         // Batched read (upstream streamLadder): the caller passes the next episodes so
@@ -101,7 +80,7 @@ internal class MultiVideoModelStreamSource(
         // The cache also serves the recovery retries of the SAME episode (a failed
         // playback retries with a cached model instead of burning another request
         // against the quota).
-        claimUpcoming(id)?.let { cached ->
+        upcoming.claim(id)?.let { cached ->
             try {
                 val model = cached.optJSONObject("video_model") ?: JSONObject(cached.str("video_model"))
                 if (hasVideoList(model)) return select(model, maxQuality, null)
@@ -116,7 +95,15 @@ internal class MultiVideoModelStreamSource(
         // Official client's current endpoint first (2026-11-02): the old POST path is
         // retired server-side; video_tab serves the five-tier model on the same
         // registered identity. Any failure falls through to the old flow below.
-        tabVideoModel(id, maxQuality)?.let {
+        // EXCEPT when the caller passes upcoming episodes (2026-11-06 TV report):
+        // video_tab takes ONE video_id per call, so a tab success caches nothing and
+        // the next switch must burn a fresh request - with the quota at ~1 request
+        // per identity per host path, that is exactly how "episode 1 plays, episode
+        // 2 dies" happens. With metadataAhead the batched POST goes first: one
+        // request covers three episodes, the tab stays the no-ahead fallback.
+        val ids = (listOf(id) + metadataAhead.take(2)).distinct()
+        val batchPreferred = ids.size > 1
+        if (!batchPreferred) tabVideoModel(id, maxQuality)?.let {
             // Any success (tab included) proves the identity works - reset the
             // empty-round state so a later incident starts counting fresh.
             resetIdentityHealing()
@@ -124,7 +111,6 @@ internal class MultiVideoModelStreamSource(
         }
         // Batch: current episode + up to two ahead (upstream streamLadder) - the
         // response rows for the next episodes land in the upcoming cache.
-        val ids = (listOf(id) + metadataAhead.take(2)).distinct()
         val payload = JSONObject()
             .put("biz_param", JSONObject()
                 .put("detail_page_version", 0)
@@ -159,7 +145,7 @@ internal class MultiVideoModelStreamSource(
         }
         resetIdentityHealing()
         val map = data.optJSONObject("data") ?: throw IOException("播放信息为空")
-        cacheUpcoming(map, ids)
+        upcoming.store(map, ids)
         val model = resolveModel(map, id)
         if (hasVideoList(model)) return select(model, maxQuality, null)
         // Second shape: only a fallback_api URL; plain GET (no signature) -> video_info.data.
