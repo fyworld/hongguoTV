@@ -1965,7 +1965,11 @@ class MainActivity: Activity() {
             var remote: RemoteVideo?=null
             try {
                 val prepared=scope.run {
-                    RemoteVideo(http,source.stream(id,quality,type,ahead)).also { remote=it; it.warm() }
+                    // Speculative background read (upstream 0.1.26): one route only, no
+                    // identity rotation, no POST fallback - a miss must not burn the
+                    // quota the foreground switch will need. Hits ride the route the
+                    // main playback just succeeded on (PlaybackRoutes.shared memory).
+                    RemoteVideo(http,source.stream(id,quality,type,ahead,speculative=true)).also { remote=it; it.warm() }
                 }
                 if(preparedNext.complete(ticket,key,prepared)) android.util.Log.i("HongguoTV","Next episode prepared near end")
             } catch(_: Exception) { remote?.close() }

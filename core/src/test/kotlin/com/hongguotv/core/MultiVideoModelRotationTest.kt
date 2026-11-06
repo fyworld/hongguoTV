@@ -45,20 +45,22 @@ class MultiVideoModelRotationTest {
         val http = blockedHttp()
         val source = source(http, session)
 
-        // Round 1: tab empty + POST empty (3 attempts) - one empty round, no rotation yet.
+        // Round 1: tab empty + POST empty (3 attempts) - one empty round, no rotation
+        // yet (the POST routes only get their empty marks from THIS round's attempts).
         val first = assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertFalse(first.detail.orEmpty().contains("rotated"))
         assertEquals(1, registrations.get())
-        // Round 2: still empty - threshold (2) reached only after this round completes.
+        // Round 2: the route map is now EXHAUSTED (every route answered empty and is
+        // cooling = the identity's per-host quota is spent) - the MID-CALL rotation
+        // (upstream 0.1.26 refreshIdentity) fires inside this round instead of
+        // waiting for a third; detail carries rotated=1.
         val second = assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
-        assertFalse(second.detail.orEmpty().contains("rotated"))
-        assertEquals(1, registrations.get())
-        // Round 3: rotation happens BEFORE this round (ahead of the tab call);
-        // detail now carries rotated=1.
+        assertTrue(second.detail.orEmpty().contains("rotated=1"))
+        assertEquals(2, registrations.get())
+        // Rounds 3-4: this failure period already rotated - no second rotation.
         val third = assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertTrue(third.detail.orEmpty().contains("rotated=1"))
         assertEquals(2, registrations.get())
-        // Round 4: this failure period already rotated - no second rotation.
         val fourth = assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertTrue(fourth.detail.orEmpty().contains("rotated=1"))
         assertEquals(2, registrations.get())
@@ -90,18 +92,20 @@ class MultiVideoModelRotationTest {
             .build()
         val source = source(http, session)
 
-        // Two empty rounds arm the rotation...
-        assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
+        // Round 1: tab empty + POST empty - the route map is now EXHAUSTED (every
+        // route answered empty and is cooling), so the MID-CALL rotation (upstream
+        // 0.1.26 refreshIdentity) fires inside round 2: fresh identity
+        // (registrations=2), tab call succeeds on it, success resets the healing
+        // state.
         assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertEquals(1, registrations.get())
-        // ...then the rotation fires FIRST (fresh identity, registrations=2) and the
-        // tab call succeeds on it - success resets the healing state (upstream
-        // 94187f7: rotate before the preferred endpoint).
+        // ...the rotation fires MID-CALL in round 2 (fresh identity, registrations=2)
+        // and the tab call succeeds on it - success resets the healing state.
         val recovered = source.stream("123", 1080, ContentType.SHORT)
         assertEquals("https://example.test/video", recovered.url)
         assertEquals(2, registrations.get()) // rotation preceded the successful tab call
-        // New incident counts fresh: two empty rounds, then the third rotates again.
-        assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
+        // New incident counts fresh: the route map is exhausted again after round 3,
+        // so the mid-call rotation fires inside round 4 (registrations=3).
         assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertEquals(2, registrations.get())
         val third = assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }

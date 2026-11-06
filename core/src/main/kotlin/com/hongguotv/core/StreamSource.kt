@@ -24,8 +24,12 @@ interface StreamSource {
      * the models - switching episodes then costs no fresh request (2026-11-06
      * event: the server grants each identity only ~1 request per host path, so
      * request economy is the difference between playing and failing).
+     *
+     * [speculative] marks a BACKGROUND read (upstream 0.1.26): try ONE route only,
+     * never rotate the identity, never count empty rounds - a speculative miss
+     * must not burn the foreground's failure budget or quota.
      */
-    fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList()): StreamInfo
+    fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): StreamInfo
 
     companion object {
         /**
@@ -56,11 +60,11 @@ interface StreamSource {
 internal class StreamScheduler(private val sources: List<StreamSource>) {
     private val log = java.util.logging.Logger.getLogger("com.hongguotv.core.stream")
 
-    fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList()): StreamInfo {
+    fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): StreamInfo {
         var last: IOException? = null
         for (source in sources) {
             try {
-                return source.stream(id, maxQuality, type, metadataAhead)
+                return source.stream(id, maxQuality, type, metadataAhead, speculative)
             } catch (e: IOException) {
                 last = e
                 log.warning("channel ${source.name} failed for $id: $e")

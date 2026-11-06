@@ -63,12 +63,16 @@ internal class MultiVideoModelStreamSource(
     private val fallbackDomains = listOf("fqnovel.com", "snssdk.com")
 
     // 空响应身份屏蔽自愈状态（2026-11-01 事件实测：屏蔽按设备身份生效，换域名与新连接
-    // 无法逃逸，全新身份即时恢复）。连续整轮空响应达到阈值时轮换一次身份；任何一次成功
-    // 即复位。本类实例与 ContentRepository 同生命周期（主播放链单实例存活），prefetch
-    // 用的短命 ContentRepository 自带独立实例，计数互不串扰。
+    // 无法逃逸，全新身份即时恢复）。触发条件（upstream 0.1.26）：连续整轮空响应达到阈值，
+    // 或共享路由图彻底耗尽（每条路由都空响应且在冷却 = 该身份的每 host 配额花光）——后者
+    // 允许在同一调用内中途轮换。任何一次成功即复位；轮换后 30s（成功）/5s（注册失败）内
+    // 不重复轮换。本类实例与 ContentRepository 同生命周期（主播放链单实例存活），prefetch
+    // 用的短命 ContentRepository 自带独立实例，轮次计数互不串扰（路由图是进程共享的）。
     private val identityLock = Any()
     private var emptyRounds = 0
     private var rotatedThisPeriod = false
+    private var rotatedAt = 0L
+    private var rotationFailed = false
 
     // Upcoming-episode model cache (upstream streamLadder): one batched POST reads the
     // current episode plus the next two; switching episodes then costs ZERO requests.
@@ -77,7 +81,7 @@ internal class MultiVideoModelStreamSource(
     // would force a fresh POST per episode and burn the per-identity quota.
     private val upcoming: UpcomingModelCache = UpcomingModelCache.shared
 
-    override fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>): StreamInfo {
+    override fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>, speculative: Boolean): StreamInfo {
         // Batched read (upstream streamLadder): the caller passes the next episodes so
         // one POST covers current + next two; switching then needs no fresh request.
         // The cache also serves the recovery retries of the SAME episode (a failed
@@ -94,7 +98,9 @@ internal class MultiVideoModelStreamSource(
         // Identity rotation moved BEFORE the preferred endpoint (upstream 94187f7):
         // the tab GET is the first request of the round - a blocked identity wastes
         // it. Rotating first lets the fresh identity serve the tab call directly.
-        maybeRotateIdentity()
+        // Speculative reads never rotate (upstream 0.1.26): a background miss must
+        // not burn the foreground's failure budget.
+        if (!speculative) maybeRotateIdentity()
         // GET video_tab FIRST (upstream 0.1.26 PlaybackRoutes: Route(true, host(0))
         // leads every plan; the POST path is only a fallback). The 2026-11-07 probe
         // showed the batched POST path returning empty for every batch while the
@@ -102,12 +108,30 @@ internal class MultiVideoModelStreamSource(
         // treatment now covers batched reads too. With metadataAhead the tab call
         // still goes first; when it fails, the batched POST below is the fallback
         // (one request may still cover three episodes when the POST path works).
-        tabVideoModel(id, maxQuality)?.let {
+        tabVideoModel(id, maxQuality, speculative)?.let {
             // Any success (tab included) proves the identity works - reset the
             // empty-round state so a later incident starts counting fresh.
             resetIdentityHealing()
             return it
         }
+        // MID-CALL fast rotation (upstream 0.1.26 refreshIdentity): when the shared
+        // route map is EXHAUSTED (every route answered empty and is cooling = the
+        // identity's per-host quota is spent - typically: the speculative prefetch
+        // cooled the GET, the dead batch-POST path drained the rest), rotate the
+        // identity NOW and retry the tab GET on the fresh identity - the switch-
+        // episode foreground recovers within ONE call instead of erroring through
+        // two more ~25s rounds. Speculative reads never take this path.
+        if (!speculative && routes.exhausted()) {
+            maybeRotateIdentity(force = true)
+            tabVideoModel(id, maxQuality, false)?.let {
+                resetIdentityHealing()
+                return it
+            }
+        }
+        // Speculative reads stop here (upstream 0.1.26: attempts < 1): the tab GET
+        // is the one route a background read may try; falling through to the POST
+        // path would burn the quota the foreground still needs.
+        if (speculative) throw EmptyPlaybackResponseException("speculative")
         // Batch: current episode + up to two ahead (upstream streamLadder) - the
         // response rows for the next episodes land in the upcoming cache.
         val ids = (listOf(id) + metadataAhead.take(2)).distinct()
@@ -211,7 +235,7 @@ internal class MultiVideoModelStreamSource(
      * the unsigned GET started returning empty bodies while the same request signed
      * returns full data.
      */
-    private fun tabVideoModel(id: String, maxQuality: Int): StreamInfo? {
+    private fun tabVideoModel(id: String, maxQuality: Int, speculative: Boolean = false): StreamInfo? {
         val identity = session.profile(http)
         val extra = mapOf(
             "video_id" to id, "video_id_type" to "0", "device_level" to "1",
@@ -222,7 +246,8 @@ internal class MultiVideoModelStreamSource(
         // a route that just answered empty is skipped for 30s, and the route the
         // main playback last succeeded on comes first - the prefetch then lands
         // its single request on a known-good path instead of re-walking hosts.
-        val plan = routes.plan().filter { it.get }
+        // Speculative reads take ONE route only (upstream: plan.take(1)).
+        val plan = routes.plan().filter { it.get }.let { if (speculative) it.take(1) else it }
         for ((attempt, route) in plan.withIndex()) {
             val host = route.host
             var emptyBody = false
@@ -287,25 +312,40 @@ internal class MultiVideoModelStreamSource(
     }
 
     /**
-     * Rotate the anonymous identity once per failure period: after two consecutive
-     * fully-empty rounds (each round = 3 attempts across the retry loop below, so
-     * two rounds ≈ 8 requests over ~25s in upstream terms) and before the next
-     * round starts. Whether the re-registration succeeds or not, this failure
-     * period never rotates again; any success resets the whole state.
+     * Rotate the anonymous identity once per failure period. Triggers (upstream 0.1.26):
+     *  - two consecutive fully-empty rounds (the legacy slow path), OR
+     *  - the shared route map is EXHAUSTED (every route answered empty and is cooling
+     *    = this identity's per-host quota is spent) - this fires MID-CALL, so a
+     *    switch-episode foreground recovers within ONE call instead of erroring
+     *    through two more ~25s rounds.
+     * Whether the re-registration succeeds or not, this failure period never rotates
+     * again (a failed registration retries after 5s, upstream cooldown); any success
+     * resets the whole state.
      */
-    private fun maybeRotateIdentity() {
+    private fun maybeRotateIdentity(force: Boolean = false) {
+        val now = System.currentTimeMillis()
         val shouldRotate = synchronized(identityLock) {
-            emptyRounds >= IDENTITY_ROTATE_ROUNDS && !rotatedThisPeriod
+            if (rotatedThisPeriod) {
+                // Failed registration retries after 5s (upstream cooldown); a successful
+                // rotation never repeats within the period.
+                rotationFailed && now - rotatedAt >= 5_000
+            } else {
+                (force || emptyRounds >= IDENTITY_ROTATE_ROUNDS)
+            }
         }
         if (!shouldRotate) return
         // Network I/O outside the lock; success or failure, this period is done rotating.
-        session.rotate(http)
+        val rotated = session.rotate(http)
+        synchronized(identityLock) {
+            rotatedThisPeriod = true; rotatedAt = now; rotationFailed = !rotated
+        }
         // A fresh identity starts with a clean route-health picture (upstream keeps
         // routes per Profile - rotation hands over brand-new routes): the empty
         // answers that triggered the rotation belonged to the OLD identity, and the
-        // GET route must stay reachable for the new one.
-        routes.reset()
-        synchronized(identityLock) { rotatedThisPeriod = true }
+        // GET route must stay reachable for the new one. A FAILED rotation keeps the
+        // old identity - keep the blocked picture too (re-walking known-dead routes
+        // would only burn more quota).
+        if (rotated) routes.reset()
     }
 
     /** One more fully-empty round: returns true when this period has already rotated. */

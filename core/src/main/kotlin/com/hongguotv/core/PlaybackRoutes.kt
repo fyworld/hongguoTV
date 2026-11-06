@@ -67,6 +67,20 @@ internal class PlaybackRoutes(
         }
     }
 
+    /**
+     * True when EVERY route last answered EMPTY and is still cooling (upstream 0.1.26
+     * exhausted): the identity's quota picture is fully spent. The foreground rotates
+     * the identity instead of re-walking known-dead routes - the fast-recovery path
+     * for the switch-episode rhythm (speculative prefetch miss cools the GET, the
+     * dead batch-POST path drains the rest, the next foreground call rotates once
+     * and retries instead of erroring through two more full rounds).
+     */
+    @Synchronized
+    fun exhausted(): Boolean {
+        val now = clock()
+        return routes.all { health.getValue(it).let { h -> h.emptyAnswer && h.blockedUntil > now } }
+    }
+
     /** Test hook: clear all health state (the shared instance is process-wide). */
     @Synchronized
     internal fun reset() {
