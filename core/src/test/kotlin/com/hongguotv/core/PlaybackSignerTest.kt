@@ -85,10 +85,15 @@ class PlaybackSignerTest {
         val s = signerAt(rand = 0x12345678)
         val medusa = s.medusa("https://x/?$query", body, ts)
         assertTrue(medusa.isNotEmpty())
-        // Deterministic under fixed clock+random
-        assertEquals(medusa, signerAt(rand = 0x12345678).medusa("https://x/?$query", body, ts))
+        // Deterministic within one Signer instance (process nonce is per-instance;
+        // two instances get different nonces by design - upstream 9e55843).
+        assertEquals(medusa, s.medusa("https://x/?$query", body, ts))
         // Changes with the body (the chain must bind the request bytes)
-        assertNotEquals(medusa, signerAt(rand = 0x12345678).medusa("https://x/?$query", """{"a":2}""".toByteArray(), ts))
+        assertNotEquals(medusa, s.medusa("https://x/?$query", """{"a":2}""".toByteArray(), ts))
+        // Process fingerprint is dynamic: a fresh instance (new random nonce) must
+        // produce a different medusa for the same inputs - the old hardcoded
+        // nonce/start-time made every client byte-identical (static fingerprint).
+        assertNotEquals(medusa, signerAt(rand = 0x12345678).medusa("https://x/?$query", body, ts))
     }
 
     @Test fun keyHashSeedMatchesReference() {

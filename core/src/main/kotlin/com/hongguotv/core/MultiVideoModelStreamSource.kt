@@ -68,6 +68,10 @@ internal class MultiVideoModelStreamSource(
     private var rotatedThisPeriod = false
 
     override fun stream(id: String, maxQuality: Int, type: ContentType): StreamInfo {
+        // Identity rotation moved BEFORE the preferred endpoint (upstream 94187f7):
+        // the tab GET is the first request of the round - a blocked identity wastes
+        // it. Rotating first lets the fresh identity serve the tab call directly.
+        maybeRotateIdentity()
         // Official client's current endpoint first (2026-11-02): the old POST path is
         // retired server-side; video_tab serves the five-tier model on the same
         // registered identity. Any failure falls through to the old flow below.
@@ -93,7 +97,7 @@ internal class MultiVideoModelStreamSource(
         // empty responses block per device identity - no host or connection escape,
         // a fresh identity recovers instantly): after two consecutive fully-empty
         // rounds, rotate the anonymous identity once before this round.
-        maybeRotateIdentity()
+        // (Rotation itself moved to the top of stream() - see above.)
         // Registered identity: server-issued device_id/install_id + registration cookies.
         // Signed playback (2026-11-05 event): the server now REQUIRES the six-header
         // chain (x-gorgon/x-khronos/x-ladon/x-argus/x-helios/x-medusa) on playback

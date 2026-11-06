@@ -51,7 +51,8 @@ class MultiVideoModelRotationTest {
         val second = assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertFalse(second.detail.orEmpty().contains("rotated"))
         assertEquals(1, registrations.get())
-        // Round 3: rotation happens BEFORE this round; detail now carries rotated=1.
+        // Round 3: rotation happens BEFORE this round (ahead of the tab call);
+        // detail now carries rotated=1.
         val third = assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertTrue(third.detail.orEmpty().contains("rotated=1"))
         assertEquals(2, registrations.get())
@@ -87,17 +88,19 @@ class MultiVideoModelRotationTest {
         assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertEquals(1, registrations.get())
-        // ...then the tab endpoint recovers: success resets the healing state.
+        // ...then the tab endpoint recovers: the rotation fires FIRST (fresh identity,
+        // registrations=2) and the tab call succeeds on it - success resets the healing
+        // state (upstream 94187f7: rotate before the preferred endpoint).
         val recovered = source.stream("123", 1080, ContentType.SHORT)
         assertEquals("https://example.test/video", recovered.url)
-        assertEquals(1, registrations.get()) // success without rotation
+        assertEquals(2, registrations.get()) // rotation preceded the successful tab call
         // New incident counts fresh: two empty rounds, then the third rotates again.
         assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
-        assertEquals(1, registrations.get())
+        assertEquals(2, registrations.get())
         val third = assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertTrue(third.detail.orEmpty().contains("rotated=1"))
-        assertEquals(2, registrations.get())
+        assertEquals(3, registrations.get())
     }
 
     @Test

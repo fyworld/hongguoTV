@@ -7,7 +7,19 @@ import java.net.URLEncoder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-internal class Signer(private val clock: () -> Long = System::currentTimeMillis, private val random: () -> Double = Math::random) {
+internal class Signer(
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val random: () -> Double = Math::random,
+    // Process-level fingerprint (upstream 9e55843, 2026-11-05 event): the official
+    // client's medusa plaintext embeds a per-process random nonce and the real
+    // process start time. The old hardcoded values (fixed nonce string, ts
+    // 1728388016635 = 2024-10-08, GPS-like floats) were a static fingerprint the
+    // server could trivially flag. Generated once per Signer instance (process).
+    private val processNonce: String = java.util.Base64.getUrlEncoder()
+        .withoutPadding()
+        .encodeToString(ByteArray(18).also(java.security.SecureRandom()::nextBytes)),
+) {
+    private val processStarted: Long = clock()
     data class Request(val url: String, val headers: Map<String, String>, val body: ByteArray?)
     private fun rand() = (random() * 4294967296.0).toLong().toInt()
     private fun unsigned(v: Int) = v.toLong() and 0xffffffffL
@@ -163,7 +175,9 @@ internal class Signer(private val clock: () -> Long = System::currentTimeMillis,
         }
         return (hex("8404") + byteArrayOf(random.toByte(),(random shr 8).toByte(),0x40,1) + out).hex()
     }
-    private fun deviceProto(deviceId: String) = proto(f(1,1,"sint"),f(2,2,"sint"),f(3,"8662"),f(4,deviceId),f(5,"Ai6svO3PyrwDOUSmO6ZcResxu"),f(6,"!noperm!"),f(7,-888888,"sint"),f(8,-888888,"sint"),f(9,3,"sint"),f(10,-888888,"sint"),f(11,"!notset!"),f(12,"Asia/Shanghai,8"),f(13,"zh_CN"),f(14,4,"sint"),f(16,255.24993896484375,"float"),f(17,35.58599090576172,"float"),f(18,3.467449188232422,"float"),f(19,3.467449188232422,"float"),f(20,255.1754913330078,"float"),f(21,42.17544174194336,"float"),f(22,"16"),f(23,41,"sint"),f(24,36,"sint"),f(25,1728388016635L,"sint"),f(26,1728388016635L,"sint"),f(27,1728388016635L,"sint"),f(28,1728388016637L,"sint"),f(29,-1,"sint"),f(30,"25053RT47C"),f(31,"Redmi"),f(32,"25053RT47C"),f(33,"25053RT47C"),f(34,"Xiaomi"),f(35,"Redmi"),f(36,"Redmi"),f(38,31,"sint"))
+    // Floats zeroed (upstream 9e55843): the GPS-like constants were part of the
+    // static fingerprint; the official client sends zeros on non-sensor paths.
+    private fun deviceProto(deviceId: String) = proto(f(1,1,"sint"),f(2,2,"sint"),f(3,"8662"),f(4,deviceId),f(5,processNonce),f(6,"!noperm!"),f(7,-888888,"sint"),f(8,-888888,"sint"),f(9,3,"sint"),f(10,-888888,"sint"),f(11,"!notset!"),f(12,"Asia/Shanghai,8"),f(13,"zh_CN"),f(14,4,"sint"),f(16,0f,"float"),f(17,0f,"float"),f(18,0f,"float"),f(19,0f,"float"),f(20,0f,"float"),f(21,0f,"float"),f(22,"16"),f(23,41,"sint"),f(24,36,"sint"),f(25,processStarted,"sint"),f(26,processStarted,"sint"),f(27,processStarted,"sint"),f(28,processStarted,"sint"),f(29,-1,"sint"),f(30,"25053RT47C"),f(31,"Redmi"),f(32,"25053RT47C"),f(33,"25053RT47C"),f(34,"Xiaomi"),f(35,"Redmi"),f(36,"Redmi"),f(38,31,"sint"))
     private fun xmxor(data: ByteArray, key: ByteArray): ByteArray {
         val encoded = IntArray(data.size)
         for (i in data.indices) {
