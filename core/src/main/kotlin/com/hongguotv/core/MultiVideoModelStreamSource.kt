@@ -162,10 +162,28 @@ internal class MultiVideoModelStreamSource(
         val identity = session.profile(http)
         val data = try {
             requestPlayback(payload.toString(), identity)
-        } catch (error: EmptyPlaybackResponseException) {
-            // A fully-empty round counts toward rotation; tag the error once this
-            // failure period has rotated (screenshot shows "已换身份仍失败").
-            throw if (noteEmptyRound()) EmptyPlaybackResponseException("rotated=1") else error
+        } catch (error: IOException) {
+            // MID-CALL rotation, second checkpoint (upstream 0.1.26 refreshIdentity
+            // lives INSIDE the attempt loop): the POST path just drained the last
+            // untried routes; when the whole map is now exhausted (every route
+            // answered EMPTY and is cooling = the identity's per-host quota is
+            // spent), rotate the identity and retry the tab GET on the fresh one -
+            // ONE call recovers instead of erroring through two more ~25s rounds.
+            // A network blip never triggers this (exhausted() requires every
+            // route's empty mark, not a timeout).
+            if (routes.exhausted()) {
+                maybeRotateIdentity(force = true)
+                tabVideoModel(id, maxQuality, false)?.let {
+                    resetIdentityHealing()
+                    return it
+                }
+            }
+            if (error is EmptyPlaybackResponseException) {
+                // A fully-empty round counts toward rotation; tag the error once this
+                // failure period has rotated (screenshot shows "已换身份仍失败").
+                throw if (noteEmptyRound()) EmptyPlaybackResponseException("rotated=1") else error
+            }
+            throw error
         }
         resetIdentityHealing()
         val map = data.optJSONObject("data") ?: throw IOException("播放信息为空")
