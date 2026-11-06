@@ -55,9 +55,14 @@ class PlaybackSignerTest {
     }
 
     @Test fun hashF13MainBranchMatchesReference() {
-        // golden case 2: {"a=1&b=2","{}",1700000005} -> branch 0 main path
+        // golden case 2: {"a=1&b=2","{}",1700000005} -> branch 0 main path.
+        // Expected value regenerated 2026-11-07 after the di-expansion fix
+        // (di[i] running value, not the di[0] snapshot): the old expected
+        // "2b19648138724a7a2eaf1da95d6ac0902cffc5d9" was generated against the
+        // WRONG algorithm. The corrected port is pinned bit-for-bit by the
+        // upstream signing.json oracle (SigningOracleTest, 12 vectors).
         val q2 = "a=1&b=2"; val b2 = "{}".toByteArray(); val ts2 = 1700000005
-        assertEquals("2b19648138724a7a2eaf1da95d6ac0902cffc5d9",
+        assertEquals("e63dcba3618b5795de3a5aeeabc0844d1e31f7af",
             signerAt().hashF13(sm3(q2.toByteArray()), digest("MD5", b2), ts2).hex())
     }
 

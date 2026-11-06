@@ -92,18 +92,14 @@ internal class MultiVideoModelStreamSource(
         // the tab GET is the first request of the round - a blocked identity wastes
         // it. Rotating first lets the fresh identity serve the tab call directly.
         maybeRotateIdentity()
-        // Official client's current endpoint first (2026-11-02): the old POST path is
-        // retired server-side; video_tab serves the five-tier model on the same
-        // registered identity. Any failure falls through to the old flow below.
-        // EXCEPT when the caller passes upcoming episodes (2026-11-06 TV report):
-        // video_tab takes ONE video_id per call, so a tab success caches nothing and
-        // the next switch must burn a fresh request - with the quota at ~1 request
-        // per identity per host path, that is exactly how "episode 1 plays, episode
-        // 2 dies" happens. With metadataAhead the batched POST goes first: one
-        // request covers three episodes, the tab stays the no-ahead fallback.
-        val ids = (listOf(id) + metadataAhead.take(2)).distinct()
-        val batchPreferred = ids.size > 1
-        if (!batchPreferred) tabVideoModel(id, maxQuality)?.let {
+        // GET video_tab FIRST (upstream 0.1.26 PlaybackRoutes: Route(true, host(0))
+        // leads every plan; the POST path is only a fallback). The 2026-11-07 probe
+        // showed the batched POST path returning empty for every batch while the
+        // tab GET on the same identity serves full models - the retired-path
+        // treatment now covers batched reads too. With metadataAhead the tab call
+        // still goes first; when it fails, the batched POST below is the fallback
+        // (one request may still cover three episodes when the POST path works).
+        tabVideoModel(id, maxQuality)?.let {
             // Any success (tab included) proves the identity works - reset the
             // empty-round state so a later incident starts counting fresh.
             resetIdentityHealing()
@@ -111,6 +107,7 @@ internal class MultiVideoModelStreamSource(
         }
         // Batch: current episode + up to two ahead (upstream streamLadder) - the
         // response rows for the next episodes land in the upcoming cache.
+        val ids = (listOf(id) + metadataAhead.take(2)).distinct()
         val payload = JSONObject()
             .put("biz_param", JSONObject()
                 .put("detail_page_version", 0)

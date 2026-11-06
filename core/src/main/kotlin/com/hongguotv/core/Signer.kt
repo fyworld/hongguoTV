@@ -78,10 +78,14 @@ internal class Signer(
         val pad = intArrayOf(0xfa,0x45,0x61,0xd7).map { ((it or (it shl 8)) shr shift).toByte() }.toByteArray()
         val data = query + body + le32(ts) + pad + hex("00000000000001a0")
         val di = (data.indices step 4).map { data.i32(it) }.toMutableList()
-        val di0 = di[0]
         for (i in 0 until 112) {
-            val x = di[i + 1]; val y = di[i + 14]
-            di.add(di0 + di[i + 9] + (rol(x,14) xor rol(x,25) xor (x ushr 3)) + (rol(y,13) xor rol(y,15) xor (y ushr 10)))
+            val x = di[i + 1]
+            val y = di[i + 14]
+            // Message expansion uses di[i] - the RUNNING value (upstream Signer.kt
+            // line 129). The old code pinned di[0], producing a WRONG hashF13 for
+            // every branch-0 playback signature since day one; the server's
+            // 2026-11-05 signature tightening turned that into empty responses.
+            di.add(di[i] + di[i + 9] + (rol(x,14) xor rol(x,25) xor (x ushr 3)) + (rol(y,13) xor rol(y,15) xor (y ushr 10)))
         }
         val initial = intArrayOf(0x7aba4fc8,0x67166507,0x6403fa00,0x340f512f,984304912,3005047866L.toInt(),2874125293L.toInt(),2152413264L.toInt()).map { ror(it, countV2) }
         val chosen = arrayOf(intArrayOf(101,5,7,6,3,2,1,0,5,4,3),intArrayOf(96,0,6,7,5,3,2,1,5,4,4),intArrayOf(96,7,6,2,1,4,0,5,4,3,5),intArrayOf(99,3,6,2,4,5,1,0,0,7,6),intArrayOf(96,0,5,6,7,3,1,2,5,4,4),intArrayOf(100,2,0,3,5,4,6,7,2,1,5))[ivV0]
@@ -207,7 +211,12 @@ internal class Signer(
         val messageRand = unsigned(rand()); val envLaunch = (random()*21).toInt()+100; val envPid = (random()*2000).toInt()+10001
         val env = proto(f(1,envLaunch,"sint"),f(2,146331399,"sint"),f(3,146331396,"sint"),f(5,7,"sint"),f(6,"v04.06.04.03-bugfix"),f(7,envPid,"sint"),f(12,deviceProto(deviceId)),f(13,proto(f(1,clock()/1000,"sint"),f(2,-2,"sint"),f(4,200,"sint"))),f(14,versionName))
         val queryHash = sm3(query+bodyMd5+"none".toByteArray())
-        val message = proto(f(1,hex("f7e85ffad7d7dc3bd62ac87057cf6118")),f(2,3,"sint"),f(3,messageRand,"sint"),f(4,"8662"),f(5,deviceId),f(6,"1588093228"),f(7,versionName),f(8,"v04.06.04-ml-android"),f(9,67503104,"sint"),f(10,hex("4001000000000000")),f(12,ts,"sint"),f(13,queryBodyTs),f(14,querySm3.copyOf(6)),f(15,nested),f(16,"AXYQOS6n2m60x1fVZHIrH3iol"),f(17,ts,"sint"),f(19,queryHash),f(20,"none"),f(21,312,"sint"),f(23,env),f(24,"""{"cmr":16777216,"cmr2":16777216,"un_h":1879194040,"vpn":0,"kd":0,"fkd":3672518972,"pd":-1872573247,"dyn":"","do":0,"tk":true}"""))
+        // Field 16 carries the SAME process nonce as deviceProto field 5 (upstream
+        // Signer.kt medusa message f(16, processNonce)). The old hardcoded
+        // "AXYQOS6n2m60x1fVZHIrH3iol" contradicted the per-process nonce embedded
+        // one field group away - a self-inconsistent plaintext the server can
+        // flag after decrypting medusa.
+        val message = proto(f(1,hex("f7e85ffad7d7dc3bd62ac87057cf6118")),f(2,3,"sint"),f(3,messageRand,"sint"),f(4,"8662"),f(5,deviceId),f(6,"1588093228"),f(7,versionName),f(8,"v04.06.04-ml-android"),f(9,67503104,"sint"),f(10,hex("4001000000000000")),f(12,ts,"sint"),f(13,queryBodyTs),f(14,querySm3.copyOf(6)),f(15,nested),f(16,processNonce),f(17,ts,"sint"),f(19,queryHash),f(20,"none"),f(21,312,"sint"),f(23,env),f(24,"""{"cmr":16777216,"cmr2":16777216,"un_h":1879194040,"vpn":0,"kd":0,"fkd":3672518972,"pd":-1872573247,"dyn":"","do":0,"tk":true}"""))
         val r = rand(); val signKey = hex("8ebdfa3806ecc5cee79423e6029ed82540bc2218bb7eaef71cb691f7aa8aa2f5")
         val hash = sm3(signKey+le32(r)+signKey); val d1 = (r shr 16) and 255
         val seed = le32((((d1 shl 11) or (r ushr 24)) xor (d1 shr 5) xor d1).inv())
@@ -266,7 +275,10 @@ internal class Signer(
         var ticket = now; var query: String
         for (offset in 0..127) {
             ticket = now + offset; query = Signer.encode(values + mapOf("_rticket" to ticket.toString()))
-            if (branch(query, body, ts) != 1) {
+            // Playback signs on hash branch 0 (upstream signPlayback: "Keep the
+            // existing branch-0 signing algorithm"). The old != 1 check picked
+            // branch 1 - a different hash family the playback endpoint rejects.
+            if (branch(query, body, ts) == 0) {
                 val url = "$base?$query"
                 val random = (random()*65536).toInt()
                 // medusa must bind the SAME device id / version as the query string
