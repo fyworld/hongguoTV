@@ -101,6 +101,10 @@ internal class MultiVideoModelStreamSource(
         // Speculative reads never rotate (upstream 0.1.26): a background miss must
         // not burn the foreground's failure budget.
         if (!speculative) maybeRotateIdentity()
+        // Diagnostic line (upstream 0.1.26 PlaybackRequestTrace): every route's
+        // outcome lands in the error message, so a TV screenshot shows exactly
+        // which host answered what (G:b=200/0B/h2 P:hl=200/17KB/h2 ...).
+        val trace = PlaybackRequestTrace()
         // GET video_tab FIRST (upstream 0.1.26 PlaybackRoutes: Route(true, host(0))
         // leads every plan; the POST path is only a fallback). The 2026-11-07 probe
         // showed the batched POST path returning empty for every batch while the
@@ -108,7 +112,7 @@ internal class MultiVideoModelStreamSource(
         // treatment now covers batched reads too. With metadataAhead the tab call
         // still goes first; when it fails, the batched POST below is the fallback
         // (one request may still cover three episodes when the POST path works).
-        tabVideoModel(id, maxQuality, speculative)?.let {
+        tabVideoModel(id, maxQuality, speculative, trace)?.let {
             // Any success (tab included) proves the identity works - reset the
             // empty-round state so a later incident starts counting fresh.
             resetIdentityHealing()
@@ -123,7 +127,7 @@ internal class MultiVideoModelStreamSource(
         // two more ~25s rounds. Speculative reads never take this path.
         if (!speculative && routes.exhausted()) {
             maybeRotateIdentity(force = true)
-            tabVideoModel(id, maxQuality, false)?.let {
+            tabVideoModel(id, maxQuality, false, trace)?.let {
                 resetIdentityHealing()
                 return it
             }
@@ -161,7 +165,7 @@ internal class MultiVideoModelStreamSource(
         // chain all along, which is why it kept working through the event.
         val identity = session.profile(http)
         val data = try {
-            requestPlayback(payload.toString(), identity)
+            requestPlayback(payload.toString(), identity, trace)
         } catch (error: IOException) {
             // MID-CALL rotation, second checkpoint (upstream 0.1.26 refreshIdentity
             // lives INSIDE the attempt loop): the POST path just drained the last
@@ -173,7 +177,7 @@ internal class MultiVideoModelStreamSource(
             // route's empty mark, not a timeout).
             if (routes.exhausted()) {
                 maybeRotateIdentity(force = true)
-                tabVideoModel(id, maxQuality, false)?.let {
+                tabVideoModel(id, maxQuality, false, trace)?.let {
                     resetIdentityHealing()
                     return it
                 }
@@ -181,7 +185,9 @@ internal class MultiVideoModelStreamSource(
             if (error is EmptyPlaybackResponseException) {
                 // A fully-empty round counts toward rotation; tag the error once this
                 // failure period has rotated (screenshot shows "已换身份仍失败").
-                throw if (noteEmptyRound()) EmptyPlaybackResponseException("rotated=1") else error
+                // The trace summary rides along (upstream: trace.summary() + rotation).
+                throw if (noteEmptyRound()) EmptyPlaybackResponseException(trace.summary() + " rotated=1")
+                else EmptyPlaybackResponseException(trace.summary())
             }
             throw error
         }
@@ -253,7 +259,7 @@ internal class MultiVideoModelStreamSource(
      * the unsigned GET started returning empty bodies while the same request signed
      * returns full data.
      */
-    private fun tabVideoModel(id: String, maxQuality: Int, speculative: Boolean = false): StreamInfo? {
+    private fun tabVideoModel(id: String, maxQuality: Int, speculative: Boolean = false, trace: PlaybackRequestTrace? = null): StreamInfo? {
         val identity = session.profile(http)
         val extra = mapOf(
             "video_id" to id, "video_id_type" to "0", "device_level" to "1",
@@ -285,7 +291,9 @@ internal class MultiVideoModelStreamSource(
                     .build()
                 val text = RequestScope.execute(http.newCall(request)) { response ->
                     if (!response.isSuccessful) throw IOException("video_tab HTTP ${response.code}")
-                    response.body?.string().orEmpty()
+                    val body = response.body?.string().orEmpty()
+                    trace?.response(PlaybackRequestTrace.Stage.GET, host, response.code, body.toByteArray(Charsets.UTF_8).size, response.protocol)
+                    body
                 }
                 if (text.isEmpty()) {
                     emptyBody = true
@@ -293,10 +301,12 @@ internal class MultiVideoModelStreamSource(
                 } else parseTabModel(text, id, maxQuality)
             } catch (e: IOException) {
                 if (Thread.currentThread().isInterrupted) return null
+                trace?.failed(PlaybackRequestTrace.Stage.GET, host, e)
                 routes.failed(route, emptyAnswer = e is AppApiEmptyResponseException || e is EmptyPlaybackResponseException)
                 if (attempt < plan.size - 1) sleep(700L * (attempt + 1))
                 null
             } catch (e: RuntimeException) {
+                trace?.failed(PlaybackRequestTrace.Stage.GET, host, IOException("parse"))
                 routes.failed(route, emptyAnswer = false)
                 if (attempt < plan.size - 1) sleep(700L * (attempt + 1))
                 null
@@ -392,7 +402,7 @@ internal class MultiVideoModelStreamSource(
      * plan - a route that just answered empty is skipped for 30s, and the route that
      * last succeeded is tried first.
      */
-    private fun requestPlayback(payload: String, identity: PlaybackDeviceSession.Profile): JSONObject {
+    private fun requestPlayback(payload: String, identity: PlaybackDeviceSession.Profile, trace: PlaybackRequestTrace? = null): JSONObject {
         var lastError: IOException? = null
         val plan = routes.plan().filter { !it.get }.take(3)
         for ((attempt, route) in plan.withIndex()) {
@@ -407,14 +417,17 @@ internal class MultiVideoModelStreamSource(
                 routes.success(route)
                 return data
             } catch (e: EmptyPlaybackResponseException) {
+                trace?.failed(PlaybackRequestTrace.Stage.POST, route.host, e)
                 routes.failed(route, emptyAnswer = true)
                 lastError = e
                 if (attempt < plan.size - 1) sleep(700L * (attempt + 1))
             } catch (e: AppApiEmptyResponseException) {
+                trace?.failed(PlaybackRequestTrace.Stage.POST, route.host, e)
                 routes.failed(route, emptyAnswer = true)
                 lastError = EmptyPlaybackResponseException()
                 if (attempt < plan.size - 1) sleep(700L * (attempt + 1))
             } catch (e: IOException) {
+                trace?.failed(PlaybackRequestTrace.Stage.POST, route.host, e)
                 routes.failed(route, emptyAnswer = false)
                 // Transient network blips get one retry; everything else surfaces now.
                 val transient = e is java.net.SocketTimeoutException || e is java.net.SocketException

@@ -1958,7 +1958,11 @@ class MainActivity: Activity() {
         if(prefetchAttempts>=3 || (prefetchAttempts>0 && now-prefetchAttemptAt<15_000) || connectivity.isActiveNetworkMetered || !networkAvailable()) return
         cancelPrefetch(); prefetchedFor=key; prefetchAttemptAt=now; prefetchAttempts++
         val ticket=preparedNext.begin(key)
-        val http=okhttp3.OkHttpClient.Builder().connectTimeout(8,java.util.concurrent.TimeUnit.SECONDS).readTimeout(15,java.util.concurrent.TimeUnit.SECONDS).callTimeout(20,java.util.concurrent.TimeUnit.SECONDS).build()
+        // Tight speculative budget (upstream 0.1.26 caps background reads at 2s):
+        // the prefetch must finish well before the episode ends or it is useless -
+        // a slow-hanging request would still hold the prefetch slot when the
+        // foreground switch needs it. 4s connect / 4s read / 8s total.
+        val http=okhttp3.OkHttpClient.Builder().connectTimeout(4,java.util.concurrent.TimeUnit.SECONDS).readTimeout(4,java.util.concurrent.TimeUnit.SECONDS).callTimeout(8,java.util.concurrent.TimeUnit.SECONDS).build()
         val source=ContentRepository(http); prefetchHttp=http
         val scope=RequestScope(); prefetchScope=scope
         prefetchJob=prefetchWorker.submit {

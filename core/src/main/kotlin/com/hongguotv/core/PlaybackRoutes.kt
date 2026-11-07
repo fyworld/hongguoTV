@@ -90,5 +90,13 @@ internal class PlaybackRoutes(
     companion object {
         /** Process-wide default: main playback + every prefetch share one picture. */
         val shared = PlaybackRoutes()
+
+        /** Short host tag for the diagnostic line (upstream PlayRetryPlan.tag). */
+        fun tag(host: String) = when (host) {
+            "api5-normal-sinfonlineb.fqnovel.com" -> "b"
+            "api5-normal-hl.fqnovel.com" -> "hl"
+            "api5-normal-lf.fqnovel.com" -> "lf"
+            else -> "other"
+        }
     }
 }
