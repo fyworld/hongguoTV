@@ -682,7 +682,10 @@ class MainActivity: Activity() {
                 historyManage=addButton(heading,"管理记录") {
                     val rows=library.history()
                     tvTools.choose("选择要管理的观看记录",rows.map { it.series.title },historyManage,{ index -> manageHistory(rows[index].series,historyManage) },"清空记录") {
-                        tvTools.confirm("清空观看记录","将删除本机所有观看进度，收藏会保留。",historyManage) { library.clearHistory(); catalogFocus=""; showCatalog() }
+                        tvTools.confirm("清空观看记录","将删除本机所有观看进度，收藏会保留。",historyManage) {
+                            val ids=library.history().map { it.series.id }.toSet()
+                            library.clearHistory(); cloudAccount.onLocalHistoryRemoved(ids); catalogFocus=""; showCatalog()
+                        }
                     }
                 }.apply { nextFocusUpId=nav[tab].id }
             }
@@ -1677,7 +1680,7 @@ class MainActivity: Activity() {
             when(index) {
                 0 -> openDetail(series,true)
                 1 -> { library.setWatched(series.id,!library.watched(series.id)); catalogFocus=series.id; showCatalog() }
-                2 -> tvTools.confirm("删除观看记录","删除《${series.title}》的本机观看进度？收藏会保留。",anchor) { library.removeHistory(series.id); showCatalog() }
+                2 -> tvTools.confirm("删除观看记录","删除《${series.title}》的本机观看进度？收藏会保留。",anchor) { library.removeHistory(series.id); cloudAccount.onLocalHistoryRemoved(setOf(series.id)); showCatalog() }
             }
         })
     }

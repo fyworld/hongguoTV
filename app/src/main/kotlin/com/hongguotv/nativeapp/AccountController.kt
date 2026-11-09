@@ -93,6 +93,24 @@ private class AccountStore(context: Context) {
     fun saveSyncedFavorites(ids: Set<String>) {
         prefs.edit().putStringSet("syncedFavorites", ids).commit()
     }
+
+    /** Series the user deleted from the TV's watch history. A cloud checkpoint for one
+     *  of these must NOT merge back (the phone still holds it) — the deletion is local
+     *  intent, kept until the series is watched here again (or history is restored). */
+    fun deletedHistory(): Set<String> = prefs.getStringSet("deletedHistory", emptySet()) ?: emptySet()
+
+    fun saveDeletedHistory(ids: Set<String>) {
+        prefs.edit().putStringSet("deletedHistory", ids.take(500).toSet()).commit()
+    }
+
+    /** Series un-favorited on the TV (cloud removal confirmed). The next sync must not
+     *  re-add them from the phone's shelf copy — the removal is local intent, kept
+     *  until the series is favorited here again. */
+    fun removedFavorites(): Set<String> = prefs.getStringSet("removedFavorites", emptySet()) ?: emptySet()
+
+    fun saveRemovedFavorites(ids: Set<String>) {
+        prefs.edit().putStringSet("removedFavorites", ids.take(500).toSet()).commit()
+    }
 }
 
 internal data class FavoriteState(
@@ -1032,7 +1050,11 @@ class AccountController(
                     status = "已读取 ${history.size} 部云端观看记录"
                     // Two-way history sync: fold every cloud checkpoint into the local shelf.
                     // Newest timestamp wins; local-only entries (never in the cloud) survive.
+                    // Rows the user deleted here are tombstoned and stay out (the phone's
+                    // copy must not resurrect them).
+                    val deleted = store.deletedHistory()
                     history.forEach { cloud ->
+                        if (cloud.series.id in deleted) return@forEach
                         val local = library.progress(cloud.series.id)
                         val cloudNewer = local == null || cloud.updatedAt > local.updatedAt
                         if (cloudNewer && !library.watched(cloud.series.id)) {
@@ -1074,10 +1096,12 @@ class AccountController(
     private fun syncFavorites(account: AccountCredentials, cloud: List<CloudFavorite>) {
         val cloudIds = cloud.map { it.series.id }.toSet()
         val synced = store.syncedFavorites()
+        val removed = store.removedFavorites()
         val localIds = library.favorites().map { it.id }.toSet()
-        // Phone-side additions: in the cloud, not local, never synced before.
+        // Phone-side additions: in the cloud, not local, never synced before. Rows the
+        // user un-favorited here (removal confirmed against the cloud) stay out.
         cloud.forEach { favorite ->
-            if (favorite.series.id !in localIds && favorite.series.id !in synced) {
+            if (favorite.series.id !in localIds && favorite.series.id !in synced && favorite.series.id !in removed) {
                 library.toggle(favorite.series)
             }
         }
@@ -1116,11 +1140,13 @@ class AccountController(
      * TV played before login, or while signed out) uploads once per series. The cloud
      * list is capped at 50, so a series missing from it may simply be beyond the window
      * — pushing it again is harmless (same checkpoint, server-side newest-wins).
+     * Tombstoned rows (deleted here) never push back.
      */
     private fun syncHistory(account: AccountCredentials, cloud: List<CloudProgress>) {
         val cloudIds = cloud.map { it.series.id }.toSet()
+        val deleted = store.deletedHistory()
         val push =
-            library.history().filter { it.series.id !in cloudIds && it.episodeId.isNotBlank() }
+            library.history().filter { it.series.id !in cloudIds && it.series.id !in deleted && it.episodeId.isNotBlank() }
         if (push.isEmpty()) return
         worker.execute {
             var failed = 0
@@ -1185,9 +1211,15 @@ class AccountController(
                     val onShelf = shelf.any { it.series.id == series.id }
                     if (onShelf == added) {
                         // Confirmed: the row joins the sync baseline (a later cloud-side
-                        // removal of it will then propagate to the local shelf).
+                        // removal of it will then propagate to the local shelf). An
+                        // un-favorite also tombstones the row so the next sync does not
+                        // re-add the phone's copy; re-favoriting revokes the tombstone.
                         val synced = store.syncedFavorites()
                         store.saveSyncedFavorites(if (added) synced + series.id else synced - series.id)
+                        store.saveRemovedFavorites(
+                            if (added) store.removedFavorites() - series.id
+                            else store.removedFavorites() + series.id
+                        )
                         favorites = FavoriteState(shelf, loaded = true, message = "已核对账户收藏，共 ${shelf.size} 部")
                     } else {
                         // The write was acknowledged but did not land. Keep it OUT of the
@@ -1240,6 +1272,19 @@ class AccountController(
     fun onLocalFavoritesCleared() {
         if (!signedIn) return
         store.saveSyncedFavorites(emptySet())
+        // A full wipe is "start over", not 500 un-favorites: old removal tombstones
+        // would block the phone's existing favorites from coming back.
+        store.saveRemovedFavorites(emptySet())
+    }
+
+    /**
+     * A history row was deleted locally (single row or 清空记录). Record the id(s) as
+     * deletion tombstones: the next sync's cloud merge must skip them (the phone still
+     * has the checkpoint) or the row would resurrect on every sync.
+     */
+    fun onLocalHistoryRemoved(ids: Set<String>) {
+        if (!signedIn || ids.isEmpty()) return
+        store.saveDeletedHistory(store.deletedHistory() + ids)
     }
 
     /** Manual refresh from the reservation page's button: bypasses the throttle. */
@@ -1288,7 +1333,10 @@ class AccountController(
         draining = false
         // The sync baseline dies with the session: a later re-login re-derives the
         // phone-side additions/removals from scratch (kept local data then re-pushes).
+        // store.clear() below wipes the prefs file anyway; reset in-memory state too.
         store.saveSyncedFavorites(emptySet())
+        store.saveDeletedHistory(emptySet())
+        store.saveRemovedFavorites(emptySet())
         http.dispatcher.cancelAll()
         status = "已退出账号，自动同步已停止"
         changed()
@@ -1329,6 +1377,10 @@ class AccountController(
         // Same as pushFavorite: credentials alone gate the write; a restored session
         // without a profile yet must still upload (profile only gates reads).
         val account = credentials ?: return
+        // Watching the series again revokes any deletion tombstone (the user changed
+        // their mind; future cloud merges may resume).
+        if (progress.series.id in store.deletedHistory())
+            store.saveDeletedHistory(store.deletedHistory() - progress.series.id)
         android.util.Log.i(
             "HongguoAccount",
             "upload series=${progress.series.id} episode=${progress.episodeId} " +
