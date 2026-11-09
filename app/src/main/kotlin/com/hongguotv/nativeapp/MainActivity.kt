@@ -477,12 +477,12 @@ class MainActivity: Activity() {
         collectionReturn=CatalogState(page,catalog,hasMore,ranking); collectionFocus=catalogFocus
         collection=kind; page=1; catalogFocus=""; showCatalog()
     }
-    private fun localCatalog()=tab==6 || tab==7 || collection!=null
+    private fun localCatalog()=tab==6 || tab==7 || tab==8 || collection!=null
     private fun localItems(): List<Series> = when(collection) {
         "later" -> library.later()
         "updates" -> library.favorites().filter { (library.favoriteUpdate(it.id)?.added ?: 0)>0 }
         "resume" -> library.history().filterNot { library.watched(it.series.id) }.map { it.series }
-        else -> if(tab==6) library.favorites() else library.history().map { it.series }
+        else -> if(tab==6) library.favorites() else if(tab==8) cloudAccount.reservationsAllSeries() else library.history().map { it.series }
     }
     private fun showCatalog(load: Boolean=false,focusNav: Boolean=false,focusType: Boolean=false) {
         initialCatalogPending=false; restoreStoppedPage=false; pendingDetail=null
@@ -521,21 +521,19 @@ class MainActivity: Activity() {
             }
         }
         invalidatePage(); screen="catalog"; releaseCatalogViews(); val container=base()
-        // Entering the history tab pulls the phone's upcoming reservations once per
-        // session (loaded/loading guards inside), so the strip renders on arrival and
-        // refreshes the grid through onHistoryChanged when the data lands.
-        // Entering either local shelf (favorites/history) re-syncs the account when the
-        // last pull is stale (>5 min): phone-side favorites/watch progress made after
-        // login arrive here, keeping the shelves genuinely two-way.
-        if(tab==7) cloudAccount.refreshReservationsUpcoming()
-        if(tab==6 || tab==7) cloudAccount.syncIfStale()
+        // Entering the reservation tab pulls the phone's reservation list (throttled
+        // inside); entering either local shelf (favorites/history/reservations) re-syncs
+        // the account when the last pull is stale: phone-side favorites/watch progress
+        // made after login arrive here, keeping the shelves genuinely two-way.
+        if(tab==8) cloudAccount.refreshReservationsUpcoming()
+        if(tab==6 || tab==7 || tab==8) cloudAccount.syncIfStale()
         if(foreground && library.isLoaded && !favoriteMonitor.running) main.post { if(foreground && screen=="catalog") favoriteMonitor.check() }
         val top=row().apply { setPadding(0,0,0,dp(8)) }
         val brand=row()
         brand.addView(ImageView(this).apply { setImageResource(com.hongguotv.nativeapp.R.drawable.app_logo_transparent) },lp(dp(28),dp(28)).apply { rightMargin=dp(9) })
         brand.addView(text("红果",22f).apply { typeface=Typeface.create("sans-serif-medium",Typeface.NORMAL) })
         top.addView(brand,lp(dp(120),dp(44)))
-        listOf("首页","短剧","漫剧","AI剧","搜索","排行榜","收藏","最近观看","设置").forEachIndexed { index,label ->
+        listOf("首页","短剧","漫剧","AI剧","搜索","排行榜","收藏","最近观看","我的预约","设置").forEachIndexed { index,label ->
             val item=addButton(top,label,index==tab) { switchTab(index) }
             fun paint(focused: Boolean) {
                 item.setTextColor(if(focused) bg else if(index==tab) accent else muted)
@@ -556,7 +554,7 @@ class MainActivity: Activity() {
         }
         container.addView(top)
         container.addView(View(this).apply { setBackgroundColor(TvStyle.outline) },lp(-1,dp(1)).apply { bottomMargin=dp(6) })
-        if(tab==8) {
+        if(tab==9) {
             // The settings scroll is tracked so the back key can snap it to the top.
             val scroll=ScrollView(this); settingsScroll=scroll; val body=column(); scroll.addView(body); container.addView(scroll,lp(-1,0).apply { weight=1f })
             settings(body); if(focusNav) nav[tab].requestFocus(); return
@@ -666,14 +664,16 @@ class MainActivity: Activity() {
             rankButtons.values.forEach { it.nextFocusDownId=rankRefresh!!.id }
         } else if(tab>5) {
             val heading=row().apply { setPadding(0,dp(14),0,dp(6)) }
-            heading.addView(text(if(tab==6) "我的收藏" else "接着上次看",25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
+            heading.addView(text(when(tab) { 6 -> "我的收藏"; 7 -> "接着上次看"; 8 -> "我的预约"; else -> "接着上次看" },25f).apply { setTypeface(null,Typeface.BOLD) },lp(0,-2).apply { weight=1f })
             if(tab==6) {
                 favoriteCheck=addButton(heading,"检查更新") { favoriteMonitor.check(force=true) }.apply { nextFocusUpId=nav[tab].id }
                 if(library.favorites().isNotEmpty()) {
                     historyManage=addButton(heading,"管理收藏") {
                         val rows=library.favorites()
                         tvTools.choose("选择要管理的收藏",rows.map { it.title },historyManage,{ index -> manageFavorite(rows[index],historyManage) },"清空收藏") {
-                            tvTools.confirm("清空收藏","将删除本机全部收藏，观看记录会保留。",historyManage) { library.clearFavorites(); catalogFocus=""; showCatalog() }
+                            tvTools.confirm("清空收藏","将删除本机全部收藏，观看记录会保留。",historyManage) {
+                                library.clearFavorites(); cloudAccount.onLocalFavoritesCleared(); catalogFocus=""; showCatalog()
+                            }
                         }
                     }.apply { nextFocusUpId=nav[tab].id }
                 }
@@ -686,9 +686,17 @@ class MainActivity: Activity() {
                     }
                 }.apply { nextFocusUpId=nav[tab].id }
             }
+            if(tab==8) {
+                // Reservation page: a refresh button (re-pulls the phone's upcoming list)
+                // plus a signed-in hint line, mirroring the favorites page's layout.
+                tabRefresh=addButton(heading,"刷新预约") { cloudAccount.refreshReservationsNow(); catalogFocus=""; showCatalog() }.apply { nextFocusUpId=nav[tab].id }
+            }
             container.addView(heading)
             if(tab==6) {
                 favoriteStatus=text(favoriteMonitor.status,13f,muted).apply { setPadding(0,0,0,dp(6)) }; container.addView(favoriteStatus)
+            }
+            if(tab==8) {
+                container.addView(text(if(cloudAccount.signedIn) "同步手机红果 App 的待上线预约 · ${cloudAccount.reservationsUpcomingStatus()}" else "登录红果账号后，这里会显示手机端的预约",13f,muted).apply { setPadding(0,0,0,dp(6)) })
             }
         }
         val body=column(); catalogBody=body; container.addView(body,lp(-1,0).apply { weight=1f })
@@ -820,7 +828,7 @@ class MainActivity: Activity() {
         var restoringScroll=true
         val displayed=if(localCatalog()) catalog.take(page*pageSize) else if(tab==1 || tab==2 || tab==3 || tab==5) catalog else if(tab==0) catalog.filterNot { it.id in library.hidden() } else catalog.take(30)
         if(displayed.isEmpty()) {
-            message(list,if(loading) "正在加载推荐…" else when(tab) { 4 -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关${library.contentType.label}，换个关键词试试"; 6 -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; 7 -> "播放过的剧集会自动保存在这里"; else -> "本页没有更多内容" })
+            message(list,if(loading) "正在加载推荐…" else when(tab) { 4 -> if(query.isBlank()) "输入关键词，用遥控器确认搜索" else "没有找到相关${library.contentType.label}，换个关键词试试"; 6 -> "在剧集详情中选择收藏，喜欢的剧就会出现在这里"; 7 -> "播放过的剧集会自动保存在这里"; 8 -> if(cloudAccount.signedIn) "手机端暂无预约，在手机红果 App 里预约的剧会出现在这里" else "登录红果账号后，这里会显示手机端的预约"; else -> "本页没有更多内容" })
             if(tab==0 && page>1) addButton(list,"上一页") { page--; showCatalog(!localCatalog()) }
             if(tab==0 && hasMore) addButton(list,"下一页") { page++; showCatalog(!localCatalog()) }
             if(themeFocusSlug!=null) { val slug=themeFocusSlug; themeFocusSlug=null; themeButtons[slug]?.requestFocus() ?: nav[tab].requestFocus() }
@@ -838,56 +846,8 @@ class MainActivity: Activity() {
             gridList=list; gridScroll=scroll; gridCards=cards; gridFlatIndex=flatIndex
             gridCount=count; gridWidth=width; gridLoadingRow=null
         }
-        // Reservation strip (tab 7, signed-in): the phone's upcoming list rendered as a
-        // horizontal card rail above the watched grid. While loading / on failure / on an
-        // empty list the rail is replaced by a single status line, so the strip's state is
-        // always visible instead of silently vanishing.
-        val railCards=mutableListOf<View>()
-        val reservations=if(tab==7 && cloudAccount.signedIn) cloudAccount.reservationsUpcoming().filter { !it.series.id.startsWith("reservation:") } else emptyList()
-        val reservationStatus=if(tab==7 && cloudAccount.signedIn) cloudAccount.reservationsUpcomingStatus() else null
-        if(tab==7 && cloudAccount.signedIn && (reservations.isNotEmpty() || reservationStatus!=null)) {
-            list.addView(text(if(reservations.isNotEmpty()) "我的预约 · 来自手机端" else "我的预约",15f,accent).apply { setPadding(dp(4),dp(2),0,dp(6)) })
-            if(reservations.isEmpty()) {
-                // Loading / error / empty: one muted line (no cards, no rail).
-                list.addView(text(cloudAccount.reservationsUpcomingLoading().let { loading ->
-                    if(loading) "正在读取手机端的预约…"
-                    else reservationStatus ?: "手机端暂无待上线预约"
-                },13f,muted).apply { setPadding(dp(4),0,0,dp(8)) })
-            }
-        }
-        if(reservations.isNotEmpty()) {
-            val strip=row().apply { gravity=Gravity.LEFT }
-            val reservationStrip=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; isFillViewport=false }
-            reservationStrip.addView(strip)
-            list.addView(reservationStrip,lp(-1,-2).apply { bottomMargin=dp(8) })
-            val railWidth=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
-            reservations.take(20).forEach { item ->
-                val rail=column().apply {
-                    setPadding(dp(4),dp(4),dp(4),dp(6)); focusStyle(this); contentDescription=item.series.title
-                }
-                val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
-                rail.addView(image,lp(-1,((railWidth-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
-                loadCover(image,item.series.cover)
-                rail.addView(text(item.series.title,13f).apply { maxLines=1; minLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),dp(5),dp(3),0) })
-                rail.addView(text(if(item.publishText.isNotBlank()) item.publishText else "待上线",11f,accent).apply { maxLines=1; setPadding(dp(3),dp(2),dp(3),0) })
-                rail.setOnClickListener {
-                    catalogFocus=item.series.id
-                    // The reservation's series metadata comes from the phone; the detail
-                    // page re-fetches authoritative data by id anyway.
-                    openDetail(item.series,resume=false)
-                }
-                rail.setOnFocusChangeListener { _,focused ->
-                    rail.background=TvStyle.card(this@MainActivity,focused)
-                    if(focused) preview.show(item.series,"我的预约 · ${if(item.publishText.isNotBlank()) item.publishText else "待上线"}")
-                }
-                strip.addView(rail,lp(railWidth,-2).apply { rightMargin=dp(8) })
-                railCards+=rail
-            }
-            railCards.forEachIndexed { index,card ->
-                card.nextFocusLeftId=if(index==0) railCards.last().id else railCards[index-1].id
-                card.nextFocusRightId=if(index==railCards.lastIndex) railCards.first().id else railCards[index+1].id
-            }
-        }
+        // Reservation strip moved to its own tab (8); tab 7 renders only the
+        // watched-history grid.
         displayed.chunked(count).forEach { items -> list.addView(buildCardRow(items,cards,flatIndex,count,width,gap,scroll,list,preview,infiniteScroll,{ restoringScroll }),lp(-1,-2).apply { bottomMargin=dp(10) }) }
         if(infiniteScroll) {
             // No paging row below: every card leads to the row under it, and the last
@@ -915,13 +875,6 @@ class MainActivity: Activity() {
             card.nextFocusLeftId=if(index%count==0) card.id else cards[index-1].id
             card.nextFocusRightId=if(index%count==count-1 || index==cards.lastIndex) card.id else cards[index+1].id
             card.nextFocusUpId=if(index<count) (collectionBack?.id ?: themeButtons[themeSlug]?.id ?: tabRefresh?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: nav[tab].id) else cards[index-count].id
-        }
-        // Vertical focus bridge over the reservation strip: rail DOWN into the grid's
-        // first row, grid's first row UP into the rail (or the regular heading chain
-        // when the strip is hidden). Runs after both view sets are fully built.
-        if(railCards.isNotEmpty()) {
-            railCards.forEach { it.nextFocusDownId=cards.first().id }
-            cards.take(count).forEach { it.nextFocusUpId=railCards.first().id }
         }
         nav.forEach { it.nextFocusDownId=if(infiniteScroll && tab!=5) (themeButtons[themeSlug]?.id ?: cards.first().id) else tabRefresh?.id ?: rankButtons[library.rankBoard]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
         themeButtons.values.forEach { it.nextFocusDownId=cards.first().id }
@@ -2489,7 +2442,7 @@ class MainActivity: Activity() {
                     themeButtons[themeSlug]?.requestFocus() ?: nav[tab].requestFocus()
                 } else nav[tab].requestFocus()
             }
-            else if(tab==6 || tab==7 || tab==8) {
+            else if(tab==6 || tab==7 || tab==8 || tab==9) {
                 // Card/settings pages: one back press does both — snap the page back to
                 // the top and move focus up to the nav bar tab. scrollTo (not smooth)
                 // so long lists jump instantly; the saved scroll position is cleared so

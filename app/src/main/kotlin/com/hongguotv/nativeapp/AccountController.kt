@@ -1048,6 +1048,7 @@ class AccountController(
                     status = "云端观看记录读取失败，稍后重试"
                 }
                 if (cloudFavorites != null) syncFavorites(account, cloudFavorites)
+                if (rows != null) syncHistory(account, history)
                 changed()
                 if (showResult) {
                     toast(status)
@@ -1111,6 +1112,45 @@ class AccountController(
     }
 
     /**
+     * TV→phone history push: local watch progress the cloud has never seen (series the
+     * TV played before login, or while signed out) uploads once per series. The cloud
+     * list is capped at 50, so a series missing from it may simply be beyond the window
+     * — pushing it again is harmless (same checkpoint, server-side newest-wins).
+     */
+    private fun syncHistory(account: AccountCredentials, cloud: List<CloudProgress>) {
+        val cloudIds = cloud.map { it.series.id }.toSet()
+        val push =
+            library.history().filter { it.series.id !in cloudIds && it.episodeId.isNotBlank() }
+        if (push.isEmpty()) return
+        worker.execute {
+            var failed = 0
+            push.forEach { progress ->
+                val result =
+                    runCatching {
+                        client.upload(
+                            account,
+                            CloudProgress(
+                                progress.series,
+                                progress.episodeId,
+                                progress.episodeIndex,
+                                progress.position,
+                                progress.duration,
+                                progress.updatedAt,
+                            ),
+                            0,
+                        )
+                    }
+                if (result.isFailure) failed++
+            }
+            main.post {
+                if (closed) return@post
+                if (failed > 0)
+                    toast("有 ${failed} 部观看记录上传失败，稍后进入最近观看页会自动重试")
+            }
+        }
+    }
+
+    /**
      * Mirrors a local favorite toggle to the account (called on every TV-side toggle).
      * Write-then-read-back: the shelf API's code=0 only acknowledges the request — the
      * phone sees the change only if the write actually landed. Reading the shelf back
@@ -1118,7 +1158,14 @@ class AccountController(
      * pattern) and the user gets a visible warning instead of silent data loss.
      */
     fun pushFavorite(series: Series, added: Boolean) {
-        val account = credentials?.takeIf { profile != null } ?: return
+        // Signed in but profile not yet loaded (restored session, refresh still running):
+        // the credentials are valid for writes — don't silently drop the toggle, just
+        // proceed (profile only gates reads that need a confirmed account).
+        val account = credentials ?: return
+        android.util.Log.i(
+            "HongguoAccount",
+            "pushFavorite id=${series.id} added=$added hasProfile=${profile != null}"
+        )
         worker.execute {
             val result =
                 runCatching {
@@ -1127,6 +1174,11 @@ class AccountController(
                     // Read-back confirmation: does the account shelf now reflect the write?
                     client.favorites(account)
                 }
+            android.util.Log.i(
+                "HongguoAccount",
+                "pushFavorite id=${series.id} result=${result.isSuccess}" +
+                    " shelf=${(result.getOrNull() ?: emptyList()).size}"
+            )
             main.post {
                 if (closed) return@post
                 result.onSuccess { shelf ->
@@ -1155,16 +1207,36 @@ class AccountController(
         }
     }
 
-    /** Account reservation rows for the TV reservation strip (upcoming section of the phone). */
+    /** Upcoming reservation rows (phone-side, not yet published). */
     internal fun reservationsUpcoming(): List<CloudReservation> = reservationState(false).rows
 
     /** Strip status line: loading / error / empty — the rail itself only renders rows. */
     internal fun reservationsUpcomingStatus(): String = reservationState(false).message
 
-    internal fun reservationsUpcomingLoading(): Boolean = reservationState(false).loading
+    /** Both reservation categories as catalog rows for the reservation tab (tab 8):
+     *  online first (playable now), then upcoming. Placeholder ids (no playable series)
+     *  are dropped — the detail page fetches by id and cannot resolve them. */
+    internal fun reservationsAllSeries(): List<Series> =
+        if (!signedIn) emptyList()
+        else (reservationState(true).rows.map { it.series } + reservationState(false).rows.map { it.series })
+            .filter { !it.id.startsWith("reservation:") }
 
-    /** True once the upcoming category has been fetched at least once this session. */
-    internal fun reservationsUpcomingLoaded(): Boolean = reservationState(false).loaded
+    /**
+     * Local favorites were wiped (清空收藏). The tombstone baseline must be wiped with
+     * them: rows still marked synced would make the next sync treat the phone's copies
+     * of those rows as "already known" and skip re-adding them — the phone's existing
+     * favorites would never come back. A clean baseline re-derives everything.
+     */
+    fun onLocalFavoritesCleared() {
+        if (!signedIn) return
+        store.saveSyncedFavorites(emptySet())
+    }
+
+    /** Manual refresh from the reservation page's button: bypasses the throttle. */
+    fun refreshReservationsNow() {
+        if (!signedIn) return
+        refreshReservations()
+    }
 
     private fun showHistory() {
         if (history.isEmpty()) {
@@ -1244,7 +1316,14 @@ class AccountController(
     }
 
     fun upload(progress: CloudProgress, episodes: Int, force: Boolean) {
-        val account = credentials?.takeIf { profile != null } ?: return
+        // Same as pushFavorite: credentials alone gate the write; a restored session
+        // without a profile yet must still upload (profile only gates reads).
+        val account = credentials ?: return
+        android.util.Log.i(
+            "HongguoAccount",
+            "upload series=${progress.series.id} episode=${progress.episodeId} " +
+                "index=${progress.episodeIndex} pos=${progress.position} force=$force"
+        )
         val now = android.os.SystemClock.elapsedRealtime()
         if (!force && progress.episodeId == lastEpisode && now - lastUpload < 30000) return
         lastUpload = now
@@ -1273,6 +1352,10 @@ class AccountController(
             val result = runCatching {
                 if (!closed && token == generation) client.upload(account, next.first, next.second)
             }
+            android.util.Log.i(
+                "HongguoAccount",
+                "upload result=${result.isSuccess} err=${result.exceptionOrNull()?.message ?: "-"}"
+            )
             main.post {
                 if (closed) return@post
                 if (token == generation) {
