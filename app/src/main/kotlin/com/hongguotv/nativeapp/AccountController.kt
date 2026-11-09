@@ -156,6 +156,7 @@ class AccountController(
     private var lastEpisode = ""
     private var uploadFailures = 0
     private var lastSyncAt = 0L
+    private var lastReservationPull = 0L
     private var pending: Pair<CloudProgress, Int>? = null
     private var lastProgress: Pair<CloudProgress, Int>? = null
     private var draining = false
@@ -1013,33 +1014,38 @@ class AccountController(
         status = "正在同步账号记录…"
         task(
             {
-                // All network reads happen on the worker: profile + history + favorites
-                // in one pass; a favorites failure must not sink the history merge.
+                // All network reads happen on the worker. Profile must succeed (it also
+                // validates the session); history and favorites fail independently so a
+                // broken history endpoint cannot sink the favorite sync (and vice versa).
                 Triple(
                     client.profile(account),
-                    client.history(account),
+                    runCatching { client.history(account) }.getOrNull(),
                     runCatching { client.favorites(account) }.getOrNull(),
                 )
             },
             { (user, rows, cloudFavorites) ->
                 profile = user
-                historyLoaded = true
-                history =
-                    rows.distinctBy { it.series.id }.sortedByDescending { it.updatedAt }.take(50)
-                status = "已读取 ${history.size} 部云端观看记录"
-                // Two-way history sync: fold every cloud checkpoint into the local shelf.
-                // Newest timestamp wins; local-only entries (never in the cloud) survive.
-                history.forEach { cloud ->
-                    val local = library.progress(cloud.series.id)
-                    val cloudNewer = local == null || cloud.updatedAt > local.updatedAt
-                    if (cloudNewer && !library.watched(cloud.series.id)) {
-                        library.save(
-                            WatchProgress(
-                                cloud.series, cloud.episodeId, cloud.episodeIndex,
-                                cloud.position, cloud.duration, false, cloud.updatedAt,
+                if (rows != null) {
+                    historyLoaded = true
+                    history =
+                        rows.distinctBy { it.series.id }.sortedByDescending { it.updatedAt }.take(50)
+                    status = "已读取 ${history.size} 部云端观看记录"
+                    // Two-way history sync: fold every cloud checkpoint into the local shelf.
+                    // Newest timestamp wins; local-only entries (never in the cloud) survive.
+                    history.forEach { cloud ->
+                        val local = library.progress(cloud.series.id)
+                        val cloudNewer = local == null || cloud.updatedAt > local.updatedAt
+                        if (cloudNewer && !library.watched(cloud.series.id)) {
+                            library.save(
+                                WatchProgress(
+                                    cloud.series, cloud.episodeId, cloud.episodeIndex,
+                                    cloud.position, cloud.duration, false, cloud.updatedAt,
+                                )
                             )
-                        )
+                        }
                     }
+                } else {
+                    status = "云端观看记录读取失败，稍后重试"
                 }
                 if (cloudFavorites != null) syncFavorites(account, cloudFavorites)
                 changed()
@@ -1104,7 +1110,13 @@ class AccountController(
         store.saveSyncedFavorites((localIds + cloudIds).toSet())
     }
 
-    /** Mirrors a local favorite toggle to the account (called on every TV-side toggle). */
+    /**
+     * Mirrors a local favorite toggle to the account (called on every TV-side toggle).
+     * Write-then-read-back: the shelf API's code=0 only acknowledges the request — the
+     * phone sees the change only if the write actually landed. Reading the shelf back
+     * verifies it; a missing row means the server dropped it (upstream changeFavorite
+     * pattern) and the user gets a visible warning instead of silent data loss.
+     */
     fun pushFavorite(series: Series, added: Boolean) {
         val account = credentials?.takeIf { profile != null } ?: return
         worker.execute {
@@ -1112,14 +1124,28 @@ class AccountController(
                 runCatching {
                     if (added) client.setFavorite(account, series.id, true)
                     else client.setFavorite(account, series.id, false)
+                    // Read-back confirmation: does the account shelf now reflect the write?
+                    client.favorites(account)
                 }
             main.post {
                 if (closed) return@post
-                val synced = store.syncedFavorites()
-                store.saveSyncedFavorites(if (added) synced + series.id else synced - series.id)
-                // The toggle already showed its local toast; a cloud failure needs its
-                // own line or the user believes the phone got the change too.
-                result.onFailure {
+                result.onSuccess { shelf ->
+                    val onShelf = shelf.any { it.series.id == series.id }
+                    if (onShelf == added) {
+                        // Confirmed: the row joins the sync baseline (a later cloud-side
+                        // removal of it will then propagate to the local shelf).
+                        val synced = store.syncedFavorites()
+                        store.saveSyncedFavorites(if (added) synced + series.id else synced - series.id)
+                        favorites = FavoriteState(shelf, loaded = true, message = "已核对账户收藏，共 ${shelf.size} 部")
+                    } else {
+                        // The write was acknowledged but did not land. Keep it OUT of the
+                        // baseline so the next sync retries the push.
+                        toast(
+                            if (added) "云端尚未显示这部收藏，稍后进入收藏页会自动重试"
+                            else "云端列表仍有这部剧，稍后进入收藏页会自动重试"
+                        )
+                    }
+                }.onFailure {
                     toast(
                         if (added) "收藏已存本机，但同步到云端失败：${safeError(it)}"
                         else "已取消本机收藏，但云端取消失败：${safeError(it)}"
@@ -1131,6 +1157,14 @@ class AccountController(
 
     /** Account reservation rows for the TV reservation strip (upcoming section of the phone). */
     internal fun reservationsUpcoming(): List<CloudReservation> = reservationState(false).rows
+
+    /** Strip status line: loading / error / empty — the rail itself only renders rows. */
+    internal fun reservationsUpcomingStatus(): String = reservationState(false).message
+
+    internal fun reservationsUpcomingLoading(): Boolean = reservationState(false).loading
+
+    /** True once the upcoming category has been fetched at least once this session. */
+    internal fun reservationsUpcomingLoaded(): Boolean = reservationState(false).loaded
 
     private fun showHistory() {
         if (history.isEmpty()) {
@@ -1182,10 +1216,16 @@ class AccountController(
         }
     }
 
-    /** Refresh reservations for the TV strip (upcoming category only, phone-side data). */
+    /** Refresh reservations for the TV strip (upcoming category only, phone-side data).
+     *  Throttled like syncIfStale: a once-per-session guard would freeze the strip at
+     *  whatever the phone had at login time. */
     fun refreshReservationsUpcoming() {
         if (!signedIn) return
-        if (reservationState(false).loaded || reservationState(false).loading) return
+        val state = reservationState(false)
+        if (state.loading) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (state.loaded && lastReservationPull != 0L && now - lastReservationPull < 5 * 60 * 1000L) return
+        lastReservationPull = now
         refreshReservations()
     }
 
@@ -1193,12 +1233,13 @@ class AccountController(
      * Periodic re-sync when the user enters the local shelves (favorites/history):
      * the login-time sync only folds what the cloud held at that moment — changes the
      * phone made afterwards (new favorites, watch progress) arrive here. Throttled to
-     * one pull per 5 minutes so tab-hopping doesn't hammer the account endpoints.
+     * 90 seconds: long enough that tab-hopping doesn't hammer the endpoints, short
+     * enough that a phone-side favorite made a minute ago shows up on the next visit.
      */
     fun syncIfStale() {
         if (!signedIn || busy || closed) return
         val now = android.os.SystemClock.elapsedRealtime()
-        if (lastSyncAt != 0L && now - lastSyncAt < 5 * 60 * 1000L) return
+        if (lastSyncAt != 0L && now - lastSyncAt < 90 * 1000L) return
         refresh(false)
     }
 

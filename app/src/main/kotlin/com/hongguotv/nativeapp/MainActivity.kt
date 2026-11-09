@@ -839,11 +839,23 @@ class MainActivity: Activity() {
             gridCount=count; gridWidth=width; gridLoadingRow=null
         }
         // Reservation strip (tab 7, signed-in): the phone's upcoming list rendered as a
-        // horizontal card rail above the watched grid. Empty = hidden entirely.
+        // horizontal card rail above the watched grid. While loading / on failure / on an
+        // empty list the rail is replaced by a single status line, so the strip's state is
+        // always visible instead of silently vanishing.
         val railCards=mutableListOf<View>()
         val reservations=if(tab==7 && cloudAccount.signedIn) cloudAccount.reservationsUpcoming().filter { !it.series.id.startsWith("reservation:") } else emptyList()
+        val reservationStatus=if(tab==7 && cloudAccount.signedIn) cloudAccount.reservationsUpcomingStatus() else null
+        if(tab==7 && cloudAccount.signedIn && (reservations.isNotEmpty() || reservationStatus!=null)) {
+            list.addView(text(if(reservations.isNotEmpty()) "我的预约 · 来自手机端" else "我的预约",15f,accent).apply { setPadding(dp(4),dp(2),0,dp(6)) })
+            if(reservations.isEmpty()) {
+                // Loading / error / empty: one muted line (no cards, no rail).
+                list.addView(text(cloudAccount.reservationsUpcomingLoading().let { loading ->
+                    if(loading) "正在读取手机端的预约…"
+                    else reservationStatus ?: "手机端暂无待上线预约"
+                },13f,muted).apply { setPadding(dp(4),0,0,dp(8)) })
+            }
+        }
         if(reservations.isNotEmpty()) {
-            list.addView(text("我的预约 · 来自手机端",15f,accent).apply { setPadding(dp(4),dp(2),0,dp(6)) })
             val strip=row().apply { gravity=Gravity.LEFT }
             val reservationStrip=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; isFillViewport=false }
             reservationStrip.addView(strip)
