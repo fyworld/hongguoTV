@@ -907,11 +907,12 @@ class MainActivity: Activity() {
             // Focus already sits on a theme button (data arrived after a theme switch):
             // leave it alone — do not hand focus to the nav.
             (tab==1 || tab==2 || tab==3) && themeButtons.values.any { it.hasFocus() } -> Unit
-            // In-place rebuild (refreshLibraryCards): focus sits on a heading button
-            // (刷新预约/管理记录/检查更新 — they live above catalogBody and survive the
-            // rebuild). Keep it there; the grid must not steal focus from the button
-            // the user just pressed.
-            tabRefresh?.hasFocus()==true || historyManage?.hasFocus()==true || favoriteCheck?.hasFocus()==true -> Unit
+            // In-place rebuild (refreshLibraryCards): focus sits on a control that lives
+            // outside catalogBody and survived the rebuild — a nav bar button (e.g. focus
+            // resting on 我的预约 while its async data lands) or a heading button
+            // (刷新预约/管理记录/检查更新). Keep it there; an async data landing must
+            // never move the user's focus.
+            nav.any { it.hasFocus() } || tabRefresh?.hasFocus()==true || historyManage?.hasFocus()==true || favoriteCheck?.hasFocus()==true -> Unit
             focusNav -> nav[tab].requestFocus()
             (tab==1 || tab==2 || tab==3) && catalogFocus.isBlank() -> nav[tab].requestFocus()
             else -> cards[displayed.indexOfFirst { it.id==catalogFocus }.coerceAtLeast(0)].requestFocus()
