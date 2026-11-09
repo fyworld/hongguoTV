@@ -123,6 +123,7 @@ class MainActivity: Activity() {
     private lateinit var library: Library
     private lateinit var tvTools: TvTools
     private lateinit var updater: AppUpdater
+    private lateinit var cloudAccount: AccountController
     private lateinit var mediaSession: TvMediaSession
     private val sleepTimer=SleepTimer { android.os.SystemClock.elapsedRealtime() }
     private var sleepStopped=false
@@ -297,7 +298,13 @@ class MainActivity: Activity() {
         // a TV restarted daily must not look like a farm of new devices.
         com.hongguotv.core.PlaybackDeviceSession.shared.persistTo(java.io.File(getDir("playback", MODE_PRIVATE), "identity.json"))
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
-        updater=AppUpdater(this) { foreground && library.isLoaded && screen=="catalog" && !tvTools.showing }
+        cloudAccount=AccountController(this) { remote ->
+            // Cloud resume: mirror the account checkpoint into local progress, then the
+            // detail page's resume path picks it up (episode + position) automatically.
+            library.save(WatchProgress(remote.series,remote.episodeId,remote.episodeIndex,remote.position,remote.duration,false,remote.updatedAt))
+            openDetail(remote.series,resume=true)
+        }
+        updater=AppUpdater(this) { foreground && library.isLoaded && screen=="catalog" && !tvTools.showing && !cloudAccount.showing }
         updater.extraAction="交流反馈 · 加作者微信" to { showWechatDialog(null) }
         connectivity=getSystemService(ConnectivityManager::class.java)
         runCatching { connectivity.registerDefaultNetworkCallback(networkCallback); networkRegistered=true }
@@ -1204,6 +1211,8 @@ class MainActivity: Activity() {
         }
         lateinit var danmakuStyleButton: TextView
         danmakuStyleButton=setting(playback,"弹幕样式  ·  ${danmakuStyleSummary()}") { showDanmakuStylePicker(danmakuStyleButton,false) }
+        lateinit var account: TextView
+        account=setting(device,"红果账号  ·  ${cloudAccount.accountLabel}") { cloudAccount.show() }
         lateinit var backup: TextView
         backup=setting(device,"手机备份与恢复") {
             runCatching { LibraryBackup.encode(library.snapshot()) }.onSuccess { encoded ->
@@ -1224,7 +1233,7 @@ class MainActivity: Activity() {
         val license=setting(device,"开源许可") {
             AlertDialog.Builder(this).setTitle("开源许可").setMessage("红果TV以 GPL-3.0 发布。\n派生自 N3urda/hongguoTV（GPL-3.0），接口链路参考 HongguoTV-Phone-TV-NoAds（Kotlin 重写），内容协议与加密处理移植自 drpys（22261ad）。\nAndroidX Media3 / OkHttp：Apache-2.0\nKotlin：Apache-2.0\nBouncy Castle：MIT\n完整源码和许可证见 GitHub：fyworld/hongguoTV。").setPositiveButton("关闭",null).show()
         }
-        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,danmakuButton,danmakuStyleButton); val right=listOf(backup,hidden,updates,license)
+        val left=listOf(qualityButton,defaultSpeed,frame,autoNextButton,danmakuButton,danmakuStyleButton); val right=listOf(account,backup,hidden,updates,license)
         listOf(left,right).forEach { items -> items.forEachIndexed { index,view ->
             view.nextFocusUpId=items.getOrNull(index-1)?.id ?: nav[tab].id
             view.nextFocusDownId=items.getOrNull(index+1)?.id ?: view.id
@@ -2328,6 +2337,13 @@ class MainActivity: Activity() {
     private fun saveProgress(completed: Boolean=false) {
         val p=player ?: return; val data=detail ?: return; if(!playbackReady || episodeIndex !in data.episodes.indices) return
         library.save(WatchProgress(data.series,data.episodes[episodeIndex],episodeIndex,p.currentPosition.coerceAtLeast(0),p.duration.coerceAtLeast(0),completed || p.playbackState==Player.STATE_ENDED,System.currentTimeMillis()))
+        // Logged-in sessions mirror the same checkpoint to the account (upstream 0.1.26):
+        // throttled to one upload per 30s while playing, forced on pause/exit/episode end.
+        cloudAccount.upload(
+            CloudProgress(data.series,data.episodes[episodeIndex],episodeIndex,p.currentPosition.coerceAtLeast(0),p.duration.coerceAtLeast(0),System.currentTimeMillis()),
+            data.episodes.size,
+            completed || !p.isPlaying || !foreground,
+        )
     }
     private fun releasePlayer() {
         cancelRecovery(); cancelPrefetch(); mediaSession.deactivate(); tvTools.close()
@@ -2515,6 +2531,7 @@ class MainActivity: Activity() {
         generation++; cancelWork()
         if(networkRegistered) connectivity.unregisterNetworkCallback(networkCallback)
         favoriteMonitor.destroy(); tvTools.destroy(); updater.destroy(); saveProgress(); releasePlayer(); library.close()
+        if(::cloudAccount.isInitialized) cloudAccount.destroy()
         artwork.close(); releaseCatalogViews(); mediaSession.release(); main.removeCallbacksAndMessages(null)
         io.shutdownNow(); prefetchWorker.shutdownNow(); networkCleanup.shutdown()
         Thread({ repository.http.dispatcher.cancelAll(); repository.http.connectionPool.evictAll(); repository.http.dispatcher.executorService.shutdown() },"hongguotv-network-cleanup").start()

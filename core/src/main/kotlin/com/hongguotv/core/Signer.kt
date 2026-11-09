@@ -9,6 +9,11 @@ import java.nio.ByteOrder
 
 internal class Signer(
     private val clock: () -> Long = System::currentTimeMillis,
+    // Device table used by medusa's embedded identity (upstream 0.1.26): account
+    // endpoints sign with the FIXED official device table (VendorConstants.device),
+    // while playback signs with the registered device. Empty identity falls back
+    // to this constructor value.
+    private val device: Map<String, String> = VendorConstants.device,
     private val random: () -> Double = Math::random,
     // Process-level fingerprint (upstream 9e55843, 2026-11-05 event): the official
     // client's medusa plaintext embeds a per-process random nonce and the real
@@ -203,7 +208,7 @@ internal class Signer(
         encoded[0] = ((encoded[0] xor encoded[1]) + encoded.drop(1).sum()) and 255
         return encoded.map { it.toByte() }.toByteArray()
     }
-    fun medusa(url: String, body: ByteArray?, ts: Int, deviceId: String = VendorConstants.device.getValue("device_id"), versionName: String = VendorConstants.device.getValue("version_name")): String {
+    fun medusa(url: String, body: ByteArray?, ts: Int, deviceId: String = device.getValue("device_id"), versionName: String = device.getValue("version_name")): String {
         val bodyMd5 = body?.let { digest("MD5",it) } ?: ByteArray(16)
         val query = url.substringAfter('?').toByteArray(); val querySm3 = sm3(query)
         val queryBodyTs = hashF13(querySm3,bodyMd5,ts)

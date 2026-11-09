@@ -14,26 +14,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 class PlaybackDeviceRegistrationException(cause: Throwable? = null) :
     IOException("播放设备注册失败，请稍后重试", cause)
 
-/** Read a device-register response body (bounded, UTF-8, must be non-blank). */
-internal fun cloudResponse(response: okhttp3.Response): String {
-    if (!response.isSuccessful) throw IOException("设备注册请求失败（HTTP ${response.code}）")
-    val body = response.body ?: throw IOException("设备注册响应为空")
-    val limit = 2 * 1024 * 1024L
-    if (body.contentLength() > limit) throw IOException("设备注册响应过大")
-    val out = java.io.ByteArrayOutputStream()
-    val buffer = ByteArray(8192)
-    val input = body.byteStream()
-    while (out.size() <= limit) {
-        val n = input.read(buffer)
-        if (n < 0) break
-        out.write(buffer, 0, n)
-    }
-    val bytes = out.toByteArray()
-    if (bytes.size > limit) throw IOException("设备注册响应过大")
-    val text = String(bytes, Charsets.UTF_8)
-    if (text.isBlank()) throw IOException("设备注册返回空响应，请稍后重试")
-    return text
-}
+// cloudResponse() now lives in CloudAccount.kt (upstream 0.1.26 shape): one shared
+// bounded-body reader for device-register AND account endpoints.
 
 /** Anonymous playback identity. Register once, then keep the same identity across repositories. */
 class PlaybackDeviceSession(
