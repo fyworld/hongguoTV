@@ -1213,13 +1213,23 @@ class AccountController(
     /** Strip status line: loading / error / empty — the rail itself only renders rows. */
     internal fun reservationsUpcomingStatus(): String = reservationState(false).message
 
-    /** Both reservation categories as catalog rows for the reservation tab (tab 8):
-     *  online first (playable now), then upcoming. Placeholder ids (no playable series)
-     *  are dropped — the detail page fetches by id and cannot resolve them. */
+    /**
+     * Both reservation categories as catalog rows for the reservation tab (tab 8):
+     * online first (playable now), then upcoming. Placeholder rows (reservation:xxx,
+     * no playable series id yet) are KEPT — they still carry title/cover/publish text;
+     * the grid renders them like any card and the click handler shows their info
+     * instead of opening a detail page (the detail API cannot resolve them).
+     */
     internal fun reservationsAllSeries(): List<Series> =
         if (!signedIn) emptyList()
         else (reservationState(true).rows.map { it.series } + reservationState(false).rows.map { it.series })
-            .filter { !it.id.startsWith("reservation:") }
+            .distinctBy { it.id }
+
+    /** Publish-time text for a reservation series id (placeholder ids included). */
+    internal fun reservationPublishText(seriesId: String): String =
+        (reservationState(true).rows + reservationState(false).rows)
+            .firstOrNull { it.series.id == seriesId }
+            ?.publishText.orEmpty()
 
     /**
      * Local favorites were wiped (清空收藏). The tombstone baseline must be wiped with

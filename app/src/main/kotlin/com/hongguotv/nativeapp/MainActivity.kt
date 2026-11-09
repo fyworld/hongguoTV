@@ -1697,6 +1697,14 @@ class MainActivity: Activity() {
         })
     }
     private fun openDetail(series: Series,resume: Boolean=false,autoplay: Boolean=true) {
+        // Reservation placeholders (unpublished series, reservation:xxx ids) cannot be
+        // resolved by the detail API — show the reservation info instead of a dead
+        // "正在加载剧集…" page.
+        if(series.id.startsWith("reservation:")) {
+            val publish=cloudAccount.reservationPublishText(series.id)
+            tvTools.info("预约待上线","《${series.title}》\n${if(publish.isNotBlank()) publish else "上线时间待定"}\n\n上线后可在手机红果 App 观看，届时这里会显示剧集详情。",catalogCards[series.id])
+            return
+        }
         pendingDetail=series; detailAutoplay=autoplay
         invalidatePage(); releaseCatalogViews(); screen="detail"; directPlayback=resume; detail=null; synopsisExpanded=false; relatedSeasons=null
         val body=base(series.title); message(body,"正在加载剧集…")
