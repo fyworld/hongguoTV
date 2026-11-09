@@ -241,29 +241,57 @@ class ArtworkLoader(context: Context) {
     }
 
     private fun fetch(job: Job): Bitmap? {
-        val bytes = disk.get(job.key.url) ?: run {
-            if (job.cancelled) return null
-            val call = http.newCall(Request.Builder().url(job.key.url).build())
-            job.call = call
-            if (job.cancelled) { call.cancel(); return null }
-            call.execute().use { response ->
-                val body = response.body ?: return null
-                if (!response.isSuccessful || body.contentLength() > MAX_BYTES) return null
-                val out = ByteArrayOutputStream()
-                val buffer = ByteArray(8192)
-                body.byteStream().use { input ->
-                    while (!job.cancelled) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        if (out.size() + count > MAX_BYTES) return null
-                        out.write(buffer, 0, count)
-                    }
-                }
-                if (job.cancelled) return null
-                out.toByteArray().also { disk.put(job.key.url, it) }
-            }
-        }
+        val bytes = download(job, job.key.url) ?: return null
         if (job.cancelled) return null
+        return decode(bytes, job) ?: heicFallback(job)
+    }
+
+    /**
+     * Rows persisted by older builds (≤1.0.37) still carry signed fqnovelpic HEIC cover
+     * URLs — HEIF needs API 28+, so decode() returns null on Android 7/8 TVs and the
+     * card stays blank forever (the URL is also signed for ~30 days). fqnovelpic and
+     * byteimg share the novel-pic/{hash} store, so the same hash unsigned from byteimg
+     * with the website's shrink template is a JPEG (see core coverUrl). One retry on
+     * the rewritten URL, cached under that URL; non-fqnovelpic failures return null.
+     */
+    private fun heicFallback(job: Job): Bitmap? {
+        val marker = "fqnovelpic.com/novel-pic/"
+        val at = job.key.url.indexOf(marker)
+        if (at < 0) return null
+        val hash = job.key.url.substring(at + marker.length).substringBefore("~")
+        if (!hash.matches(Regex("[0-9a-f]{16,64}"))) return null
+        val fallback = "https://p3-novel.byteimg.com/novel-pic/$hash~tplv-shrink:640:0.image"
+        val bytes = download(job, fallback) ?: return null
+        if (job.cancelled) return null
+        return decode(bytes, job)
+    }
+
+    private fun download(job: Job, url: String): ByteArray? {
+        val cached = disk.get(url)
+        if (cached != null) return cached
+        if (job.cancelled) return null
+        val call = http.newCall(Request.Builder().url(url).build())
+        job.call = call
+        if (job.cancelled) { call.cancel(); return null }
+        call.execute().use { response ->
+            val body = response.body ?: return null
+            if (!response.isSuccessful || body.contentLength() > MAX_BYTES) return null
+            val out = ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            body.byteStream().use { input ->
+                while (!job.cancelled) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (out.size() + count > MAX_BYTES) return null
+                    out.write(buffer, 0, count)
+                }
+            }
+            if (job.cancelled) return null
+            return out.toByteArray().also { disk.put(url, it) }
+        }
+    }
+
+    private fun decode(bytes: ByteArray, job: Job): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         if (bounds.outWidth !in 1..32768 || bounds.outHeight !in 1..32768) return null

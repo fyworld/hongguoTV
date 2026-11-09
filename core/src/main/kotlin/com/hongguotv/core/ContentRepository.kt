@@ -11,6 +11,33 @@ import java.util.concurrent.TimeUnit
 internal fun JSONArray.objects() = (0 until length()).mapNotNull { optJSONObject(it) }
 internal fun JSONObject.str(key: String) = if (isNull(key)) "" else optString(key, "").trim()
 internal fun cleanUrl(s: String) = s.replace("\\/","/").replace("\\u002F","/",ignoreCase=true).replace("\\u0026","&").replace("&amp;","&")
+
+/**
+ * TV-playable cover for account-endpoint rows.
+ *
+ * The account endpoints (favorites / history / reservations) return signed HEIC cover
+ * URLs from p*-reading-sign.fqnovelpic.com. HEIF decoding needs API 28+, so those
+ * covers decode to null on Android 7/8 TVs and every synced card renders blank
+ * (the feed hit the same wall once — 3c603d6 routed grids to the website for that).
+ * The signature locks the full path including the extension (.heic → 200, anything
+ * else → 403), so no URL trick can ask that CDN for a different format.
+ *
+ * The escape hatch: fqnovelpic and byteimg share the novel-pic/{hash} object store.
+ * The SAME hash served unsigned from p3-novel.byteimg.com with the website's
+ * `~tplv-shrink:640:0.image` template returns a JPEG (verified live: 200,
+ * image/jpeg, FFD8; .webp works too). So rewrite the host+template, drop the
+ * signature query — no extra request, no expiry (the signed URL's x-expires dies
+ * in ~30 days; this URL never does). Unrelated hosts/formats pass through as-is.
+ */
+internal fun coverUrl(s: String): String {
+    val url = cleanUrl(s)
+    val marker = "fqnovelpic.com/novel-pic/"
+    val at = url.indexOf(marker)
+    if (at < 0) return url
+    val hash = url.substring(at + marker.length).substringBefore("~")
+    if (!hash.matches(Regex("[0-9a-f]{16,64}"))) return url
+    return "https://p3-novel.byteimg.com/novel-pic/$hash~tplv-shrink:640:0.image"
+}
 data class Series(val id: String, val title: String, val cover: String = "", val description: String = "", val badge: String = "", val tags: String = "") {
     fun toJson() = JSONObject().put("id",id).put("title",title).put("cover",cover).put("description",description).put("badge",badge).put("tags",tags)
     companion object { fun fromJson(o: JSONObject) = Series(o.str("id"),o.str("title"),o.str("cover"),o.str("description"),o.str("badge"),o.str("tags")) }
@@ -109,7 +136,7 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         return Series(
             o.str("series_id_str").ifEmpty { o.str("series_id") },
             o.str("series_title").ifEmpty { o.str("series_name").ifEmpty { o.str("title").ifEmpty { item.str("name") } } },
-            cleanUrl(o.str("series_cover").ifEmpty { o.str("cover") }),
+            coverUrl(o.str("series_cover").ifEmpty { o.str("cover") }),
             o.str("series_intro").ifEmpty { o.str("description") },
             o.str("episode_right_text").ifEmpty { if(count>0) "全 $count 集" else "" },
             (0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) })

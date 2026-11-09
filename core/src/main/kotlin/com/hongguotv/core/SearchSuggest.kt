@@ -112,7 +112,7 @@ internal object SearchSuggest {
         val count = o.optInt("episode_cnt", 0)
         val tags = o.optJSONArray("tags") ?: o.optJSONArray("category_list") ?: JSONArray()
         return Series(id, title,
-            cleanUrl(o.str("series_cover").ifEmpty { o.str("cover") }),
+            coverUrl(o.str("series_cover").ifEmpty { o.str("cover") }),
             o.str("series_intro").ifEmpty { o.str("video_desc") },
             o.str("episode_right_text").ifEmpty { if (count > 0) "全 $count 集" else "" },
             (0 until minOf(tags.length(), 5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) })

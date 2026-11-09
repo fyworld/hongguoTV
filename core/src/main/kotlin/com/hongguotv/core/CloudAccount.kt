@@ -219,7 +219,7 @@ class CloudAccountClient(private val http: OkHttpClient) {
                     Series(
                         row.str("book_id"),
                         row.str("book_name"),
-                        cleanUrl(row.str("thumb_url")),
+                        coverUrl(row.str("thumb_url")),
                         row.str("abstract"),
                         episodeBadge(row),
                     )
@@ -424,7 +424,7 @@ class CloudAccountClient(private val http: OkHttpClient) {
                         Series(
                             id,
                             title,
-                            cleanUrl(cover),
+                            coverUrl(cover),
                             row.str("series_intro")
                                 .ifBlank { video.str("video_desc") }
                                 .ifBlank { row.str("abstract") },
@@ -491,7 +491,7 @@ class CloudAccountClient(private val http: OkHttpClient) {
                             Series(
                                 id,
                                 title,
-                                cleanUrl(cover),
+                                coverUrl(cover),
                                 video
                                     .str("video_desc")
                                     .ifBlank { row.str("abstract") }

@@ -93,7 +93,7 @@ object RelatedWorks {
                     Series(
                         id,
                         title,
-                        cleanUrl(row.str("cover")),
+                        coverUrl(row.str("cover")),
                         row.str("video_desc"),
                         if (upcoming) "待上线" else "全 ${row.optInt("episode_cnt")} 集",
                     ),
