@@ -73,6 +73,8 @@ class MainActivity: Activity() {
     /** Refresh button + status line for the global short/comic drama tabs. */
     private var tabRefresh: View?=null
     private var tabSubtitle: TextView?=null
+    /** Reservation tab (8) status line: re-rendered in place when the refresh lands. */
+    private var tabStatus: TextView?=null
     /** Theme sub-category bar for the short/comic tabs: "" = 全部 (default feed). */
     private var themeSlug=""
     private val themeButtons=mutableMapOf<String,View>()
@@ -361,7 +363,7 @@ class MainActivity: Activity() {
         homeScreen=null; selectionPreview=null; catalogScroll=null; settingsScroll=null
         nav.clear(); rankButtons.clear(); rankTitle=null
         historyManage=null; rankRefresh=null; rankSubtitle=null; collectionBack=null; favoriteBadges.clear()
-        favoriteStatus=null; favoriteCheck=null; tabRefresh=null; tabSubtitle=null
+        favoriteStatus=null; favoriteCheck=null; tabRefresh=null; tabSubtitle=null; tabStatus=null
         themeButtons.clear(); themeScroll=null
         catalogCards.clear(); cardImages.clear()
         tvSuggestList=null; tvSuggestTitle=null; tvQueryView=null; tvSearchButton=null; tvBackspace=null; tvClear=null; tvFirstKey=null
@@ -478,6 +480,11 @@ class MainActivity: Activity() {
         collection=kind; page=1; catalogFocus=""; showCatalog()
     }
     private fun localCatalog()=tab==6 || tab==7 || tab==8 || collection!=null
+    /** Reservation tab (8) status line: sign-in hint + the upcoming category's state
+     *  (loading / loaded count / error). Re-rendered in place when a refresh lands. */
+    private fun reservationStatusLine(): String =
+        if(!cloudAccount.signedIn) "登录红果账号后，这里会显示手机端的预约"
+        else "同步手机红果 App 的待上线预约 · ${cloudAccount.reservationsUpcomingStatus()}"
     private fun localItems(): List<Series> = when(collection) {
         "later" -> library.later()
         "updates" -> library.favorites().filter { (library.favoriteUpdate(it.id)?.added ?: 0)>0 }
@@ -690,16 +697,22 @@ class MainActivity: Activity() {
                 }.apply { nextFocusUpId=nav[tab].id }
             }
             if(tab==8) {
-                // Reservation page: a refresh button (re-pulls the phone's upcoming list)
-                // plus a signed-in hint line, mirroring the favorites page's layout.
-                tabRefresh=addButton(heading,"刷新预约") { cloudAccount.refreshReservationsNow(); catalogFocus=""; showCatalog() }.apply { nextFocusUpId=nav[tab].id }
+                // Refresh only re-pulls the phone's list; the async result arrives through
+                // onHistoryChanged → refreshLibraryCards, which rebuilds the grid in place.
+                // A full showCatalog() here would destroy this focused button mid-click,
+                // focus would flash onto the nav bar, and the nav listener would
+                // switchTab(0) — the reported "refresh kicks me back to the home page".
+                tabRefresh=addButton(heading,"刷新预约") {
+                    if(!cloudAccount.signedIn) { tvTools.info("未登录","登录红果账号后，这里会显示手机端的预约。",tabRefresh); return@addButton }
+                    cloudAccount.refreshReservationsNow()
+                }.apply { nextFocusUpId=nav[tab].id }
             }
             container.addView(heading)
             if(tab==6) {
                 favoriteStatus=text(favoriteMonitor.status,13f,muted).apply { setPadding(0,0,0,dp(6)) }; container.addView(favoriteStatus)
             }
             if(tab==8) {
-                container.addView(text(if(cloudAccount.signedIn) "同步手机红果 App 的待上线预约 · ${cloudAccount.reservationsUpcomingStatus()}" else "登录红果账号后，这里会显示手机端的预约",13f,muted).apply { setPadding(0,0,0,dp(6)) })
+                tabStatus=text(reservationStatusLine(),13f,muted).apply { setPadding(0,0,0,dp(6)) }; container.addView(tabStatus)
             }
         }
         val body=column(); catalogBody=body; container.addView(body,lp(-1,0).apply { weight=1f })
@@ -894,6 +907,11 @@ class MainActivity: Activity() {
             // Focus already sits on a theme button (data arrived after a theme switch):
             // leave it alone — do not hand focus to the nav.
             (tab==1 || tab==2 || tab==3) && themeButtons.values.any { it.hasFocus() } -> Unit
+            // In-place rebuild (refreshLibraryCards): focus sits on a heading button
+            // (刷新预约/管理记录/检查更新 — they live above catalogBody and survive the
+            // rebuild). Keep it there; the grid must not steal focus from the button
+            // the user just pressed.
+            tabRefresh?.hasFocus()==true || historyManage?.hasFocus()==true || favoriteCheck?.hasFocus()==true -> Unit
             focusNav -> nav[tab].requestFocus()
             (tab==1 || tab==2 || tab==3) && catalogFocus.isBlank() -> nav[tab].requestFocus()
             else -> cards[displayed.indexOfFirst { it.id==catalogFocus }.coerceAtLeast(0)].requestFocus()
@@ -1156,14 +1174,16 @@ class MainActivity: Activity() {
         } else if(changedId.isBlank() && localCatalog()) {
             // Cloud sync landed (onHistoryChanged with no specific card): history merge
             // or favorite sync changed the local shelf — rebuild the visible local grid
-            // (tab 6/7/collections) so phone-side rows appear immediately. Keep focus on
-            // the same card id and the scroll position.
+            // (tab 6/7/8/collections) so phone-side rows appear immediately. Keep focus on
+            // the same card id and the scroll position. The reservation tab's status line
+            // lives above the grid and survives this rebuild — update it in place too.
             catalog=localItems(); page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=catalog.size>page*pageSize
             val focusedId=changedId.ifBlank { catalogCards.keys.firstOrNull { catalogCards[it]?.hasFocus()==true } ?: catalogFocus }
             val remaining=catalog.take(page*pageSize)
             catalogFocus=remaining.firstOrNull { it.id==focusedId }?.id ?: remaining.firstOrNull()?.id.orEmpty().ifBlank { catalogFocus }
             val y=catalogScroll?.scrollY ?: 0; scrollPositions[catalogPageKey]=y
             artwork.cancelPage(); favoriteBadges.clear()
+            tabStatus?.text=reservationStatusLine()
             catalogBody?.let { body -> body.removeAllViews(); catalogGrid(body,false) }
         } else {
             // Only re-show the title row while its card actually holds focus; otherwise
