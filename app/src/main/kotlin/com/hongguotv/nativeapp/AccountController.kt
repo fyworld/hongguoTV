@@ -85,6 +85,14 @@ private class AccountStore(context: Context) {
     fun clear() {
         check(prefs.edit().clear().commit()) { "清除登录态失败" }
     }
+
+    /** Favorites that existed on BOTH sides at the last sync. A cloud-side removal of
+     *  one of these is the phone's un-favorite and must propagate to the local shelf. */
+    fun syncedFavorites(): Set<String> = prefs.getStringSet("syncedFavorites", emptySet()) ?: emptySet()
+
+    fun saveSyncedFavorites(ids: Set<String>) {
+        prefs.edit().putStringSet("syncedFavorites", ids).commit()
+    }
 }
 
 internal data class FavoriteState(
@@ -103,8 +111,14 @@ internal data class ReservationState(
 
 /**
  * Cloud history is kept separate from guest records; only explicit playback creates local history.
+ * The [library] handle powers two-way sync: cloud history merges into the local shelf
+ * (newest checkpoint wins), and local favorite toggles mirror to the account.
  */
-class AccountController(private val activity: Activity, private val play: (CloudProgress) -> Unit) {
+class AccountController(
+    private val activity: Activity,
+    private val library: Library,
+    private val play: (CloudProgress) -> Unit,
+) {
     private val main = Handler(Looper.getMainLooper())
     private val worker = Executors.newSingleThreadExecutor()
     private val http =
@@ -993,15 +1007,38 @@ class AccountController(private val activity: Activity, private val play: (Cloud
     private fun refresh(showResult: Boolean) {
         val account = credentials ?: return
         if (busy || closed) return
-        status = "正在读取账号观看历史…"
+        status = "正在同步账号记录…"
         task(
-            { client.profile(account) to client.history(account) },
-            { (user, rows) ->
+            {
+                // All network reads happen on the worker: profile + history + favorites
+                // in one pass; a favorites failure must not sink the history merge.
+                Triple(
+                    client.profile(account),
+                    client.history(account),
+                    runCatching { client.favorites(account) }.getOrNull(),
+                )
+            },
+            { (user, rows, cloudFavorites) ->
                 profile = user
                 historyLoaded = true
                 history =
                     rows.distinctBy { it.series.id }.sortedByDescending { it.updatedAt }.take(50)
-                status = "已读取 ${rows.size} 部云端观看记录"
+                status = "已读取 ${history.size} 部云端观看记录"
+                // Two-way history sync: fold every cloud checkpoint into the local shelf.
+                // Newest timestamp wins; local-only entries (never in the cloud) survive.
+                history.forEach { cloud ->
+                    val local = library.progress(cloud.series.id)
+                    val cloudNewer = local == null || cloud.updatedAt > local.updatedAt
+                    if (cloudNewer && !library.watched(cloud.series.id)) {
+                        library.save(
+                            WatchProgress(
+                                cloud.series, cloud.episodeId, cloud.episodeIndex,
+                                cloud.position, cloud.duration, false, cloud.updatedAt,
+                            )
+                        )
+                    }
+                }
+                if (cloudFavorites != null) syncFavorites(account, cloudFavorites)
                 changed()
                 if (showResult) {
                     toast(status)
@@ -1015,6 +1052,61 @@ class AccountController(private val activity: Activity, private val play: (Cloud
         )
         changed()
     }
+
+    /**
+     * Two-way favorite sync (favorites are pre-fetched on the worker):
+     *  - cloud rows not known at the last sync are the phone's additions → add locally;
+     *  - previously-synced ids missing from the cloud list are the phone's removals →
+     *    remove locally;
+     *  - local rows the cloud has never seen (TV-only favorites, incl. pre-login) →
+     *    push to the account once, then record them as synced.
+     */
+    private fun syncFavorites(account: AccountCredentials, cloud: List<CloudFavorite>) {
+        val cloudIds = cloud.map { it.series.id }.toSet()
+        val synced = store.syncedFavorites()
+        val localIds = library.favorites().map { it.id }.toSet()
+        // Phone-side additions: in the cloud, not local, never synced before.
+        cloud.forEach { favorite ->
+            if (favorite.series.id !in localIds && favorite.series.id !in synced) {
+                library.toggle(favorite.series)
+            }
+        }
+        // Phone-side removals: synced before, still local, gone from the cloud.
+        ((synced intersect localIds) - cloudIds).forEach { stale ->
+            library.favorites().firstOrNull { it.id == stale }?.let { local -> library.toggle(local) }
+        }
+        // TV-side additions (incl. everything favourited before the first login):
+        // push once on the worker, then the union counts as synced.
+        val push = (localIds - cloudIds - synced).toList()
+        if (push.isNotEmpty()) {
+            val account = account
+            worker.execute {
+                push.forEach { id ->
+                    runCatching { client.setFavorite(account, id, true) }
+                }
+            }
+        }
+        store.saveSyncedFavorites((localIds + cloudIds).toSet())
+    }
+
+    /** Mirrors a local favorite toggle to the account (called on every TV-side toggle). */
+    fun pushFavorite(series: Series, added: Boolean) {
+        val account = credentials?.takeIf { profile != null } ?: return
+        worker.execute {
+            runCatching {
+                if (added) client.setFavorite(account, series.id, true)
+                else client.setFavorite(account, series.id, false)
+            }
+            main.post {
+                if (closed) return@post
+                val synced = store.syncedFavorites()
+                store.saveSyncedFavorites(if (added) synced + series.id else synced - series.id)
+            }
+        }
+    }
+
+    /** Account reservation rows for the TV reservation strip (upcoming section of the phone). */
+    internal fun reservationsUpcoming(): List<CloudReservation> = reservationState(false).rows
 
     private fun showHistory() {
         if (history.isEmpty()) {
@@ -1054,6 +1146,9 @@ class AccountController(private val activity: Activity, private val play: (Cloud
         pending = null
         lastProgress = null
         draining = false
+        // The sync baseline dies with the session: a later re-login re-derives the
+        // phone-side additions/removals from scratch (kept local data then re-pushes).
+        store.saveSyncedFavorites(emptySet())
         http.dispatcher.cancelAll()
         status = "已退出账号，自动同步已停止"
         changed()
@@ -1061,6 +1156,13 @@ class AccountController(private val activity: Activity, private val play: (Cloud
             val result = runCatching { store.clear() }
             main.post { toast(if (result.isSuccess) status else "清除登录态失败，请重试退出") }
         }
+    }
+
+    /** Refresh reservations for the TV strip (upcoming category only, phone-side data). */
+    fun refreshReservationsUpcoming() {
+        if (!signedIn) return
+        if (reservationState(false).loaded || reservationState(false).loading) return
+        refreshReservations()
     }
 
     fun upload(progress: CloudProgress, episodes: Int, force: Boolean) {

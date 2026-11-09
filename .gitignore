@@ -10,3 +10,4 @@ keystore.properties
 *.iml
 .DS_Store
 .kotlin/
+build-*.log

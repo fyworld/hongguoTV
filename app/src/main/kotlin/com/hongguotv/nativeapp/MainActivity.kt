@@ -298,12 +298,15 @@ class MainActivity: Activity() {
         // a TV restarted daily must not look like a farm of new devices.
         com.hongguotv.core.PlaybackDeviceSession.shared.persistTo(java.io.File(getDir("playback", MODE_PRIVATE), "identity.json"))
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
-        cloudAccount=AccountController(this) { remote ->
+        cloudAccount=AccountController(this,library) { remote ->
             // Cloud resume: mirror the account checkpoint into local progress, then the
             // detail page's resume path picks it up (episode + position) automatically.
             library.save(WatchProgress(remote.series,remote.episodeId,remote.episodeIndex,remote.position,remote.duration,false,remote.updatedAt))
             openDetail(remote.series,resume=true)
         }
+        // Two-way sync: cloud-side changes (phone watch/favorite) must re-render the
+        // local shelves; TV-side favorite toggles mirror to the account immediately.
+        cloudAccount.onHistoryChanged={ refreshLibraryCards("",false) }
         updater=AppUpdater(this) { foreground && library.isLoaded && screen=="catalog" && !tvTools.showing && !cloudAccount.showing }
         updater.extraAction="交流反馈 · 加作者微信" to { showWechatDialog(null) }
         connectivity=getSystemService(ConnectivityManager::class.java)
@@ -518,6 +521,10 @@ class MainActivity: Activity() {
             }
         }
         invalidatePage(); screen="catalog"; releaseCatalogViews(); val container=base()
+        // Entering the history tab pulls the phone's upcoming reservations once per
+        // session (loaded/loading guards inside), so the strip renders on arrival and
+        // refreshes the grid through onHistoryChanged when the data lands.
+        if(tab==7) cloudAccount.refreshReservationsUpcoming()
         if(foreground && library.isLoaded && !favoriteMonitor.running) main.post { if(foreground && screen=="catalog") favoriteMonitor.check() }
         val top=row().apply { setPadding(0,0,0,dp(8)) }
         val brand=row()
@@ -827,6 +834,44 @@ class MainActivity: Activity() {
             gridList=list; gridScroll=scroll; gridCards=cards; gridFlatIndex=flatIndex
             gridCount=count; gridWidth=width; gridLoadingRow=null
         }
+        // Reservation strip (tab 7, signed-in): the phone's upcoming list rendered as a
+        // horizontal card rail above the watched grid. Empty = hidden entirely.
+        val railCards=mutableListOf<View>()
+        val reservations=if(tab==7 && cloudAccount.signedIn) cloudAccount.reservationsUpcoming().filter { !it.series.id.startsWith("reservation:") } else emptyList()
+        if(reservations.isNotEmpty()) {
+            list.addView(text("我的预约 · 来自手机端",15f,accent).apply { setPadding(dp(4),dp(2),0,dp(6)) })
+            val strip=row().apply { gravity=Gravity.LEFT }
+            val reservationStrip=HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled=false; isFillViewport=false }
+            reservationStrip.addView(strip)
+            list.addView(reservationStrip,lp(-1,-2).apply { bottomMargin=dp(8) })
+            val railWidth=((resources.displayMetrics.widthPixels*.9f-gap*(count-1))/count).toInt()
+            reservations.take(20).forEach { item ->
+                val rail=column().apply {
+                    setPadding(dp(4),dp(4),dp(4),dp(6)); focusStyle(this); contentDescription=item.series.title
+                }
+                val image=ImageView(this).apply { scaleType=ImageView.ScaleType.FIT_CENTER; importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO }
+                rail.addView(image,lp(-1,((railWidth-dp(8))/TvStyle.POSTER_ASPECT).toInt()))
+                loadCover(image,item.series.cover)
+                rail.addView(text(item.series.title,13f).apply { maxLines=1; minLines=1; ellipsize=TextUtils.TruncateAt.END; setPadding(dp(3),dp(5),dp(3),0) })
+                rail.addView(text(if(item.publishText.isNotBlank()) item.publishText else "待上线",11f,accent).apply { maxLines=1; setPadding(dp(3),dp(2),dp(3),0) })
+                rail.setOnClickListener {
+                    catalogFocus=item.series.id
+                    // The reservation's series metadata comes from the phone; the detail
+                    // page re-fetches authoritative data by id anyway.
+                    openDetail(item.series,resume=false)
+                }
+                rail.setOnFocusChangeListener { _,focused ->
+                    rail.background=TvStyle.card(this@MainActivity,focused)
+                    if(focused) preview.show(item.series,"我的预约 · ${if(item.publishText.isNotBlank()) item.publishText else "待上线"}")
+                }
+                strip.addView(rail,lp(railWidth,-2).apply { rightMargin=dp(8) })
+                railCards+=rail
+            }
+            railCards.forEachIndexed { index,card ->
+                card.nextFocusLeftId=if(index==0) railCards.last().id else railCards[index-1].id
+                card.nextFocusRightId=if(index==railCards.lastIndex) railCards.first().id else railCards[index+1].id
+            }
+        }
         displayed.chunked(count).forEach { items -> list.addView(buildCardRow(items,cards,flatIndex,count,width,gap,scroll,list,preview,infiniteScroll,{ restoringScroll }),lp(-1,-2).apply { bottomMargin=dp(10) }) }
         if(infiniteScroll) {
             // No paging row below: every card leads to the row under it, and the last
@@ -854,6 +899,13 @@ class MainActivity: Activity() {
             card.nextFocusLeftId=if(index%count==0) card.id else cards[index-1].id
             card.nextFocusRightId=if(index%count==count-1 || index==cards.lastIndex) card.id else cards[index+1].id
             card.nextFocusUpId=if(index<count) (collectionBack?.id ?: themeButtons[themeSlug]?.id ?: tabRefresh?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: nav[tab].id) else cards[index-count].id
+        }
+        // Vertical focus bridge over the reservation strip: rail DOWN into the grid's
+        // first row, grid's first row UP into the rail (or the regular heading chain
+        // when the strip is hidden). Runs after both view sets are fully built.
+        if(railCards.isNotEmpty()) {
+            railCards.forEach { it.nextFocusDownId=cards.first().id }
+            cards.take(count).forEach { it.nextFocusUpId=railCards.first().id }
         }
         nav.forEach { it.nextFocusDownId=if(infiniteScroll && tab!=5) (themeButtons[themeSlug]?.id ?: cards.first().id) else tabRefresh?.id ?: rankButtons[library.rankBoard]?.id ?: rankRefresh?.id ?: favoriteCheck?.id ?: historyManage?.id ?: cards.first().id }
         themeButtons.values.forEach { it.nextFocusDownId=cards.first().id }
@@ -1145,7 +1197,7 @@ class MainActivity: Activity() {
         tvTools.choose(series.title,labels,anchor,{ choice ->
             when(choice) {
                 0 -> openDetail(series,true)
-                1 -> { val added=library.toggle(series); Toast.makeText(this,if(added) "已收藏" else "已取消收藏",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && (tab==6 || collection=="updates")); if(added) favoriteMonitor.check() }
+                1 -> { val added=library.toggle(series); cloudAccount.pushFavorite(series,added); Toast.makeText(this,if(added) "已收藏" else "已取消收藏",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && (tab==6 || collection=="updates")); if(added) favoriteMonitor.check() }
                 2 -> { val added=library.toggleLater(series); Toast.makeText(this,if(added) "已加入稍后看" else "已移出稍后看",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,!added && collection=="later") }
                 3 -> openDetail(series)
                 4 -> if(tab==7) manageHistory(series,anchor) else { library.hide(series.id); Toast.makeText(this,"已隐藏热门推荐，可在设置中恢复",Toast.LENGTH_SHORT).show(); refreshLibraryCards(series.id,true) }
@@ -1657,6 +1709,7 @@ class MainActivity: Activity() {
                 1 -> tvTools.confirm("取消收藏","取消收藏《${series.title}》？观看记录会保留。",anchor) {
                     favoriteMonitor.stop()
                     library.toggle(series)
+                    cloudAccount.pushFavorite(series,false)
                     catalogFocus=""; showCatalog()
                 }
             }
@@ -1697,6 +1750,7 @@ class MainActivity: Activity() {
         favorite=addButton(actions,if(library.favorite(data.series.id)) "已收藏" else "收藏") {
             favoriteMonitor.stop()
             val saved=library.toggle(data.series)
+            cloudAccount.pushFavorite(data.series,saved)
             if(saved) library.observeFavorite(data.series.id,data.episodes.size,System.currentTimeMillis(),acknowledge=true)
             favorite.text=if(saved) "已收藏" else "收藏"
         }
