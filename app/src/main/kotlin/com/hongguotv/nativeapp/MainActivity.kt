@@ -524,7 +524,11 @@ class MainActivity: Activity() {
         // Entering the history tab pulls the phone's upcoming reservations once per
         // session (loaded/loading guards inside), so the strip renders on arrival and
         // refreshes the grid through onHistoryChanged when the data lands.
+        // Entering either local shelf (favorites/history) re-syncs the account when the
+        // last pull is stale (>5 min): phone-side favorites/watch progress made after
+        // login arrive here, keeping the shelves genuinely two-way.
         if(tab==7) cloudAccount.refreshReservationsUpcoming()
+        if(tab==6 || tab==7) cloudAccount.syncIfStale()
         if(foreground && library.isLoaded && !favoriteMonitor.running) main.post { if(foreground && screen=="catalog") favoriteMonitor.check() }
         val top=row().apply { setPadding(0,0,0,dp(8)) }
         val brand=row()
@@ -1178,6 +1182,18 @@ class MainActivity: Activity() {
             }
             val remaining=if(localCatalog()) catalog.take(page*pageSize) else catalog.filterNot { it.id in library.hidden() }
             catalogFocus=remaining.getOrNull(index.coerceAtMost((remaining.size-1).coerceAtLeast(0)))?.id.orEmpty()
+            val y=catalogScroll?.scrollY ?: 0; scrollPositions[catalogPageKey]=y
+            artwork.cancelPage(); favoriteBadges.clear()
+            catalogBody?.let { body -> body.removeAllViews(); catalogGrid(body,false) }
+        } else if(changedId.isBlank() && localCatalog()) {
+            // Cloud sync landed (onHistoryChanged with no specific card): history merge
+            // or favorite sync changed the local shelf — rebuild the visible local grid
+            // (tab 6/7/collections) so phone-side rows appear immediately. Keep focus on
+            // the same card id and the scroll position.
+            catalog=localItems(); page=page.coerceIn(1,maxOf(1,(catalog.size+pageSize-1)/pageSize)); hasMore=catalog.size>page*pageSize
+            val focusedId=changedId.ifBlank { catalogCards.keys.firstOrNull { catalogCards[it]?.hasFocus()==true } ?: catalogFocus }
+            val remaining=catalog.take(page*pageSize)
+            catalogFocus=remaining.firstOrNull { it.id==focusedId }?.id ?: remaining.firstOrNull()?.id.orEmpty().ifBlank { catalogFocus }
             val y=catalogScroll?.scrollY ?: 0; scrollPositions[catalogPageKey]=y
             artwork.cancelPage(); favoriteBadges.clear()
             catalogBody?.let { body -> body.removeAllViews(); catalogGrid(body,false) }

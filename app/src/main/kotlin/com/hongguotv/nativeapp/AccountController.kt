@@ -154,6 +154,8 @@ class AccountController(
     private var busy = false
     private var lastUpload = 0L
     private var lastEpisode = ""
+    private var uploadFailures = 0
+    private var lastSyncAt = 0L
     private var pending: Pair<CloudProgress, Int>? = null
     private var lastProgress: Pair<CloudProgress, Int>? = null
     private var draining = false
@@ -1007,6 +1009,7 @@ class AccountController(
     private fun refresh(showResult: Boolean) {
         val account = credentials ?: return
         if (busy || closed) return
+        lastSyncAt = android.os.SystemClock.elapsedRealtime()
         status = "正在同步账号记录…"
         task(
             {
@@ -1081,8 +1084,20 @@ class AccountController(
         if (push.isNotEmpty()) {
             val account = account
             worker.execute {
-                push.forEach { id ->
-                    runCatching { client.setFavorite(account, id, true) }
+                val failed =
+                    push.filter { id ->
+                        runCatching { client.setFavorite(account, id, true) }.isFailure
+                    }
+                main.post {
+                    if (closed) return@post
+                    // Only the confirmed pushes join the baseline; failures stay out so the
+                    // next sync retries them (a failed push recorded as synced would be
+                    // lost forever — the phone would never see that favorite).
+                    val confirmed = push - failed
+                    if (failed.isNotEmpty()) {
+                        store.saveSyncedFavorites(store.syncedFavorites() + confirmed)
+                        toast("有 ${failed.size} 部收藏同步到云端失败，稍后进入收藏页会自动重试")
+                    } else store.saveSyncedFavorites(store.syncedFavorites() + confirmed)
                 }
             }
         }
@@ -1093,14 +1108,23 @@ class AccountController(
     fun pushFavorite(series: Series, added: Boolean) {
         val account = credentials?.takeIf { profile != null } ?: return
         worker.execute {
-            runCatching {
-                if (added) client.setFavorite(account, series.id, true)
-                else client.setFavorite(account, series.id, false)
-            }
+            val result =
+                runCatching {
+                    if (added) client.setFavorite(account, series.id, true)
+                    else client.setFavorite(account, series.id, false)
+                }
             main.post {
                 if (closed) return@post
                 val synced = store.syncedFavorites()
                 store.saveSyncedFavorites(if (added) synced + series.id else synced - series.id)
+                // The toggle already showed its local toast; a cloud failure needs its
+                // own line or the user believes the phone got the change too.
+                result.onFailure {
+                    toast(
+                        if (added) "收藏已存本机，但同步到云端失败：${safeError(it)}"
+                        else "已取消本机收藏，但云端取消失败：${safeError(it)}"
+                    )
+                }
             }
         }
     }
@@ -1165,6 +1189,19 @@ class AccountController(
         refreshReservations()
     }
 
+    /**
+     * Periodic re-sync when the user enters the local shelves (favorites/history):
+     * the login-time sync only folds what the cloud held at that moment — changes the
+     * phone made afterwards (new favorites, watch progress) arrive here. Throttled to
+     * one pull per 5 minutes so tab-hopping doesn't hammer the account endpoints.
+     */
+    fun syncIfStale() {
+        if (!signedIn || busy || closed) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (lastSyncAt != 0L && now - lastSyncAt < 5 * 60 * 1000L) return
+        refresh(false)
+    }
+
     fun upload(progress: CloudProgress, episodes: Int, force: Boolean) {
         val account = credentials?.takeIf { profile != null } ?: return
         val now = android.os.SystemClock.elapsedRealtime()
@@ -1197,10 +1234,20 @@ class AccountController(
             }
             main.post {
                 if (closed) return@post
-                if (token == generation)
+                if (token == generation) {
+                    // Silent success (a toast per 30s-throttled upload would nag); a failure
+                    // must be visible or "TV didn't sync to phone" looks like a dead feature.
+                    if (result.isSuccess) {
+                        uploadFailures = 0
+                    } else {
+                        uploadFailures++
+                        if (uploadFailures == 1)
+                            toast("进度上传失败：${safeError(result.exceptionOrNull()!!)}")
+                    }
                     status =
                         if (result.isSuccess) "播放进度已上传（请在手机端核对续播）"
                         else "进度上传失败：${safeError(result.exceptionOrNull()!!)}"
+                }
                 drain(account, token)
             }
         }
