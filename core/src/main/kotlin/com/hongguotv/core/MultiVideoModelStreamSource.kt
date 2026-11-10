@@ -142,7 +142,7 @@ internal class MultiVideoModelStreamSource(
         val payload = JSONObject()
             .put("biz_param", JSONObject()
                 .put("detail_page_version", 0)
-                .put("device_level", 3)
+                .put("device_level", 1)
                 .put("disable_digg_stat", false)
                 .put("need_all_video_definition", true)
                 .put("need_mp4_align", false)

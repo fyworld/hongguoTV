@@ -296,9 +296,6 @@ class MainActivity: Activity() {
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         window.decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-        // Persisted playback identity (2026-11-06): register once, keep forever -
-        // a TV restarted daily must not look like a farm of new devices.
-        com.hongguotv.core.PlaybackDeviceSession.shared.persistTo(java.io.File(getDir("playback", MODE_PRIVATE), "identity.json"))
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
         cloudAccount=AccountController(this,library) { remote ->
             // Cloud resume: mirror the account checkpoint into local progress, then the
