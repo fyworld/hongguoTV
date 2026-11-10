@@ -11,3 +11,4 @@ keystore.properties
 .DS_Store
 .kotlin/
 build-*.log
+build_*.log
