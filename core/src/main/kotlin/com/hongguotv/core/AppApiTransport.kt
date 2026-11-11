@@ -102,19 +102,43 @@ internal class AppApiTransport(
         "_rticket" to clock().toString())
 
     /**
-     * Six-header signature for playback channels (2026-11-05 event): the server now
-     * requires the full signature chain on playback calls - unsigned requests get
-     * HTTP 200 + empty body while the same request signed returns full data. The
-     * danmaku endpoint has used this chain all along (which is why it survived the
-     * event). Returns the signed URL + headers; the caller sends it however it
-     * needs (GET for video_tab, POST for the legacy path).
+     * Six-header signature for playback channels (2026-11-05 event): the server then
+     * required the full signature chain on playback calls. Returns the signed URL +
+     * headers; the caller sends it however it needs (GET for video_tab, POST for the
+     * legacy path).
+     *
+     * Real signature (upstream 0.1.31 / 269c6d8, 2026-11-11 event): the server now
+     * VALIDATES x-argus/x-ladon - the placeholder values this Signer emits (x-argus
+     * is just base64(ts)) plus the fake x-gorgon/x-helios/x-medusa chain mark the
+     * request as untrusted, and the playback model endpoint silently drops it
+     * (HTTP 200 + 0 bytes on every path). Rebuild those headers with the fqapp
+     * Argus/Ladon ports over the FINAL query string; x-khronos must share its time
+     * source with the URL's _rticket or the signature and query disagree.
      */
     fun sign(base: String, values: Map<String, String>, body: ByteArray?, ua: String): Signer.Request {
         val pinned = values.toMutableMap().apply {
             for (k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) this[k] = "73932"
             this["version_name"] = "7.3.9.32"
         }
-        return signer.signPlayback(base, pinned, body, ua)
+        val signed = signer.signPlayback(base, pinned, body, ua)
+        val query = signed.url.substringAfter('?', "")
+        val ticket = query.split('&')
+            .firstOrNull { it.startsWith("_rticket=") }
+            ?.substringAfter('=')
+            ?.toLongOrNull()
+        val real =
+            if (ticket != null) PlayerSigner.headers(query, body, ts = ticket / 1000, ticket = ticket)
+            else PlayerSigner.headers(query, body)
+        // The old placeholder signature headers (x-gorgon/x-helios/x-medusa etc.)
+        // read as forgery artifacts when they appear next to the real ones - the
+        // server rejects the mix outright. Keep only plain headers (UA/Accept/
+        // Content-Type/...) and layer the real signature on top.
+        val placeholder = setOf(
+            "x-gorgon", "x-helios", "x-medusa", "x-argus", "x-ladon", "x-khronos",
+            "x-ss-stub", "x-ss-req-ticket", "x-medias", "x-tt-dt",
+        )
+        val kept = signed.headers.filterKeys { it.lowercase() !in placeholder }
+        return signed.copy(headers = kept + real)
     }
 
     /**
