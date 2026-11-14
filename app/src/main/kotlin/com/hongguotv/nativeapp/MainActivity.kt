@@ -40,6 +40,13 @@ class MainActivity: Activity() {
     private var prefetchScope: RequestScope?=null
     private var prefetchedFor=""
     private var readySince=0L
+    // Verified-downgrade state (upstream 2026-11-14 capability port): the picked tier,
+    // its real coded size from the MP4 header, and the full ladder of this episode.
+    private var autoDowngrades=0
+    private var attemptedQuality=0
+    private var currentTrack: VideoTracks.Track?=null
+    private var currentTier: StreamInfo?=null
+    private var currentTiers: List<StreamInfo> = emptyList()
     private lateinit var artwork: ArtworkLoader
     private data class DeferredUi(val apply: ()->Unit,val discard: ()->Unit={})
     private var deferredWork: DeferredUi?=null
@@ -297,6 +304,9 @@ class MainActivity: Activity() {
         super.onCreate(state)
         window.decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
+        // Decoder capability probe + learned runtime failures (upstream 2026-11-14 port).
+        // TV boxes over-report AVC sizes; the log line makes a TV screenshot diagnostic.
+        CodecCapabilities.init(this); CodecCapabilities.logDeviceCapabilities()
         cloudAccount=AccountController(this,library) { remote ->
             // Cloud resume: mirror the account checkpoint into local progress, then the
             // detail page's resume path picks it up (episode + position) automatically.
@@ -1898,7 +1908,7 @@ class MainActivity: Activity() {
             }
         }
     }
-    private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false) {
+    private fun playEpisode(index: Int,position: Long=0,autoplay: Boolean=true,recovering: Boolean=false,autoDowngrade: Boolean=false) {
         updater.interrupt()
         val data=detail ?: return
         val playbackStarted=android.os.SystemClock.elapsedRealtime()
@@ -1924,6 +1934,9 @@ class MainActivity: Activity() {
         if(autoplay) sleepStopped=false
         screen="player"; episodeIndex=selectedIndex; group=episodeIndex/20
         panel=false; playError=false; playbackReady=false; quality=""; pausedForLifecycle=!autoplay
+        // A fresh episode resets the downgrade budget; an auto-downgrade retry keeps it.
+        if(!autoDowngrade) autoDowngrades=0
+        attemptedQuality=0; currentTrack=null; currentTier=null; currentTiers=emptyList()
         player?.playWhenReady=requestedAutoplay
         prefetchAttempts=0; prefetchAttemptAt=0
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -1959,8 +1972,24 @@ class MainActivity: Activity() {
         // POST covers them; switching then costs no fresh request (the server grants
         // each identity ~1 request per host path - request economy keeps playback alive).
         val ahead=data.episodes.drop(episodeIndex+1).take(2)
-        work({ prefetched ?: RemoteVideo(repository.http,repository.stream(requestedId,maxQuality,data.contentType,ahead)).prepare() }, { remote ->
-            video=remote; quality=remote.info.quality
+        // Capability-first selection (upstream 2026-11-14 port): ONE model request yields
+        // every tier; each candidate's MP4 header is read and its coded size checked
+        // against the device's real decoder capabilities BEFORE the player sees it.
+        // This fixes "some episodes play only ~10 seconds": boxes advertise AVC sizes
+        // (portrait 1080x1920 > the 1088 height cap) they cannot actually decode.
+        work({
+            prefetched?.let { OpenedStream(it,it.info,emptyList(),it.trackInfo()) }
+                ?: openStream(repository.http,repository,requestedId,maxQuality,data.contentType,
+                    supportsTier={ CodecCapabilities.supports(it) },
+                    metadataAhead=ahead,
+                    supportsTrack={ it==null || CodecCapabilities.supports(it) })
+                ?: throw java.io.IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
+        }, { opened ->
+            val remote=opened.video
+            video=remote
+            quality=if(opened.info.qualityValue>maxQuality) "${opened.info.quality}（兼容资源）" else opened.info.quality
+            attemptedQuality=opened.info.qualityValue
+            currentTrack=opened.track; currentTier=opened.info; currentTiers=opened.tiers
             val p=player ?: run {
                 val load=DefaultLoadControl.Builder().setBufferDurationsMs(15000,30000,1000,2000).setTargetBufferBytes(12*1024*1024).build()
                 val renderers=androidx.media3.exoplayer.DefaultRenderersFactory(this).setEnableDecoderFallback(true)
@@ -2066,6 +2095,27 @@ class MainActivity: Activity() {
     private fun playerFailure(problem: Throwable) {
         retryPosition=currentPosition().coerceAtLeast(0); retryAutoplay=requestedAutoplay && !sleepStopped
         saveProgress(); cancelRecovery(); cancelPrefetch()
+        // Deterministic failure (no decodable tier on this box): retrying and
+        // downgrading only reproduce it, so no auto-recovery budget / lower button.
+        val noPlayableQuality=generateSequence(problem){ it.cause }.take(8).any { it is NoPlayableQualityException }
+        // MediaCodecList over-reporting: the box claimed it could decode this codec/size
+        // but the runtime failed. Learn the exact geometry (codec|width|height) and
+        // retry one tier lower automatically instead of showing the error panel -
+        // upstream 2026-11-14 capability port, fixes the ~10s-then-error episodes.
+        if(!noPlayableQuality && problem is PlaybackException &&
+            problem.errorCode in PlaybackException.ERROR_CODE_DECODER_INIT_FAILED..PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED) {
+            val track=currentTrack; val tier=currentTier
+            when {
+                track!=null -> CodecCapabilities.learnFailure(track.fourcc,track.width,track.height)
+                tier!=null -> CodecCapabilities.learnFailure(tier.codec,tier.width,tier.height)
+            }
+            if(shouldAutoDowngrade(autoDowngrades,2,currentTiers,attemptedQuality)) {
+                autoDowngrades++
+                android.util.Log.w("HongguoTV","Auto downgrading after decoder failure (attempt $autoDowngrades, was ${attemptedQuality}P)")
+                playEpisode(episodeIndex,retryPosition,retryAutoplay,autoDowngrade=true)
+                return
+            }
+        }
         playError=true; player?.pause(); progressBar.visibility=View.GONE; hud.visibility=View.VISIBLE; controls.removeAllViews(); controls.visibility=View.VISIBLE; panel=true
         val decoding=problem is PlaybackException && problem.errorCode in 3000..4999
         val retryable=if(problem is PlaybackException) problem.errorCode in 2000..2999 || problem.errorCode==PlaybackException.ERROR_CODE_TIMEOUT else problem is java.io.IOException
@@ -2084,9 +2134,13 @@ class MainActivity: Activity() {
         android.util.Log.w("HongguoTV","Playback failure: ${problem.javaClass.simpleName}"+(if(problem is PlaybackException) " code=${problem.errorCodeName}" else "")+" [$diag]")
         val actions=row(); controls.addView(actions)
         addButton(actions,"立即重试") { playEpisode(episodeIndex,retryPosition,retryAutoplay) }.requestFocus()
-        addButton(actions,"尝试 720P") { library.maxQuality=720; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
+        // The manual button names a REAL lower tier from this episode's ladder (upstream
+        // nextLowerQuality). Fall back to 720P only when no ladder was captured (prefetch).
+        val lowerTier=if(noPlayableQuality) null else nextLowerQuality(attemptedQuality,currentTiers)
+        if(lowerTier!=null) addButton(actions,"尝试 ${lowerTier}P") { library.maxQuality=lowerTier; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
+        else if(!noPlayableQuality) addButton(actions,"尝试 720P") { library.maxQuality=720; playEpisode(episodeIndex,retryPosition,retryAutoplay) }
         addButton(actions,"返回选集") { returnToDetail() }
-        if(retryable && !sleepStopped) {
+        if(retryable && !sleepStopped && !noPlayableQuality) {
             addButton(controls,"停止自动重试") { cancelRecovery(); playbackText.text="自动重试已停止，观看位置已保留。" }
             autoRecovery=true; scheduleRecovery()
         }
@@ -2193,7 +2247,7 @@ class MainActivity: Activity() {
         episodes=addButton(options,"选集") { showEpisodePanel(episodes) }
         lateinit var more: TextView
         more=addButton(options,"播放设置") {
-            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","弹幕 ${if(library.danmaku) "开" else "关"}","弹幕设置","定时 ${sleepTimer.label()}","从头播放"),more,{ choice ->
+            tvTools.choose("播放设置",listOf("倍速 ${PlaybackSpeed.label(library.playbackSpeed)}","清晰度 ${library.maxQuality}P","画面 ${library.frameMode.label}","弹幕 ${if(library.danmaku) "开" else "关"}","弹幕设置","定时 ${sleepTimer.label()}","从头播放","重置设备能力记录"),more,{ choice ->
                 main.post {
                     if(screen=="player" && more.isAttachedToWindow) when(choice) {
                         0 -> showSpeedPicker(more)
@@ -2203,6 +2257,14 @@ class MainActivity: Activity() {
                         4 -> showDanmakuStylePicker(more,true)
                         5 -> showSleepPicker(more)
                         6 -> { seekTo(0); hidePanel() }
+                        // Clears learned decoder failures (upstream 2026-11-14 port): after
+                        // a firmware/decoder change the box re-probes its real capabilities.
+                        7 -> {
+                            val count=CodecCapabilities.learnedCount()
+                            CodecCapabilities.resetLearned()
+                            android.util.Log.i("HongguoTV","Decoder capability lessons reset ($count entries)")
+                            playbackText.text=if(count>0) "已清除 $count 条设备能力记录，重新按解码器实际能力选流" else "暂无设备能力记录"
+                        }
                     }
                 }
             })

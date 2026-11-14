@@ -62,5 +62,10 @@ class RemoteVideo(private val http: OkHttpClient, val info: StreamInfo): Closeab
         val raw=if(start+available<end) first+range(start+available,end-1).bytes else first
         return MediaCrypto.decrypt(raw,start,info.key,prepared)
     }
+    /** Coded video size from the prepared (decrypted) MP4 header; null before prepare(). */
+    @Synchronized fun trackInfo(): com.hongguotv.core.VideoTracks.Track? {
+        if(!::prepared.isInitialized) return null
+        return VideoTracks.videoTrack(prepared.header)
+    }
     override fun close() { synchronized(calls) { closed=true; calls.toList().forEach { it.cancel() }; calls.clear() } }
 }

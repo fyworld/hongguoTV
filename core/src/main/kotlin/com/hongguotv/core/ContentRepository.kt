@@ -46,7 +46,16 @@ data class Detail(val series: Series, val episodes: List<String>, val contentTyp
 data class RankPosition(val rank: Int?, val heat: String)
 data class ComicRanking(val positions: Map<String,RankPosition>, val totalPages: Int, val updatedText: String)
 data class CatalogPage(val items: List<Series>, val hasMore: Boolean, val ranking: ComicRanking? = null, val warning: String = "")
-data class StreamInfo(val url: String, val key: ByteArray?, val quality: String)
+/**
+ * One playback address. [codec]/[width]/[height] are the API metadata of the chosen
+ * rendition (upstream Rendition fields, 2026-11-14 port) so the app layer can verify
+ * them against the device's real decoder capabilities; [qualityValue] is the numeric
+ * tier (0 = unknown/auto) for ladder-style comparisons. Defaults keep the legacy
+ * 3-arg constructors of the fallback channels working unchanged.
+ */
+data class StreamInfo(val url: String, val key: ByteArray?, val quality: String,
+                      val codec: String = "", val width: Int = 0, val height: Int = 0,
+                      val qualityValue: Int = 0)
 class SearchSessionExpiredException: IOException("搜索结果已过期，请从第 1 页重新搜索")
 
 /**
@@ -494,6 +503,22 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
         // fix the affected channel (or add a new one to StreamSource.default) - this
         // method and the app never change.
         return streams.stream(id, maxQuality, type, metadataAhead, speculative)
+    }
+
+    /**
+     * Every playable tier of one episode, TV-preference order (upstream streamLadder,
+     * 2026-11-14 capability port). ONE playback-model request covers the whole ladder;
+     * the app verifies each tier against the device's real decoder capabilities
+     * (static probe + learned runtime failures) and plays the first one the box can
+     * actually decode. This is the fix for "some episodes play only ~10 seconds":
+     * boxes advertise AVC support they don't really have for portrait/oversized
+     * renditions, so metadata alone is not enough - a failed tier is learned and
+     * the next lower one is tried without re-requesting the model.
+     */
+    fun playbackTiers(id: String, maxQuality: Int = 1080, type: ContentType = ContentType.SHORT, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): List<StreamInfo> {
+        require(id.matches(Regex("[0-9]{1,30}")))
+        require(metadataAhead.size <= 2 && metadataAhead.all { it.matches(Regex("[0-9]{1,30}")) })
+        return streams.ladder(id, maxQuality, type, metadataAhead, speculative)
     }
 
     companion object {

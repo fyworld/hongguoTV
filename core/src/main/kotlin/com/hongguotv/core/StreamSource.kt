@@ -31,6 +31,16 @@ interface StreamSource {
      */
     fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): StreamInfo
 
+    /**
+     * Every playable tier of one episode (upstream streamLadder, 2026-11-14 capability
+     * port). The default is the single resolved address - channels without a multi-tier
+     * model keep working; the multi-video-model channel overrides with the full ladder
+     * so the app can verify each tier against the device's real decoder capabilities
+     * without re-requesting the model per tier switch.
+     */
+    fun ladder(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): List<StreamInfo> =
+        listOf(stream(id, maxQuality, type, metadataAhead, speculative))
+
     companion object {
         /**
          * Ordered fallback chain: multi_video_model first (current App endpoint,
@@ -71,6 +81,29 @@ internal class StreamScheduler(private val sources: List<StreamSource>) {
             } catch (e: RuntimeException) {
                 last = IOException("播放通道 ${source.name} 返回了无法解析的内容", e)
                 log.warning("channel ${source.name} parse failure for $id: $e")
+            }
+        }
+        throw last ?: IOException("没有可用的播放通道")
+    }
+
+    /**
+     * Same fallback chain for the full tier ladder (upstream streamLadder, 2026-11-14
+     * capability port). The app walks the returned list against the device's REAL
+     * decoder capabilities; channels without a multi-tier model return their single
+     * address, so the verified-downgrade flow works on every channel.
+     */
+    fun ladder(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): List<StreamInfo> {
+        var last: IOException? = null
+        for (source in sources) {
+            try {
+                val tiers = source.ladder(id, maxQuality, type, metadataAhead, speculative)
+                if (tiers.isNotEmpty()) return tiers
+            } catch (e: IOException) {
+                last = e
+                log.warning("channel ${source.name} ladder failed for $id: $e")
+            } catch (e: RuntimeException) {
+                last = IOException("播放通道 ${source.name} 返回了无法解析的内容", e)
+                log.warning("channel ${source.name} ladder parse failure for $id: $e")
             }
         }
         throw last ?: IOException("没有可用的播放通道")

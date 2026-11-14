@@ -81,7 +81,33 @@ internal class MultiVideoModelStreamSource(
     // would force a fresh POST per episode and burn the per-identity quota.
     private val upcoming: UpcomingModelCache = UpcomingModelCache.shared
 
+    /** One resolved playback model: the video_model row plus its key_seed (fallback shape). */
+    private data class Resolved(val model: JSONObject, val seed: ByteArray? = null)
+
     override fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>, speculative: Boolean): StreamInfo {
+        val resolved = resolvePlaybackModel(id, metadataAhead, speculative)
+        return select(resolved.model, maxQuality, resolved.seed)
+    }
+
+    /**
+     * Every playable tier of one episode in TV-preference order (upstream streamLadder,
+     * 2026-11-14 capability port): h264/avc1 tiers first (quality desc), then other
+     * non-bytevc2 codecs. The app layer walks this ladder with the device's REAL
+     * decoder capabilities (static probe + learned runtime failures) and opens the
+     * first tier the box can actually decode - ONE model request covers the whole
+     * verified-downgrade walk, no quota is burned per tier switch.
+     */
+    override fun ladder(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>, speculative: Boolean): List<StreamInfo> {
+        val resolved = resolvePlaybackModel(id, metadataAhead, speculative)
+        return ladderTiers(resolved.model, resolved.seed)
+    }
+
+    /**
+     * The full model-resolution flow shared by stream() and ladder(): upcoming cache,
+     * identity rotation, tab GET first, signed batch POST fallback, both response
+     * shapes (video_list and fallback_api). Only the final tier extraction differs.
+     */
+    private fun resolvePlaybackModel(id: String, metadataAhead: List<String>, speculative: Boolean): Resolved {
         // Batched read (upstream streamLadder): the caller passes the next episodes so
         // one POST covers current + next two; switching then needs no fresh request.
         // The cache also serves the recovery retries of the SAME episode (a failed
@@ -90,7 +116,7 @@ internal class MultiVideoModelStreamSource(
         upcoming.claim(id)?.let { cached ->
             try {
                 val model = cached.optJSONObject("video_model") ?: JSONObject(cached.str("video_model"))
-                if (hasVideoList(model)) return select(model, maxQuality, null)
+                if (hasVideoList(model)) return Resolved(model)
             } catch (_: Exception) {
                 // A stale/invalid cached row falls through to a fresh request.
             }
@@ -112,11 +138,11 @@ internal class MultiVideoModelStreamSource(
         // treatment now covers batched reads too. With metadataAhead the tab call
         // still goes first; when it fails, the batched POST below is the fallback
         // (one request may still cover three episodes when the POST path works).
-        tabVideoModel(id, maxQuality, speculative, trace)?.let {
+        tabModel(id, speculative, trace)?.let {
             // Any success (tab included) proves the identity works - reset the
             // empty-round state so a later incident starts counting fresh.
             resetIdentityHealing()
-            return it
+            return Resolved(it)
         }
         // MID-CALL fast rotation (upstream 0.1.26 refreshIdentity): when the shared
         // route map is EXHAUSTED (every route answered empty and is cooling = the
@@ -127,9 +153,9 @@ internal class MultiVideoModelStreamSource(
         // two more ~25s rounds. Speculative reads never take this path.
         if (!speculative && routes.exhausted()) {
             maybeRotateIdentity(force = true)
-            tabVideoModel(id, maxQuality, false, trace)?.let {
+            tabModel(id, false, trace)?.let {
                 resetIdentityHealing()
-                return it
+                return Resolved(it)
             }
         }
         // Speculative reads stop here (upstream 0.1.26: attempts < 1): the tab GET
@@ -151,18 +177,10 @@ internal class MultiVideoModelStreamSource(
                 .put("video_platform", 1024))
             .put("mixed_video_id_map", JSONObject().put("1004", JSONArray(ids)))
         val body = payload.toString().toByteArray(Charsets.UTF_8)
-        // Identity-blocklist self-healing (upstream b597f28, 2026-11-01 event probes:
-        // empty responses block per device identity - no host or connection escape,
-        // a fresh identity recovers instantly): after two consecutive fully-empty
-        // rounds, rotate the anonymous identity once before this round.
-        // (Rotation itself moved to the top of stream() - see above.)
         // Registered identity: server-issued device_id/install_id + registration cookies.
-        // Signed playback (2026-11-05 event): the server now REQUIRES the six-header
-        // chain (x-gorgon/x-khronos/x-ladon/x-argus/x-helios/x-medusa) on playback
-        // calls - UA+Cookie-only requests get HTTP 200 + empty body, while the same
-        // request signed returns full data (differential probe verified: 0B unsigned
-        // vs 17.5KB signed on the same episode). The danmaku endpoint has used this
-        // chain all along, which is why it kept working through the event.
+        // Real signature (2026-11-11 event, upstream 269c6d8): the server validates
+        // x-argus/x-ladon - AppApiTransport.sign() rebuilds them with the fqapp
+        // Argus/Ladon ports over the final query and strips the placeholder chain.
         val identity = session.profile(http)
         val data = try {
             requestPlayback(payload.toString(), identity, trace)
@@ -177,9 +195,9 @@ internal class MultiVideoModelStreamSource(
             // route's empty mark, not a timeout).
             if (routes.exhausted()) {
                 maybeRotateIdentity(force = true)
-                tabVideoModel(id, maxQuality, false, trace)?.let {
+                tabModel(id, false, trace)?.let {
                     resetIdentityHealing()
-                    return it
+                    return Resolved(it)
                 }
             }
             if (error is EmptyPlaybackResponseException) {
@@ -195,7 +213,7 @@ internal class MultiVideoModelStreamSource(
         val map = data.optJSONObject("data") ?: throw IOException("播放信息为空")
         upcoming.store(map, ids)
         val model = resolveModel(map, id)
-        if (hasVideoList(model)) return select(model, maxQuality, null)
+        if (hasVideoList(model)) return Resolved(model)
         // Second shape: only a fallback_api URL; plain GET (no signature) -> video_info.data.
         val fallback = model.str("fallback_api")
         if (fallback.isEmpty()) throw IOException("红果 App 接口未返回本集片源地址")
@@ -216,7 +234,7 @@ internal class MultiVideoModelStreamSource(
             runCatching { decode64(s) }.getOrNull() ?: throw IOException("红果 App 媒体地址密钥无效")
         }
         source.keys().forEach { k -> merged.put(k, source.get(k)) }
-        return select(merged, maxQuality, seed)
+        return Resolved(merged, seed)
     }
 
     /**
@@ -259,7 +277,7 @@ internal class MultiVideoModelStreamSource(
      * the unsigned GET started returning empty bodies while the same request signed
      * returns full data.
      */
-    private fun tabVideoModel(id: String, maxQuality: Int, speculative: Boolean = false, trace: PlaybackRequestTrace? = null): StreamInfo? {
+    private fun tabModel(id: String, speculative: Boolean = false, trace: PlaybackRequestTrace? = null): JSONObject? {
         val identity = session.profile(http)
         val extra = mapOf(
             "video_id" to id, "video_id_type" to "0", "device_level" to "1",
@@ -277,7 +295,7 @@ internal class MultiVideoModelStreamSource(
             var emptyBody = false
             val result = try {
                 // signPlayback builds base + "?" + encoded query itself (fresh _rticket,
-                // branch-0 signing); the six headers ride on the returned Request.
+                // real-signature headers via AppApiTransport.sign); GET with no body.
                 val signed = transport.sign(
                     "https://$host$TAB_PATH", identity.values + extra, null, playbackUa)
                 val request = okhttp3.Request.Builder()
@@ -298,7 +316,7 @@ internal class MultiVideoModelStreamSource(
                 if (text.isEmpty()) {
                     emptyBody = true
                     null
-                } else parseTabModel(text, id, maxQuality)
+                } else parseTabModel(text, id)
             } catch (e: IOException) {
                 if (Thread.currentThread().isInterrupted) return null
                 trace?.failed(PlaybackRequestTrace.Stage.GET, host, e)
@@ -320,8 +338,8 @@ internal class MultiVideoModelStreamSource(
         return null
     }
 
-    /** Parse the tab GET response; null on any shape mismatch (caller falls back). */
-    private fun parseTabModel(text: String, id: String, maxQuality: Int): StreamInfo? {
+    /** Parse the tab GET response into the video_model row; null on any shape mismatch (caller falls back). */
+    private fun parseTabModel(text: String, id: String): JSONObject? {
         val root = JSONObject(text)
         if (root.optInt("code", root.optInt("Code", -1)) != 0) return null
         val data = root.optJSONObject("data") ?: return null
@@ -330,13 +348,11 @@ internal class MultiVideoModelStreamSource(
             ?: rows.keys().asSequence().mapNotNull { rows.optJSONObject(it) }.firstOrNull()
             ?: return null
         val raw = row.opt("video_model") ?: return null
-        val model = when (raw) {
+        return when (raw) {
             is JSONObject -> raw
             is String -> runCatching { JSONObject(raw) }.getOrNull()
             else -> null
-        } ?: return null
-        if (!hasVideoList(model)) return null
-        return select(model, maxQuality, null)
+        }?.takeIf { hasVideoList(it) }
     }
 
     /**
@@ -496,14 +512,14 @@ internal class MultiVideoModelStreamSource(
         }
     }
 
-    /** Pick a variant from video_list; decrypt key_seed-protected addresses when present. */
-    private fun select(model: JSONObject, maxQuality: Int, seed: ByteArray?): StreamInfo {
+    /** Rows of one video_list: (numeric tier, codec, raw row), quality descending. */
+    private fun tierRows(model: JSONObject): List<Triple<Int, String, JSONObject>> {
         val videoList = model.optJSONObject("video_list") ?: run {
             val list = model.optJSONArray("video_list")
             if (list != null) { val obj = JSONObject(); for (i in 0 until list.length()) obj.put("$i", list.getJSONObject(i)); obj }
             else throw IOException("没有可用清晰度")
         }
-        val rows = videoList.keys().asSequence().mapNotNull { videoList.optJSONObject(it) }
+        return videoList.keys().asSequence().mapNotNull { videoList.optJSONObject(it) }
             .map { o ->
                 val meta = o.optJSONObject("video_meta")
                 val codec = (meta?.str("codec_type") ?: o.str("codec_type")).lowercase(Locale.ROOT)
@@ -513,12 +529,13 @@ internal class MultiVideoModelStreamSource(
                 val quality = if (definition > 0) definition else if (width > 0 && (height == 0 || width < height)) width else height
                 Triple(quality, codec, o)
             }.sortedByDescending { it.first }.toList()
-        val playable = rows.filter { it.second !in setOf("bytevc2", "bvc2") }
-        val compatible = playable.filter { it.second == "h264" || it.second == "avc1" }
-        val pool = if (compatible.isNotEmpty()) compatible else playable
-        val selected = pool.firstOrNull { it.first in 1..maxQuality } ?: pool.firstOrNull()
-            ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
-        val item = selected.third
+    }
+
+    private fun isTvCompatible(codec: String) = codec == "h264" || codec == "avc1"
+
+    /** One tier row -> a playable StreamInfo; null when the address cannot be resolved. */
+    private fun tierInfo(row: Triple<Int, String, JSONObject>, seed: ByteArray?): StreamInfo? {
+        val item = row.third
         var url = cleanUrl(item.str("main_url"))
         if (!url.startsWith("https://") && !url.startsWith("http://")) {
             // main_url may be base64, or key_seed-encrypted (spade layout a8 .. 01 00)
@@ -529,13 +546,42 @@ internal class MultiVideoModelStreamSource(
                 else -> null
             } ?: decoded?.let { runCatching { String(it, Charsets.UTF_8).trim() }.getOrNull() }
             if (plain != null && (plain.startsWith("https://") || plain.startsWith("http://"))) url = plain
-            else throw IOException("播放地址无效")
+            else return null
         }
         val encryption = item.optJSONObject("encrypt_info")
         val spade = encryption?.str("spade_a")?.ifEmpty { item.str("spade_a") } ?: item.str("spade_a")
         val key = if (spade.isNotEmpty()) runCatching { MediaCrypto.deriveKey(spade) }.getOrNull() else null
+        val meta = item.optJSONObject("video_meta")
+        val height = (meta?.str("vheight") ?: item.str("vheight")).toIntOrNull() ?: 0
+        val width = (meta?.str("vwidth") ?: item.str("vwidth")).toIntOrNull() ?: 0
+        val quality = if (row.first > 0) "${row.first}P" else "自动"
+        return StreamInfo(url, key, quality, row.second, width, height, row.first)
+    }
+
+    /**
+     * The full tier ladder (upstream StreamLadder.playbackOrder): TV-compatible codecs
+     * (h264/avc1) first, then every other non-bytevc2 codec, both quality descending.
+     * bytevc2 rows are filtered out entirely - TV decoders cannot handle them.
+     */
+    private fun ladderTiers(model: JSONObject, seed: ByteArray?): List<StreamInfo> {
+        val rows = tierRows(model)
+        val playable = rows.filter { it.second !in setOf("bytevc2", "bvc2") }
+        val compatible = playable.filter { isTvCompatible(it.second) }
+        val ordered = compatible + playable.filter { !isTvCompatible(it.second) }
+        return ordered.mapNotNull { tierInfo(it, seed) }
+    }
+
+    /** Legacy single-tier pick (stream() semantics, unchanged): best compatible tier at or below maxQuality. */
+    private fun select(model: JSONObject, maxQuality: Int, seed: ByteArray?): StreamInfo {
+        val rows = tierRows(model)
+        val playable = rows.filter { it.second !in setOf("bytevc2", "bvc2") }
+        val compatible = playable.filter { isTvCompatible(it.second) }
+        val pool = if (compatible.isNotEmpty()) compatible else playable
+        val selected = pool.firstOrNull { it.first in 1..maxQuality } ?: pool.firstOrNull()
+            ?: throw IOException("没有电视可播放的清晰度，请稍后再试或选择其他剧集")
+        val info = tierInfo(selected, seed) ?: throw IOException("播放地址无效")
         val quality = if (selected.first > 0) "${selected.first}P" + (if (selected.first > maxQuality) "（兼容资源）" else "") else "自动"
-        return StreamInfo(url, key, quality)
+        return info.copy(quality = quality)
     }
 
     companion object {
