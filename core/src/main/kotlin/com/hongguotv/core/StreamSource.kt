@@ -95,17 +95,53 @@ internal class StreamScheduler(private val sources: List<StreamSource>) {
     fun ladder(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): List<StreamInfo> {
         var last: IOException? = null
         for (source in sources) {
-            try {
-                val tiers = source.ladder(id, maxQuality, type, metadataAhead, speculative)
-                if (tiers.isNotEmpty()) return tiers
-            } catch (e: IOException) {
-                last = e
-                log.warning("channel ${source.name} ladder failed for $id: $e")
-            } catch (e: RuntimeException) {
-                last = IOException("播放通道 ${source.name} 返回了无法解析的内容", e)
-                log.warning("channel ${source.name} ladder parse failure for $id: $e")
+            // Capability-first playback must stay on the SIGNED App API channels
+            // (2026-11-14). The website's 360p channel serves a 10-second PREVIEW
+            // clip for many episodes (mvhd duration 10.0s / 514KB) while the signed
+            // model for the same episode reports 63.169s. When a sporadic empty
+            // response makes the chain fall through there, the player sees a valid
+            // 10s MP4, ends normally, and NEVER raises an error - "this episode
+            // only plays 10 seconds". Upstream has no public fallback at all, so
+            // its empty answers stay on the signed path and get retried. Keep the
+            // website channel for the legacy stream() path only.
+            if (source.name == "public-mp4") continue
+            var retries = 0
+            while (true) {
+                try {
+                    val tiers = source.ladder(id, maxQuality, type, metadataAhead, speculative)
+                    if (tiers.isNotEmpty()) return tiers
+                    break
+                } catch (e: IOException) {
+                    last = e
+                    log.warning("channel ${source.name} ladder failed for $id: $e (retry=$retries)")
+                    // A sporadic per-identity empty answer (HTTP 200 / 0 bytes) is NOT a
+                    // dead channel (2026-11-14 live probe: same episode answered 14596B,
+                    // 0B, 14619B on three fresh identities). Falling through at once
+                    // hands the player the website's 360p 10-SECOND PREVIEW clip, which
+                    // looks exactly like "this episode only plays 10s" - the player sees
+                    // a valid 10s MP4 and ends normally, so no error is ever raised.
+                    // Retry the signed channel first; upstream has no public fallback at
+                    // all, so its empty answers always stay on the signed path.
+                    if (!speculative && retries < 2 && transientEmpty(e)) {
+                        retries++
+                        try { Thread.sleep(350L * retries) }
+                        catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
+                        continue
+                    }
+                    break
+                } catch (e: RuntimeException) {
+                    last = IOException("播放通道 ${source.name} 返回了无法解析的内容", e)
+                    log.warning("channel ${source.name} ladder parse failure for $id: $e")
+                    break
+                }
             }
         }
         throw last ?: IOException("没有可用的播放通道")
     }
+
+    /** Empty-response classes (including wrapped causes) a fresh identity heals. */
+    private fun transientEmpty(e: Throwable): Boolean =
+        generateSequence(e) { it.cause }.take(6).any {
+            it is AppApiEmptyResponseException || it is EmptyPlaybackResponseException
+        }
 }

@@ -568,7 +568,13 @@ internal class MultiVideoModelStreamSource(
         val playable = rows.filter { it.second !in setOf("bytevc2", "bvc2") }
         val compatible = playable.filter { isTvCompatible(it.second) }
         val ordered = compatible + playable.filter { !isTvCompatible(it.second) }
-        return ordered.mapNotNull { tierInfo(it, seed) }
+        val tiers = ordered.mapNotNull { tierInfo(it, seed) }
+        if (tiers.isEmpty() && rows.isNotEmpty()) {
+            java.util.logging.Logger.getLogger("com.hongguotv.core.stream").warning(
+                "no playable tier out of ${rows.size} rows; video_list=${model.opt("video_list")?.javaClass?.simpleName}; first main_url=${rows.first().third.optString("main_url").take(70)}"
+            )
+        }
+        return tiers
     }
 
     /** Legacy single-tier pick (stream() semantics, unchanged): best compatible tier at or below maxQuality. */
