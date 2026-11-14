@@ -41,6 +41,14 @@ interface StreamSource {
     fun ladder(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): List<StreamInfo> =
         listOf(stream(id, maxQuality, type, metadataAhead, speculative))
 
+    /**
+     * Re-register the device identity before a retry after a transient empty answer
+     * (upstream refreshIdentity, 2026-11-14 port). Empty playback responses are keyed
+     * by device id - a fresh identity's FIRST request is usually served. Channels
+     * without a registered identity keep the no-op default.
+     */
+    fun refreshIdentity() {}
+
     companion object {
         /**
          * Ordered fallback chain: multi_video_model first (current App endpoint,
@@ -70,6 +78,9 @@ interface StreamSource {
 internal class StreamScheduler(private val sources: List<StreamSource>) {
     private val log = java.util.logging.Logger.getLogger("com.hongguotv.core.stream")
 
+    /** Independent device identities one foreground ladder read may try. */
+    private companion object { const val MAX_EMPTY_RETRIES = 4 }
+
     fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): StreamInfo {
         var last: IOException? = null
         for (source in sources) {
@@ -91,57 +102,70 @@ internal class StreamScheduler(private val sources: List<StreamSource>) {
      * capability port). The app walks the returned list against the device's REAL
      * decoder capabilities; channels without a multi-tier model return their single
      * address, so the verified-downgrade flow works on every channel.
+     *
+     * 2026-11-14 second fix (upstream streamLadder attempt loop): identity recovery is
+     * a WHOLE-ROUND retry, not a per-channel retry. Upstream keeps GET and POST routes
+     * in ONE loop and, when they are exhausted, calls refreshIdentity() INSIDE that
+     * loop and refills the routes. Our old layout retried only the channel that had
+     * just failed: a risk-control rejection on the primary channel (110001) was not
+     * transient, so the loop broke out, the backup channel (with a no-op
+     * refreshIdentity) burned all four "refreshes", and the primary was never tried
+     * again with the new identity. Live symptom: endless "empty answer; refreshing
+     * identity" retries while upstream on the same emulator played 540x960 fine,
+     * and a force-stop (which drops the in-memory identity) played on the first try.
      */
     fun ladder(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): List<StreamInfo> {
         var last: IOException? = null
-        for (source in sources) {
-            // Capability-first playback must stay on the SIGNED App API channels
-            // (2026-11-14). The website's 360p channel serves a 10-second PREVIEW
-            // clip for many episodes (mvhd duration 10.0s / 514KB) while the signed
-            // model for the same episode reports 63.169s. When a sporadic empty
-            // response makes the chain fall through there, the player sees a valid
-            // 10s MP4, ends normally, and NEVER raises an error - "this episode
-            // only plays 10 seconds". Upstream has no public fallback at all, so
-            // its empty answers stay on the signed path and get retried. Keep the
-            // website channel for the legacy stream() path only.
-            if (source.name == "public-mp4") continue
-            var retries = 0
-            while (true) {
+        var refreshes = 0
+        while (true) {
+            var recoverable = false
+            for (source in sources) {
+                // Capability-first playback must stay on the SIGNED App API channels
+                // (2026-11-14). The website's 360p channel serves a 10-second PREVIEW
+                // clip for many episodes (mvhd duration 10.0s / 514KB) while the signed
+                // model for the same episode reports 63.169s. When a sporadic empty
+                // response makes the chain fall through there, the player sees a valid
+                // 10s MP4, ends normally, and NEVER raises an error - "this episode
+                // only plays 10 seconds". Upstream has no public fallback at all, so
+                // its empty answers stay on the signed path and get retried. Keep the
+                // website channel for the legacy stream() path only.
+                if (source.name == "public-mp4") continue
                 try {
                     val tiers = source.ladder(id, maxQuality, type, metadataAhead, speculative)
                     if (tiers.isNotEmpty()) return tiers
-                    break
                 } catch (e: IOException) {
                     last = e
-                    log.warning("channel ${source.name} ladder failed for $id: $e (retry=$retries)")
-                    // A sporadic per-identity empty answer (HTTP 200 / 0 bytes) is NOT a
-                    // dead channel (2026-11-14 live probe: same episode answered 14596B,
-                    // 0B, 14619B on three fresh identities). Falling through at once
-                    // hands the player the website's 360p 10-SECOND PREVIEW clip, which
-                    // looks exactly like "this episode only plays 10s" - the player sees
-                    // a valid 10s MP4 and ends normally, so no error is ever raised.
-                    // Retry the signed channel first; upstream has no public fallback at
-                    // all, so its empty answers always stay on the signed path.
-                    if (!speculative && retries < 2 && transientEmpty(e)) {
-                        retries++
-                        try { Thread.sleep(350L * retries) }
-                        catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
-                        continue
-                    }
-                    break
+                    if (identityRecoverable(e)) recoverable = true
+                    log.warning("channel ${source.name} ladder failed for $id: $e (identity refresh=$refreshes)")
                 } catch (e: RuntimeException) {
                     last = IOException("播放通道 ${source.name} 返回了无法解析的内容", e)
                     log.warning("channel ${source.name} ladder parse failure for $id: $e")
-                    break
                 }
             }
+            if (speculative || refreshes >= MAX_EMPTY_RETRIES || !recoverable) break
+            refreshes++
+            log.warning("signed round empty/rejected; refreshing ALL channel identities (refresh $refreshes/$MAX_EMPTY_RETRIES)")
+            // Refresh EVERY channel, most importantly the primary one. Refreshing only
+            // the channel that failed last (usually the no-op backup) rotates nothing
+            // that the next round's first request actually uses.
+            sources.forEach { runCatching { it.refreshIdentity() } }
+            try { Thread.sleep(350L * refreshes) }
+            catch (_: InterruptedException) { Thread.currentThread().interrupt(); break }
+            // Start the chain over from the primary channel on the fresh identity.
         }
         throw last ?: IOException("没有可用的播放通道")
     }
 
-    /** Empty-response classes (including wrapped causes) a fresh identity heals. */
-    private fun transientEmpty(e: Throwable): Boolean =
+    /**
+     * Answers a FRESH device identity heals (including wrapped causes):
+     *  - 0-byte HTTP 200 (AppApiEmptyResponseException / EmptyPlaybackResponseException)
+     *  - non-empty risk-control envelope, code 110001 (AppApiRejectedException)
+     * Both are keyed to the registered device id; a fresh identity's FIRST playback
+     * request is reliably served (2026-11-14 live probe).
+     */
+    private fun identityRecoverable(e: Throwable): Boolean =
         generateSequence(e) { it.cause }.take(6).any {
-            it is AppApiEmptyResponseException || it is EmptyPlaybackResponseException
+            it is AppApiEmptyResponseException || it is EmptyPlaybackResponseException ||
+                it is AppApiRejectedException
         }
 }

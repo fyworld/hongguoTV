@@ -99,7 +99,43 @@ internal class MultiVideoModelStreamSource(
      */
     override fun ladder(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>, speculative: Boolean): List<StreamInfo> {
         val resolved = resolvePlaybackModel(id, metadataAhead, speculative)
-        return ladderTiers(resolved.model, resolved.seed)
+        val inline = ladderTiers(resolved.model, resolved.seed)
+        if (inline.isNotEmpty()) return inline
+        // All inline rows were bytevc2/bvc2 (VVC - no TV decoder). The official
+        // player has a compat path (upstream streamLadder / 265472f): read
+        // fallback_api, and when that model ALSO offers only bytevc2, re-request
+        // the same URL with codec_type=0&force_codec=h264. This is exactly how
+        // upstream plays these episodes at 540x960 HEVC ("960P") while we used
+        // to return an empty ladder and fall through to the 10s preview clip.
+        val compat = resolveFallbackTiers(resolved.model) ?: return emptyList()
+        return ladderTiers(compat.model, compat.seed)
+    }
+
+    /** fallback_api may be a plain URL, a JSONObject, or a one-element JSONArray. */
+    private fun fallbackUrl(model: JSONObject): String {
+        val raw = model.opt("fallback_api")
+        return when (raw) {
+            is JSONObject -> raw.str("fallback_api")
+            is JSONArray -> raw.optString(0)
+            is String -> raw
+            else -> ""
+        }
+    }
+
+    /** Legacy fallback endpoint + all-bytevc2 compat request; null when unusable. */
+    private fun resolveFallbackTiers(model: JSONObject): Resolved? {
+        val fallback = fallbackUrl(model)
+        if (!fallback.startsWith("https://")) return null
+        val outer = runCatching { fallbackJson(fallback) }.getOrNull() ?: return null
+        val inner = outer.optJSONObject("video_info")?.optJSONObject("data")
+            ?: outer.optJSONObject("data") ?: return null
+        val source = bytevc2CompatModel(inner, fallback) ?: inner
+        val seed = source.str("key_seed").takeIf { it.isNotEmpty() }
+            ?.let { runCatching { decode64(it) }.getOrNull() }
+        val merged = JSONObject()
+        model.keys().forEach { k -> merged.put(k, model.get(k)) }
+        source.keys().forEach { k -> merged.put(k, source.get(k)) }
+        return Resolved(merged, seed)
     }
 
     /**
@@ -215,7 +251,7 @@ internal class MultiVideoModelStreamSource(
         val model = resolveModel(map, id)
         if (hasVideoList(model)) return Resolved(model)
         // Second shape: only a fallback_api URL; plain GET (no signature) -> video_info.data.
-        val fallback = model.str("fallback_api")
+        val fallback = fallbackUrl(model)
         if (fallback.isEmpty()) throw IOException("红果 App 接口未返回本集片源地址")
         val outer = fallbackJson(fallback)
         val info = outer.optJSONObject("video_info")
@@ -370,9 +406,17 @@ internal class MultiVideoModelStreamSource(
         val now = System.currentTimeMillis()
         val shouldRotate = synchronized(identityLock) {
             if (rotatedThisPeriod) {
-                // Failed registration retries after 5s (upstream cooldown); a successful
-                // rotation never repeats within the period.
-                rotationFailed && now - rotatedAt >= 5_000
+                // Upstream refreshIdentity cooldown: a FAILED registration may retry
+                // after 5s; a SUCCESSFUL rotation re-arms after 30s. The old code only
+                // re-armed on failure, so one successful rotation pinned the app to
+                // that identity for the whole process - once it got blocked, every
+                // later playback stayed empty forever (2026-11-14 live incident).
+                val cooldown = if (rotationFailed) 5_000L else 30_000L
+                if (now - rotatedAt >= cooldown) {
+                    rotatedThisPeriod = false
+                    rotationFailed = false
+                    (force || emptyRounds >= IDENTITY_ROTATE_ROUNDS)
+                } else false
             } else {
                 (force || emptyRounds >= IDENTITY_ROTATE_ROUNDS)
             }
@@ -390,6 +434,25 @@ internal class MultiVideoModelStreamSource(
         // old identity - keep the blocked picture too (re-walking known-dead routes
         // would only burn more quota).
         if (rotated) routes.reset()
+    }
+
+    /**
+     * Scheduler hook (upstream refreshIdentity, 2026-11-14 port): before retrying a
+     * transient empty answer, re-register the device and hand the retry a clean route
+     * map. A fresh identity's FIRST playback request is the reliable escape from the
+     * per-device empty-response shield - retrying on the same blocked device id just
+     * burns requests. Verified live: same episode, same signature, fresh identities
+     * answered 14596B / 14596B while the stale app identity kept returning 0B.
+     */
+    override fun refreshIdentity() {
+        val rotated = try { session.rotate(http) } catch (_: Exception) { false }
+        if (rotated) routes.reset()
+        synchronized(identityLock) {
+            emptyRounds = 0
+            rotatedThisPeriod = true
+            rotatedAt = System.currentTimeMillis()
+            rotationFailed = !rotated
+        }
     }
 
     /** One more fully-empty round: returns true when this period has already rotated. */
@@ -571,7 +634,7 @@ internal class MultiVideoModelStreamSource(
         val tiers = ordered.mapNotNull { tierInfo(it, seed) }
         if (tiers.isEmpty() && rows.isNotEmpty()) {
             java.util.logging.Logger.getLogger("com.hongguotv.core.stream").warning(
-                "no playable tier out of ${rows.size} rows; video_list=${model.opt("video_list")?.javaClass?.simpleName}; first main_url=${rows.first().third.optString("main_url").take(70)}"
+                "no playable tier out of ${rows.size} rows; codecs=${rows.map { it.second }}; video_list=${model.opt("video_list")?.javaClass?.simpleName}; fallback=${model.str("fallback_api").take(60)}"
             )
         }
         return tiers

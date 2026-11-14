@@ -200,7 +200,13 @@ internal class AppApiTransport(
                 throw IOException("App 接口返回了无法解析的内容", e)
             }
             val code = data.optInt("code", data.optInt("Code", 0))
-            if (code != 0) throw IOException("App 接口暂不可用（$code）")
+            // 2026-11-14 live incident: a blocked device identity gets a NON-EMPTY
+            // JSON envelope with code 110001 (risk control) instead of 0 bytes. It is
+            // the same per-identity shield as the empty answer and heals the same way
+            // (fresh registration), so give it a typed exception the scheduler can
+            // recognise instead of a generic IOException that silently falls through
+            // to the backup channel forever.
+            if (code != 0) throw AppApiRejectedException(code)
             data
         }
     }
@@ -212,3 +218,14 @@ internal class AppApiTransport(
 
 /** Typed empty response from the App API (risk-control shape: HTTP 200 + 0 bytes). */
 internal class AppApiEmptyResponseException : IOException("App 接口暂时返回空响应，请稍后重试")
+
+/**
+ * Non-zero business code from the App API (HTTP 200 + {"code":110001}). This is the
+ * risk-control answer for a blocked device identity - the SAME per-device shield as
+ * the 0-byte response, just a different envelope. A newly registered identity is
+ * served immediately (2026-11-14 emulator: force-stop -> first frame in 1.5s), so
+ * the scheduler must treat it as identity-recoverable instead of giving up on the
+ * primary channel and falling through to a backup that never rotates its identity.
+ */
+internal class AppApiRejectedException(val code: Int) :
+    IOException("App 接口暂不可用（$code）")
