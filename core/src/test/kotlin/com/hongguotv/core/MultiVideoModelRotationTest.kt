@@ -132,6 +132,8 @@ class MultiVideoModelRotationTest {
                     "/service/2/device_register/" -> respond(request, """{"device_id":"333","install_id":"444"}""", setCookie = true)
                     MultiVideoModelStreamSource.TAB_PATH -> respond(request, "")
                     MultiVideoModelStreamSource.PATH -> respond(request, fallbackOnlyModel())
+                    // v5 通道（2026-11-16）先打；空正文 = 新通道不可用，回到 0.1.31 链路。
+                    MobilePlayback.MODEL_PATH -> respond(request, "")
                     else -> {
                         fallbackRequests.add(request)
                         // Original fallback: all bytevc2. Compat request: returns h264.
@@ -164,6 +166,8 @@ class MultiVideoModelRotationTest {
                     "/service/2/device_register/" -> respond(request, """{"device_id":"333","install_id":"444"}""", setCookie = true)
                     MultiVideoModelStreamSource.TAB_PATH -> respond(request, "")
                     MultiVideoModelStreamSource.PATH -> respond(request, fallbackOnlyModel())
+                    // v5 通道（2026-11-16）先打；空正文 = 新通道不可用，回到 0.1.31 链路。
+                    MobilePlayback.MODEL_PATH -> respond(request, "")
                     else -> {
                         fallbackRequests.add(request)
                         respond(request, mixedModel())

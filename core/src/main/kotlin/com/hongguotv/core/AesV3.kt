@@ -1,14 +1,21 @@
 // Derived from drpys 22261ad; GPL-3.0-only. Protocol-specific transform, not standard AES.
+// v5 changes adapted from N3urda/hongguoTV 6672b55; GPL-3.0-only.
 package com.hongguotv.core
 
-internal class AesV3(key: ByteArray, timestamp: Int) {
+internal class AesV3(key: ByteArray, timestamp: Int, private val v5: Boolean = false) {
     private val word = timestamp and 3
-    private val box = VendorConstants.sbox.copyOfRange(word*256,(word+1)*256).map { it.u() }
-    private val con = arrayOf(intArrayOf(1,0,2,3),intArrayOf(2,0,3,1),intArrayOf(0,1,3,2),intArrayOf(1,0,2,3))[word]
-    private val order = arrayOf(intArrayOf(0,9,14,11,4,13,2,7,8,1,6,15,12,5,10,3),intArrayOf(0,9,14,15,4,13,2,7,8,1,6,3,12,5,10,11),intArrayOf(0,9,14,7,4,13,2,11,8,1,6,3,12,5,10,15),intArrayOf(0,9,14,11,4,13,2,7,8,1,6,15,12,5,10,3))[word]
+    private val box = (if (v5) V5Constants.sbox else VendorConstants.sbox).copyOfRange(word*256,(word+1)*256).map { it.u() }
+    private val con = (if (v5) arrayOf(intArrayOf(2,0,3,1),intArrayOf(1,3,2,0),intArrayOf(3,2,1,0),intArrayOf(2,3,1,0))
+                       else arrayOf(intArrayOf(1,0,2,3),intArrayOf(2,0,3,1),intArrayOf(0,1,3,2),intArrayOf(1,0,2,3)))[word]
+    private val order = (if (v5) arrayOf(intArrayOf(0,9,14,15,4,13,2,7,8,1,6,3,12,5,10,11),intArrayOf(0,9,14,11,4,13,2,3,8,1,6,15,12,5,10,7),intArrayOf(0,9,14,3,4,13,2,15,8,1,6,11,12,5,10,7),intArrayOf(0,9,14,15,4,13,2,3,8,1,6,11,12,5,10,7))
+                        else arrayOf(intArrayOf(0,9,14,11,4,13,2,7,8,1,6,15,12,5,10,3),intArrayOf(0,9,14,15,4,13,2,7,8,1,6,3,12,5,10,11),intArrayOf(0,9,14,7,4,13,2,11,8,1,6,3,12,5,10,15),intArrayOf(0,9,14,11,4,13,2,7,8,1,6,15,12,5,10,3)))[word]
+    // v5 的明文打包/回写位置表与旧协议不同；旧表等价于原来的逐位展开写法。
+    private val wire = if (v5) intArrayOf(6,5,3,4,2,7,1,0) else intArrayOf(5,6,2,4,3,1,0,7)
+    private val compact = if (v5) intArrayOf(1,7,3,6,2,0,4,5) else intArrayOf(1,6,0,7,2,4,5,3)
     private val keys: Array<IntArray>
     init {
-        val initial = intArrayOf(0xca025ddc.toInt(),0x823dc546.toInt(),0xc9420583.toInt(),0xc298225f.toInt())[word]
+        val initial = (if (v5) intArrayOf(0xbbb5de72.toInt(),0xd4638d5b.toInt(),0x92a5f73b.toInt(),0x89f8a1c9.toInt())
+                       else intArrayOf(0xca025ddc.toInt(),0x823dc546.toInt(),0xc9420583.toInt(),0xc298225f.toInt()))[word]
         val expanded = (xor(le32(initial)+le32(initial)+le32(initial)+le32(initial),key)+ByteArray(32)).map { it.u() }.toIntArray()
         var rounds = 8
         for (i in 4 until 12) {
@@ -51,24 +58,16 @@ internal class AesV3(key: ByteArray, timestamp: Int) {
 
     fun encrypt(source: ByteArray, iv: ByteArray): ByteArray {
         val plaintext=ByteArray(32)
-        for(i in 0 until 31) {
-            val at=i*8
-            plaintext[i]=(((src(source,at) shr 4) and 2) or (src(source,at+1) and 64) or ((src(source,at+2) shr 2) and 1) or ((src(source,at+3) shl 3) and 128) or ((src(source,at+4) shr 1) and 4) or ((src(source,at+5) shl 3) and 16) or ((src(source,at+6) shl 5) and 32) or ((src(source,at+7) shr 4) and 8)).toByte()
+        for(i in 0 until 31) for(j in 0..7) {
+            plaintext[i]=(plaintext[i].u() or (((src(source,i*8+j) shr wire[j]) and 1) shl compact[j])).toByte()
         }
         plaintext[31]=1
         val first=block(xor(plaintext.copyOfRange(0,16),iv))
         val key=first+block(xor(plaintext.copyOfRange(16,32),first))
         val out=source.copyOf()
-        for(i in 0 until 31) {
-            val at=i*8; val k=key[i].u()
-            put(out,at,(src(out,at) and 0xdf) or ((k shl 4) and 32))
-            put(out,at+1,(src(out,at+1) and 0xbf) or (k and 64))
-            put(out,at+2,(src(out,at+2) and 0xfb) or ((k shl 2) and 4))
-            put(out,at+3,(src(out,at+3) and 0xef) or ((k shr 3) and 16))
-            put(out,at+4,(src(out,at+4) and 0xf7) or ((k+k) and 8))
-            put(out,at+5,(src(out,at+5) and 0xfd) or ((k shr 3) and 2))
-            put(out,at+6,(src(out,at+6) and 0xfe) or ((k shr 5) and 1))
-            put(out,at+7,(src(out,at+7) and 0x7f) or ((k shl 4) and 128))
+        for(i in 0 until 31) for(j in 0..7) {
+            val at=i*8+j
+            put(out,at,(src(out,at) and (1 shl wire[j]).inv()) or (((key[i].u() shr compact[j]) and 1) shl wire[j]))
         }
         return byteArrayOf(key.last())+out
     }

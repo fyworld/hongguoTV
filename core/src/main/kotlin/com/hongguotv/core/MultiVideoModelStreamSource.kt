@@ -167,6 +167,14 @@ internal class MultiVideoModelStreamSource(
         // outcome lands in the error message, so a TV screenshot shows exactly
         // which host answered what (G:b=200/0B/h2 P:hl=200/17KB/h2 ...).
         val trace = PlaybackRequestTrace()
+        // v5 通道（2026-11-16 事件 / 上游 0.1.32 d338994）：11-16 17:57 起旧链路对
+        // 全部身份返回 200+0B（上游同版本同样失败，issue #108），平台改成
+        // /novel/player/multi_video_model/player/v1 + gzip 请求体 + v5 签名。
+        // 新通道优先；失败再走下面的旧链路（旧链路保留：平台若回滚仍能自愈）。
+        mobileModel(id, trace)?.let {
+            resetIdentityHealing()
+            return Resolved(it)
+        }
         // GET video_tab FIRST (upstream 0.1.26 PlaybackRoutes: Route(true, host(0))
         // leads every plan; the POST path is only a fallback). The 2026-11-07 probe
         // showed the batched POST path returning empty for every batch while the
@@ -293,6 +301,32 @@ internal class MultiVideoModelStreamSource(
         val outer = fallbackJson(compatible)
         return outer.optJSONObject("video_info")?.optJSONObject("data")
             ?: outer.optJSONObject("data")
+    }
+
+    /**
+     * v5 播放模型通道：新接口 + gzip + v5 签名（见 [MobilePlayback]）。
+     *
+     * 只取目标集，不做跨 host 重试——v5 通道要么直接给模型，要么明确失败，此时
+     * 交给旧链路（它有完整的 host/身份自愈）。空响应按"该身份被屏蔽"计数，让
+     * 后续的轮换阈值照常推进。
+     */
+    private fun mobileModel(id: String, trace: PlaybackRequestTrace?): JSONObject? = try {
+        val identity = session.profile(http)
+        val entry = MobilePlayback.model(id, identity.values, http, MobilePlayback.signer, System.currentTimeMillis())
+        trace?.response(PlaybackRequestTrace.Stage.POST, v5Host, 200, entry.toString().toByteArray(Charsets.UTF_8).size, okhttp3.Protocol.HTTP_2)
+        entry.optJSONObject("video_model") ?: normalizeModel(entry.get("video_model"))
+    } catch (error: EmptyPlaybackResponseException) {
+        trace?.failed(PlaybackRequestTrace.Stage.POST, v5Host, error)
+        noteEmptyRound()
+        null
+    } catch (error: AppApiRejectedException) {
+        trace?.failed(PlaybackRequestTrace.Stage.POST, v5Host, error)
+        null
+    } catch (error: IOException) {
+        trace?.failed(PlaybackRequestTrace.Stage.POST, v5Host, error)
+        null
+    } catch (error: RuntimeException) {
+        null
     }
 
     /**
@@ -655,6 +689,9 @@ internal class MultiVideoModelStreamSource(
 
     companion object {
         const val PATH = "/novel/player/multi_video_model/v1/"
+
+        /** v5 通道的固定域名（上游 MobilePlayback 同值）。 */
+        internal const val v5Host = "api5-normal-sinfonlinea.fqnovel.com"
 
         /** Official client's current playback-model path (2026-11-02 migration). */
         const val TAB_PATH = "/reading/bookapi/video_tab/multi_video_model/v1/"

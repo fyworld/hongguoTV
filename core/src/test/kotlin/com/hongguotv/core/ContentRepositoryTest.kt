@@ -77,26 +77,32 @@ class ContentRepositoryTest {
         // GET /reading/bookapi/video_tab/multi_video_model/v1/ with snake_case params
         // (missing any returns 100103). A healthy video_tab answer must serve the
         // playback WITHOUT touching the old POST path.
+        // 2026-11-16: v5 通道（/player/v1）排在最前；本用例让它返回空正文（不可用），
+        // 验证 video_tab 这条 0.1.31 链路仍然完好 —— 平台若回滚我们还有退路。
         PlaybackRoutes.shared.reset() // process-wide route health - start clean
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
-            if(request.url.encodedPath=="/reading/bookapi/video_tab/multi_video_model/v1/") {
-                // The endpoint's documented shape: data.video_model_data[id].video_model
-                // (object or JSON string), five-tier video_list, spade_a keys.
-                JSONObject().put("code",0).put("data",JSONObject()
-                    .put("video_model_data",JSONObject().put("123",JSONObject()
-                        .put("video_model",JSONObject().put("video_list",JSONObject()
-                            .put("v0",JSONObject().put("video_meta",JSONObject().put("vheight",720).put("codec_type","bytevc2")).put("main_url","https://example.com/vtab-720"))
-                            .put("v1",JSONObject().put("video_meta",JSONObject().put("vheight",1080).put("codec_type","bytevc1")).put("main_url","https://example.com/vtab-1080")))))))
-                    .toString()
+            when (request.url.encodedPath) {
+                MobilePlayback.MODEL_PATH -> ""
+                "/reading/bookapi/video_tab/multi_video_model/v1/" -> {
+                    // The endpoint's documented shape: data.video_model_data[id].video_model
+                    // (object or JSON string), five-tier video_list, spade_a keys.
+                    JSONObject().put("code",0).put("data",JSONObject()
+                        .put("video_model_data",JSONObject().put("123",JSONObject()
+                            .put("video_model",JSONObject().put("video_list",JSONObject()
+                                .put("v0",JSONObject().put("video_meta",JSONObject().put("vheight",720).put("codec_type","bytevc2")).put("main_url","https://example.com/vtab-720"))
+                                .put("v1",JSONObject().put("video_meta",JSONObject().put("vheight",1080).put("codec_type","bytevc1")).put("main_url","https://example.com/vtab-1080")))))))
+                        .toString()
+                }
+                else -> throw AssertionError("video_tab hit must not fall back to the old path: "+request.url)
             }
-            else throw AssertionError("video_tab hit must not fall back to the old path: "+request.url)
         }
         val result=repo.stream("123",1080)
         assertEquals("https://example.com/vtab-1080",result.url)
         assertEquals("1080P",result.quality)
-        assertTrue(requests.none { it.url.encodedPath.startsWith("/novel/player/") })
+        // 退役的批量 POST 路径一次都不许碰（v5 走的是 /player/v1，不是它）。
+        assertTrue(requests.none { it.url.encodedPath == MultiVideoModelStreamSource.PATH })
     }
 
     @Test fun videoTabFailureFallsBackToOldPath() {
@@ -107,7 +113,9 @@ class ContentRepositoryTest {
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
-            if(request.url.encodedPath.startsWith("/reading/bookapi/video_tab/"))
+            // v5 通道先打（2026-11-16）：让它空正文 = 新通道不可用，继续验证旧链路退路。
+            if(request.url.encodedPath==MobilePlayback.MODEL_PATH) ""
+            else if(request.url.encodedPath.startsWith("/reading/bookapi/video_tab/"))
                 """{"code":100103,"message":"PARAM_INVALID","data":null}"""
             else if(request.url.encodedPath=="/novel/player/multi_video_model/v1/") {
                 val rows=JSONObject()
@@ -158,11 +166,12 @@ class ContentRepositoryTest {
         assertNotNull(request.url.queryParameter("_rticket"))
     }
 
-    @Test fun feedRequestPinsTheRegistrationVersion73932() {
+    @Test fun feedRequestPinsTheRegistrationVersion74332() {
         // 2026-10-30: the server started returning empty bodies for the old 73532 pin
-        // (ai_series first, then short_play). The feed must pin 73932, the version the
-        // device registers with, and the UA must follow (the signature chain binds UA
-        // to the query version_code). Stale feedThemeId themes still exercise this.
+        // (ai_series first, then short_play). The feed must pin the version the device
+        // registers with, and the UA must follow (the signature chain binds UA to the
+        // query version_code). 2026-11-16: the pin moved to 74332 / 7.4.3.32 (official
+        // 7.4.3.32, 2026-11-01) - the same retirement pattern 73532 showed in October.
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
@@ -170,12 +179,12 @@ class ContentRepositoryTest {
         }
         repo.themeCatalog(ContentType.SHORT,Theme("chuanyue","穿越",feedThemeId = "37"),1)
         val request=requests.single()
-        assertEquals("73932",request.url.queryParameter("version_code"))
-        assertEquals("73932",request.url.queryParameter("manifest_version_code"))
-        assertEquals("73932",request.url.queryParameter("update_version_code"))
-        assertEquals("7.3.9.32",request.url.queryParameter("version_name"))
-        assertEquals("73932",request.url.queryParameter("pv_player"))
-        assertTrue(request.header("User-Agent")!!.startsWith("com.phoenix.read/73932 "))
+        assertEquals("74332",request.url.queryParameter("version_code"))
+        assertEquals("74332",request.url.queryParameter("manifest_version_code"))
+        assertEquals("74332",request.url.queryParameter("update_version_code"))
+        assertEquals("7.4.3.32",request.url.queryParameter("version_name"))
+        assertEquals("74332",request.url.queryParameter("pv_player"))
+        assertTrue(request.header("User-Agent")!!.startsWith("com.phoenix.read/74332 "))
     }
 
     @Test fun feedMidLoopEmptyRoundKeepsCollectedRows() {

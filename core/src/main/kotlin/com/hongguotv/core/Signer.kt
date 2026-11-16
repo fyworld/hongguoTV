@@ -1,5 +1,6 @@
 // Kotlin port of drpys 22261adfa31435e3b3ef5a730b8a2a75bcaf1715; GPL-3.0-only.
 // Only hash branch 0 is emitted: adjust the request ticket before signing.
+// v5 changes adapted from N3urda/hongguoTV 6672b55; GPL-3.0-only.
 package com.hongguotv.core
 
 import java.io.ByteArrayOutputStream
@@ -23,6 +24,12 @@ internal class Signer(
     private val processNonce: String = java.util.Base64.getUrlEncoder()
         .withoutPadding()
         .encodeToString(ByteArray(18).also(java.security.SecureRandom()::nextBytes)),
+    /**
+     * v5 播放签名协议（官方 App v04.10.03，2026-11-16 事件）：
+     * 摘要分支固定取 iv&15==12 的那一支，medusa/helios/AesV3 换成 v5 常量表。
+     * 旧目录/账号签名保持 mobileV5=false 不受影响。
+     */
+    private val mobileV5: Boolean = false,
 ) {
     private val processStarted: Long = clock()
     data class Request(val url: String, val headers: Map<String, String>, val body: ByteArray?)
@@ -53,6 +60,8 @@ internal class Signer(
     fun branch(query: String, body: ByteArray?, ts: Int): Int {
         val ivV = iv(sm3(query.toByteArray()), body?.let { digest("MD5", it) } ?: ByteArray(16), ts)
         val low = ivV and 15
+        // v5：只有 iv&15==12 是"可用分支"（映射成 0），其余一律 1（调用方据此重挑票据）。
+        if (mobileV5) return if (low == 12) 0 else 1
         return low - (((low * 171) shr 9) * 3)
     }
     private fun sumMd5(data: ByteArray): Int {
@@ -65,6 +74,7 @@ internal class Signer(
         return (check or 4) xor 0x1000000
     }
     fun hashF13(query: ByteArray, body: ByteArray, ts: Int): ByteArray {
+        if (mobileV5) return hashF13V5(query, body, ts)
         val ivV = iv(query, body, ts)
         val low = ivV and 15
         val ivV0 = (low * 171) shr 9
@@ -112,6 +122,47 @@ internal class Signer(
         val ret = (0..7).fold(byteArrayOf()) { a, i -> a + be32(d[i] + initial[i]) }
         for (i in 0 until 16) ret[i] = (ret[i].u() xor ret[i + 16].u()).toByte()
         return ret.copyOf(16) + le32(sumMd5(ret.copyOf(16)))
+    }
+
+    /**
+     * v5 摘要：固定 12 号分支（iv&15==12），常量表换成 0x9d4a97c2，末字节带 0x20 标记。
+     * 与旧分支 0 的差别仅在这三处，压缩主体完全一致。
+     */
+    private fun hashF13V5(query: ByteArray, body: ByteArray, ts: Int): ByteArray {
+        val ivV = iv(query, body, ts)
+        require(ivV and 15 == 12) { "Unsupported hash branch" }
+        val ivV1 = 0x9d4a97c2.toInt()
+        val count = ivV1 + ts
+        val tt = VendorConstants.hashTable.map { ror(it, (count + 1) and 255) }
+        val shift = (count + 2) and 7
+        val pad = intArrayOf(0xfa,0x45,0x61,0xd7).map { ((it or (it shl 8)) shr shift).toByte() }.toByteArray()
+        val data = query + body + le32(ts) + pad + hex("00000000000001a0")
+        val di = (data.indices step 4).map { data.i32(it) }.toMutableList()
+        for (i in 0 until 112) {
+            val x = di[i + 1]
+            val y = di[i + 14]
+            di.add(di[i] + di[i + 9] + (rol(x,14) xor rol(x,25) xor (x ushr 3)) + (rol(y,13) xor rol(y,15) xor (y ushr 10)))
+        }
+        val initial = intArrayOf(0x7aba4fc8,0x67166507,0x6403fa00,0x340f512f,984304912,3005047866L.toInt(),2874125293L.toInt(),2152413264L.toInt()).map { ror(it, count) }
+        val chosen = intArrayOf(96,1,3,4,0,6,5,2,0,7,7)
+        val d = initial.toMutableList()
+        for (i in 0 until chosen[0]) {
+            val base = ivV1 + i
+            val n1 = ((d[chosen[3]] xor d[chosen[4]]) and d[chosen[1]]) xor d[chosen[3]]
+            val n2 = rol(d[chosen[1]],26) xor rol(d[chosen[1]],21) xor rol(d[chosen[1]],7)
+            val n4 = di[base and 127] + n1 + n2 + tt[base and 63] + d[chosen[5]]
+            val n5 = rol(d[chosen[2]],30) xor rol(d[chosen[2]],19) xor rol(d[chosen[2]],10)
+            val n6 = (d[chosen[2]] and d[chosen[6]]) or ((d[chosen[2]] or d[chosen[6]]) and d[chosen[7]])
+            val old = d[chosen[9]]
+            val last = d[7]
+            for (k in 7 downTo 1) d[k] = d[k - 1]
+            d[0] = last
+            d[chosen[10]] = n5 + n6 + n4
+            d[chosen[8]] = old + n4
+        }
+        val ret = (0..7).fold(byteArrayOf()) { a, i -> a + be32(d[i] + initial[i]) }
+        val folded = ByteArray(16) { (ret[it].u() xor ret[it + 16].u()).toByte() }
+        return folded + le32(sumMd5(folded) or 0x20)
     }
 
     // hashF13 branch 2: md5V3-variant compression driven by the Branch2 tables.
@@ -234,6 +285,51 @@ internal class Signer(
         val prefix = (0 until 20 step 4).fold(byteArrayOf()) { a,i -> a+le32(versionBytes.i32(i,true) xor ts) }
         return (prefix+byteArrayOf(r.toByte(),(r shr 8).toByte(),0,1)+encrypted).base64()
     }
+    /**
+     * v5 medusa（官方 v04.10.03 / 2026-11-16 事件）：明文结构、magic、license、
+     * 设备信息字段与 AesV3 常量表全部换新，载荷首字节 0xCA，长度 248 字节起。
+     * 内嵌的 device_id / 版本 / channel 必须与 query 完全一致（服务端核对）。
+     */
+    private fun medusaV5(url: String, body: ByteArray?, ts: Int, who: Map<String, String>): String {
+        val query = sm3(url.substringAfter('?').toByteArray(Charsets.UTF_8))
+        val f13 = hashF13V5(query, body?.let { digest("MD5", it) } ?: ByteArray(16), ts)
+        val flags = ByteArray(8)
+        fun v(key: String, fallback: String) = who[key] ?: device[key] ?: fallback
+        val version = v("version_name", "7.4.3.32")
+        val deviceInfo = proto(
+            f(1,1,"sint"), f(2,2,"sint"), f(3,"8662"), f(4, v("device_id", "0")),
+            f(5, processNonce), f(6,"!noperm!"), f(12,"Asia/Shanghai,8"), f(13,"zh_CN"),
+            f(22, v("os_version", "16")), f(25, processStarted,"sint"),
+            f(30, v("device_type", "25053RT47C")), f(31,"HONOR"),
+            f(32, v("device_type", "25053RT47C")), f(34,"HONOR"),
+        )
+        val env = proto(f(6,"v04.10.03.04-bugfix"), f(8, v("channel", "update_64")),
+            f(12, deviceInfo), f(14, version))
+        val message = proto(
+            f(1, V5Constants.magic), f(2,5,"sint"), f(3, unsigned(rand()),"sint"),
+            f(4,"8662"), f(5, v("device_id", "0")), f(6, V5Constants.license),
+            f(7, version), f(8,"v04.10.03-ml-android"), f(9, 0x040a0300,"sint"),
+            f(10, flags), f(12, ts,"sint"), f(13, f13), f(14, query.copyOf(6)),
+            f(15, proto(f(1,1,"sint"),f(2,1,"sint"),f(3,1,"sint"),f(5,1,"sint"))),
+            f(17, ts,"sint"), f(20,"none"), f(21,377,"sint"), f(23, env),
+            f(24, """{"cmr":16777216,"cmr2":16777216,"un_h":11,"vpn":0,"kd":0,"dyn":"","do":1,"tk":true}"""),
+        )
+        val nonce = rand()
+        val key = V5Constants.signKey
+        val hash = sm3(key + le32(nonce) + key)
+        val high = (nonce ushr 16) and 255
+        val seed = le32((((high shl 11) or (nonce ushr 24)) xor (high shr 5) xor high).inv())
+        val transformed = (flags + xmxor(message, hash)).reversedArray()
+        for (i in transformed.indices) transformed[i] = (transformed[i].u() xor seed[i.inv() and 3].u()).toByte()
+        val check = 0x18000001 or ((query[0].u() and 63) shl 14) or ((f13[0].u() and 63) shl 8)
+        val packed = byteArrayOf(0xca.toByte()) + le32(rand()) + le32(check) + transformed +
+            byteArrayOf((nonce ushr 16).toByte(), (nonce ushr 24).toByte())
+        val encrypted = AesV3(digest("MD5", key.copyOfRange(0,16)), ts, v5 = true)
+            .encrypt(packed, digest("MD5", key.copyOfRange(16,32)))
+        val prefix = le32(5) + V5Constants.magic
+        for (i in prefix.indices) prefix[i] = (prefix[i].u() xor le32(ts)[i and 3].u()).toByte()
+        return (prefix + byteArrayOf(nonce.toByte(),(nonce ushr 8).toByte(),0,1) + encrypted).base64()
+    }
     fun helios(ts: Int): String {
         val random = rand()
         val ascii = digest("MD5",le32(random)+"8662".toByteArray()).hex().toByteArray()
@@ -243,7 +339,9 @@ internal class Signer(
             var x8 = (java.lang.Long.rotateRight(b8,8)+b0) xor i.toLong()
             words.add(x8); x8 = x8 xor java.lang.Long.rotateRight(b0,61); table.add(x8); b0=x8; b8=words.removeAt(0)
         }
-        val text = "$ts-1588093228-8662".toByteArray(); val padding = 16 - text.size % 16
+        // v5 协议的内嵌 license 换成 V5Constants.license（官方 v04.10.03 的值）。
+        val text = ("$ts-" + (if (mobileV5) V5Constants.license else "1588093228") + "-8662").toByteArray()
+        val padding = 16 - text.size % 16
         val data = text+ByteArray(padding) { padding.toByte() }
         var output = le32(random)
         for (at in data.indices step 16) {
@@ -309,6 +407,38 @@ internal class Signer(
         }
         error("无法生成播放签名")
     }
+
+    /**
+     * v5 播放签名（官方 v04.10.03，2026-11-16 事件）。
+     *
+     * 与旧链路的三处差别：
+     *  1. query 不带 ts，只更新 _rticket（票据直接构成签名输入）；
+     *  2. 摘要分支必须落在 iv&15==12；
+     *  3. 只保留 x-khronos / x-helios / x-medusa —— 旧链路的 x-argus / x-ladon /
+     *     x-gorgon / x-ss-req-ticket 在 v5 下是伪造特征，带上反而被拒。
+     * `values` 必须含 device_id / version_name / channel / os_version / device_type，
+     * medusa 明文要把它们原样回写。
+     */
+    fun signPlaybackV5(base: String, values: Map<String,String>, body: ByteArray?, now: Long = clock()): Request {
+        val ts = (now / 1000).toInt()
+        for (offset in 0..1023) {
+            val ticket = now + offset
+            val query = encode(values + ("_rticket" to ticket.toString()))
+            if (branch(query, body, ts) != 0) continue
+            val url = "$base?$query"
+            val headers = linkedMapOf(
+                "x-khronos" to ts.toString(),
+                "x-helios" to helios(ts),
+                "x-medusa" to medusaV5(url, body, ts, values),
+            )
+            if (body != null) {
+                headers["Content-Type"] = "application/json; charset=utf-8"
+                headers["x-ss-stub"] = digest("MD5", body).hex().uppercase()
+            }
+            return Request(url, headers, body)
+        }
+        error("无法生成播放签名")
+    }
     companion object {
         /**
          * Process-wide shared signer context (upstream 1b53a1e, 2026-11-06 event):
@@ -328,6 +458,14 @@ internal class Signer(
         @Synchronized
         internal fun shared(clock: () -> Long): Signer =
             sharedContext ?: Signer(clock).also { sharedContext = it }
+
+        /** v5 播放签名器的进程稳定实例（nonce / 启动时间跨请求一致，同 [shared]）。 */
+        @Volatile
+        private var sharedV5Context: Signer? = null
+
+        @Synchronized
+        internal fun sharedV5(clock: () -> Long): Signer =
+            sharedV5Context ?: Signer(clock, mobileV5 = true).also { sharedV5Context = it }
 
         val BRANCH2_SV = intArrayOf(
             0xa7aefe20.toInt(),0x7149f1d6.toInt(),0x47e4ca07.toInt(),0xe9b58f67.toInt(),0x93b924de.toInt(),0xc614d0f5.toInt(),0x38afe0ef.toInt(),0xb2bbad73.toInt(),

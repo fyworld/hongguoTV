@@ -14,10 +14,14 @@ import java.util.concurrent.TimeUnit
  * 2026-11-14: retry with a FRESH device identity up to 3 times. The platform also
  * emits sporadic per-identity empty responses (the same "empty response shield"
  * the app heals with rotate()); a single 0-byte round is NOT a signature regression.
+ * 2026-11-16: 该链路已被平台下线（同机对照旧签名 200+0B、v5 签名 200+24345B，上游
+ * issue #108 同现象），正式播放改走 [SignedPlaybackV5ProbeTest] 的 /player/v1 + v5 签名。
+ * 本探针保留作"平台若回滚"的对照组，默认不参与测试运行（@Ignore），需要时手动去掉注解。
  * Run manually (hits the live API):
  *   gradlew :core:test --tests "com.hongguotv.core.SignedPlaybackProbeTest"
  */
 class SignedPlaybackProbeTest {
+    @org.junit.Ignore("旧六头签名链路 2026-11-16 起被平台下线；v5 探针替代")
     @org.junit.Test
     fun probe() {
         val http = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()

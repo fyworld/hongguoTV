@@ -96,6 +96,8 @@ internal class PlaybackRoutes(
             "api5-normal-sinfonlineb.fqnovel.com" -> "b"
             "api5-normal-hl.fqnovel.com" -> "hl"
             "api5-normal-lf.fqnovel.com" -> "lf"
+            // v5 播放模型通道（/player/v1）固定走 a 域。
+            "api5-normal-sinfonlinea.fqnovel.com" -> "a"
             else -> "other"
         }
     }
