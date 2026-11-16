@@ -123,8 +123,8 @@ class PhoneLogin(private val http: OkHttpClient) {
                         "manifest_version_code",
                         "update_version_code",
                         "pv_player",
-                    )) put(key, "73932")
-                put("version_name", "7.3.9.32")
+                    )) put(key, "74332")
+                put("version_name", "7.4.3.32")
             }
         val passport =
             mapOf("aid" to "8662", "app_name" to "novelread", "device_platform" to "android") +

@@ -139,8 +139,8 @@ class CloudAccountClient(private val http: OkHttpClient) {
                         "manifest_version_code",
                         "update_version_code",
                         "pv_player",
-                    )) put(key, if (body != null) "73932" else "72232")
-                put("version_name", if (body != null) "7.3.9.32" else "7.2.2.32")
+                    )) put(key, if (body != null) "74332" else "72232")
+                put("version_name", if (body != null) "7.4.3.32" else "7.2.2.32")
             }
         val wireBody =
             if (gzip && body != null)

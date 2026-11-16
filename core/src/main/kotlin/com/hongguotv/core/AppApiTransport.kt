@@ -40,7 +40,7 @@ internal class AppApiTransport(
     private val signer = Signer.shared { clock() }
 
     /** App client UA: must match the version_code/version_name in the query profile. */
-    val userAgent = "com.phoenix.read/73932 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
+    val userAgent = "com.phoenix.read/74332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
 
     private fun newDeviceId(): String {
         // Server risk control rejects fixed/fake values with 110001; the App-side rule
@@ -93,8 +93,8 @@ internal class AppApiTransport(
      *  NO ts param: the landpage feed rejects queries carrying it (HTTP 200 empty body);
      *  the playback endpoint is ts-insensitive, so one profile serves both. */
     fun queryProfile(): Map<String,String> = linkedMapOf(
-        "aid" to "8662", "app_name" to "novelread", "version_code" to "73932", "version_name" to "7.3.9.32",
-        "manifest_version_code" to "73932", "update_version_code" to "73932", "channel" to "update_64",
+        "aid" to "8662", "app_name" to "novelread", "version_code" to "74332", "version_name" to "7.4.3.32",
+        "manifest_version_code" to "74332", "update_version_code" to "74332", "channel" to "update_64",
         "device_platform" to "android", "os" to "android", "ssmix" to "a", "device_type" to "25053RT47C",
         "device_brand" to "Redmi", "language" to "zh", "os_api" to "36", "os_version" to "16",
         "resolution" to "1280*2772", "dpi" to "520", "ac" to "wifi",
@@ -117,8 +117,8 @@ internal class AppApiTransport(
      */
     fun sign(base: String, values: Map<String, String>, body: ByteArray?, ua: String): Signer.Request {
         val pinned = values.toMutableMap().apply {
-            for (k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) this[k] = "73932"
-            this["version_name"] = "7.3.9.32"
+            for (k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) this[k] = "74332"
+            this["version_name"] = "7.4.3.32"
         }
         val signed = signer.signPlayback(base, pinned, body, ua)
         val query = signed.url.substringAfter('?', "")
@@ -151,14 +151,10 @@ internal class AppApiTransport(
      * [identity] carries a server-registered device (PlaybackDeviceSession): the
      * 2026-10-27 empty-body crackdown rejects unregistered device_ids on the
      * landpage feed too, so feed calls pass the registered values + cookies here.
-     * Version pin: 73932 (the registration version) - the old 73532 pin started
-     * getting empty bodies on the ai_series channel first (2026-10-30, AI 穿越
-     * theme empty), then on short_play as well; the server is retiring it.
-     *
-     * [ua] overrides the client UA. The ai_series channel (2026-10-30) answers
-     * the phoenix.read UA with an empty body but serves the dragon.read UA
-     * (Fanqie's reader app, which carries the AI-drama feed) - upstream's
-     * RecommendationFeed pins the same dragon UA on this endpoint.
+     * Version pin: 74332 (2026-11-16 event) - the 73932 pin started getting empty
+     * bodies on the playback model first (2026-11-16, upstream 0.1.31 hit too),
+     * the same retirement pattern 73532 showed in October. The official app is on
+     * 7.4.3.32 (2026-11-01 release).
      */
     fun request(path: String, payload: String?, signed: Boolean = true,
                 identity: PlaybackDeviceSession.Profile? = null,
@@ -171,8 +167,8 @@ internal class AppApiTransport(
             return requestUrl("$APP_BASE$path?$query", body, headers)
         }
         val values = if (identity != null) identity.values.toMutableMap().apply {
-            for (k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) this[k] = "73932"
-            this["version_name"] = "7.3.9.32"
+            for (k in listOf("version_code","manifest_version_code","update_version_code","pv_player")) this[k] = "74332"
+            this["version_name"] = "7.4.3.32"
         } else queryProfile()
         val signedReq = signer.signPlayback("$APP_BASE$path", values, body, ua)
         val headers = signedReq.headers.toMutableMap()
