@@ -16,11 +16,19 @@ import java.util.zip.GZIPOutputStream
  * 只有 v5 返回正文才算签名协议修好。
  *
  * 手动运行（会打真实接口）：
- *   gradlew :core:test --tests "com.hongguotv.core.SignedPlaybackV5ProbeTest"
+ *   PROBE_LIVE=1 gradlew :core:test --tests "com.hongguotv.core.SignedPlaybackV5ProbeTest"
+ *
+ * 2026-11-20：默认套件不执行（PROBE_LIVE 门控）。原因是平台会成片屏蔽播放接口
+ * （上游 0.1.33 官方包同挂 `stage=mobile-model`），那时本探针必红，但它证明的是
+ * 「平台断播」而不是「我们签名回归」——放进全量套件只会掩盖真实回归。
+ * 通道健康判据以 [PlaybackHealthProbeTest] 的全链路口径为准。
  */
 class SignedPlaybackV5ProbeTest {
     @org.junit.Test
     fun probe() {
+        org.junit.Assume.assumeTrue(
+            "v5 通道探针：需 PROBE_LIVE=1（默认套件不打真实接口）",
+            System.getenv("PROBE_LIVE") == "1")
         val http = OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
         val videoId = "7677804745699888153" // 糯糯下山 ep1
@@ -52,17 +60,18 @@ class SignedPlaybackV5ProbeTest {
             }
 
             // v5 链路：手工重放一次，把 HTTP 状态和正文大小打出来（MobilePlayback 会吞掉细节）
-            val payload = """{"biz_param":{"detail_page_version":0,"device_level":1,"disable_digg_stat":false,"disable_video_relate_book":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$videoId"]},"dr_scene":"player"}"""
+            // 2026-11-20 上游 573d75a：路径回 v1（无 dr_scene）、版本参数升 74532/7.4.5.32。
+            val payload = """{"biz_param":{"detail_page_version":0,"device_level":1,"disable_digg_stat":false,"disable_video_relate_book":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$videoId"]}}"""
             val raw = java.io.ByteArrayOutputStream()
             GZIPOutputStream(raw).use { it.write(payload.toByteArray(Charsets.UTF_8)) }
             val body = raw.toByteArray()
             val now = System.currentTimeMillis()
             val query = linkedMapOf(
                 "aid" to "8662", "app_name" to "novelread",
-                "version_code" to "74332", "version_name" to "7.4.3.32",
+                "version_code" to "74532", "version_name" to "7.4.5.32",
                 "channel" to "vivo_8662_64", "device_platform" to "android",
                 "device_type" to "PGT-AN10", "os_version" to "12",
-                "update_version_code" to "74332",
+                "update_version_code" to "74532",
                 "iid" to identity.values.getValue("iid"),
                 "cdid" to identity.values.getValue("cdid"),
                 "device_id" to identity.values.getValue("device_id"),

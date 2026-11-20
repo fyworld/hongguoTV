@@ -23,9 +23,14 @@ import org.json.JSONObject
  * gzip 请求体 + v5 签名（只带 x-khronos/x-helios/x-medusa）。对照实测同一集、
  * 同一匿名身份：旧签名 0 字节，v5 签名 24345 字节、码 0、5 档模型。
  *
+ * 2026-11-20（上游 0.1.33 573d75a）：11-20 起 `player/v1` 形态对匿名请求回到
+ * 200 + 0 字节（`stage=mobile-model`）。官方 7.4.5.32 客户端回到平铺的
+ * /novel/player/multi_video_model/v1 路径（不带 dr_scene），并把版本号参数
+ * 提升到 74532 / 7.4.5.32；实测该组合 + 同一套 v5 签名能取到 24KB 模型。
+ *
  * 与旧通道的差异（都必须保留，少一处就回到 0 字节）：
  *  - 请求体 gzip 压缩，签名绑定的是**压缩后**的字节，x-ss-stub 也是压缩后 MD5；
- *  - query 用官方手机端 profile（74332 / 7.4.3.32 / vivo_8662_64 / PGT-AN10 / os 12），
+ *  - query 用官方手机端 profile（74532 / 7.4.5.32 / vivo_8662_64 / PGT-AN10 / os 12），
  *    不用我们的设备表；
  *  - 只读目标集，精确匹配 video_id（data["1004"][id].video_model，可平铺或字符串）；
  *  - 不带注册 Cookie，连接池现开现关。
@@ -64,16 +69,17 @@ internal object MobilePlayback {
         ensureActive()
         val query = linkedMapOf(
             "aid" to "8662", "app_name" to "novelread",
-            "version_code" to "74332", "version_name" to "7.4.3.32",
+            "version_code" to "74532", "version_name" to "7.4.5.32",
             "channel" to "vivo_8662_64", "device_platform" to "android",
-            "device_type" to "PGT-AN10", "os_version" to "12", "update_version_code" to "74332",
+            "device_type" to "PGT-AN10", "os_version" to "12", "update_version_code" to "74532",
             "iid" to device.getValue("iid"), "cdid" to device.getValue("cdid"),
             "device_id" to device.getValue("device_id"), "_rticket" to now.toString())
         val url = "$MODEL_BASE$MODEL_PATH".toHttpUrl().newBuilder()
             .apply { query.forEach { (k, v) -> addQueryParameter(k, v) } }.build()
         // 电视使用系统解码器，以等级 1 协商兼容资源；仍需按返回的实际编码过滤。
+        // dr_scene 只服务 :dr_scene 变体，v1 路径带上它反而掉空体（上游 573d75a）。
         val payload = JSONObject(
-            """{"biz_param":{"detail_page_version":0,"device_level":1,"disable_digg_stat":false,"disable_video_relate_book":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]},"dr_scene":"player"}"""
+            """{"biz_param":{"detail_page_version":0,"device_level":1,"disable_digg_stat":false,"disable_video_relate_book":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}"""
         )
         val output = ByteArrayOutputStream()
         GZIPOutputStream(output).use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
@@ -120,7 +126,9 @@ internal object MobilePlayback {
     }
 
     const val MODEL_BASE = "https://api5-normal-sinfonlinea.fqnovel.com"
-    const val MODEL_PATH = "/novel/player/multi_video_model/player/v1"
+
+    /** 7.4.5.32 起回到平铺 v1 路径（上游 573d75a）；:dr_scene 变体对匿名请求返回空体。 */
+    const val MODEL_PATH = "/novel/player/multi_video_model/v1"
 
     /** v5 请求体自己的 UA（上游 MobilePlayback 原值，不随签名器改写）。 */
     const val PLAYBACK_UA =

@@ -68,7 +68,9 @@ class MobilePlaybackTest {
             assertEquals(target, request.url.toString())
             assertEquals(MobilePlayback.MODEL_PATH, request.url.encodedPath)
             assertEquals("123456", request.url.queryParameter("device_id"))
-            assertEquals("7.4.3.32", request.url.queryParameter("version_name"))
+            // 7.4.5.32 起按新版客户端协商（上游 573d75a）；74332 会让 v1 路径回空体。
+            assertEquals("7.4.5.32", request.url.queryParameter("version_name"))
+            assertEquals("74532", request.url.queryParameter("version_code"))
             assertEquals("gzip", request.header("Content-Encoding"))
             assertEquals("synthetic", request.header("x-medusa"))
             assertNull(request.header("Cookie"))
@@ -76,6 +78,8 @@ class MobilePlaybackTest {
             val payload = JSONObject(GZIPInputStream(bytes.inputStream()).reader().readText())
             assertEquals(1, payload.getJSONObject("biz_param").getInt("device_level"))
             assertEquals("123", payload.getJSONObject("mixed_video_id_map").getJSONArray("1004").getString(0))
+            // v1 路径不带 dr_scene（上游 573d75a：带上会被路由到 :dr_scene 变体 → 空体）。
+            assertFalse(payload.has("dr_scene"))
         }, signing, 1000)
     }
 
