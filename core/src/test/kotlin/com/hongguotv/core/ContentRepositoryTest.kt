@@ -77,8 +77,8 @@ class ContentRepositoryTest {
         // GET /reading/bookapi/video_tab/multi_video_model/v1/ with snake_case params
         // (missing any returns 100103). A healthy video_tab answer must serve the
         // playback WITHOUT touching the old POST path.
-        // 2026-11-16: v5 通道（/player/v1）排在最前；本用例让它返回空正文（不可用），
-        // 验证 video_tab 这条 0.1.31 链路仍然完好 —— 平台若回滚我们还有退路。
+        // 2026-11-21 (上游 0.1.35 / 2a1a4cd): GET video_tab 重新排到第一位 —— 匿名 POST
+        // 的 v1 与 :dr_scene 变体都被平台静默关闭；tab 成功时连 v5 POST 都不该碰。
         PlaybackRoutes.shared.reset() // process-wide route health - start clean
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
@@ -103,17 +103,23 @@ class ContentRepositoryTest {
         assertEquals("1080P",result.quality)
         // 退役的批量 POST 路径一次都不许碰（v5 走的是 /player/v1，不是它）。
         assertTrue(requests.none { it.url.encodedPath == MultiVideoModelStreamSource.PATH })
+        // 通道顺序（上游 2a1a4cd）：tab GET 第一位；它成功后 v5 POST 一次都不打。
+        assertTrue(requests.isNotEmpty())
+        assertEquals("/reading/bookapi/video_tab/multi_video_model/v1/",requests.first().url.encodedPath)
+        assertFalse(requests.any { it.url.encodedPath == MobilePlayback.MODEL_PATH })
     }
 
     @Test fun videoTabFailureFallsBackToOldPath() {
         // Any video_tab failure (business code, empty body, shape mismatch, network
         // error) falls back to the old POST flow; the old path's retry and identity
         // semantics stay unchanged.
+        // 2026-11-21 (上游 0.1.35 / 2a1a4cd): 顺序是 tab GET → v5 POST → 批量 POST。
+        // 本用例让 tab 与 v5 都空，验证最后的批量 POST 退路仍然完好。
         PlaybackRoutes.shared.reset() // process-wide route health - start clean
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
-            // v5 通道先打（2026-11-16）：让它空正文 = 新通道不可用，继续验证旧链路退路。
+            // v5 通道（2026-11-16）是第二条：让它空正文 = 不可用，继续验证批量 POST 退路。
             if(request.url.encodedPath==MobilePlayback.MODEL_PATH) ""
             else if(request.url.encodedPath.startsWith("/reading/bookapi/video_tab/"))
                 """{"code":100103,"message":"PARAM_INVALID","data":null}"""
@@ -129,6 +135,10 @@ class ContentRepositoryTest {
         assertEquals("1080P",result.quality)
         assertTrue(requests.any { it.url.encodedPath=="/reading/bookapi/video_tab/multi_video_model/v1/" })
         assertTrue(requests.any { it.url.encodedPath=="/novel/player/multi_video_model/v1/" })
+        // 通道顺序（上游 2a1a4cd）：tab GET 一定先于 v5 POST，v5 一定先于批量 POST。
+        val paths=requests.mapNotNull { it.url.encodedPath }
+        assertTrue(paths.indexOf(MobilePlayback.MODEL_PATH) < paths.indexOf("/novel/player/multi_video_model/v1/"))
+        assertTrue(paths.indexOf("/reading/bookapi/video_tab/multi_video_model/v1/") < paths.indexOf(MobilePlayback.MODEL_PATH))
     }
 
     @Test fun legacyMissingCodecLabelKeepsQualityLimit() {

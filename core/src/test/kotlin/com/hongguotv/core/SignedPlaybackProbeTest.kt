@@ -14,16 +14,20 @@ import java.util.concurrent.TimeUnit
  * 2026-11-14: retry with a FRESH device identity up to 3 times. The platform also
  * emits sporadic per-identity empty responses (the same "empty response shield"
  * the app heals with rotate()); a single 0-byte round is NOT a signature regression.
- * 2026-11-16: 该链路已被平台下线（同机对照旧签名 200+0B、v5 签名 200+24345B，上游
- * issue #108 同现象），正式播放改走 [SignedPlaybackV5ProbeTest] 的 /player/v1 + v5 签名。
- * 本探针保留作"平台若回滚"的对照组，默认不参与测试运行（@Ignore），需要时手动去掉注解。
+ * 2026-11-16: 该链路曾被平台下线（同机对照旧签名 200+0B、v5 签名 200+24345B，上游
+ * issue #108 同现象），正式播放改走 v5 `/player/v1`。
+ * 2026-11-21（上游 0.1.35 / 2a1a4cd）：平台反转 —— 匿名 POST 两个变体全部 200+0B，
+ * 而本探针的 tab GET 回到 200+23KB，正式播放顺序改回「先 tab GET，失败再 v5 POST」。
+ * 因此本探针重新成为播放主通道的健康判据，改为 PROBE_LIVE 门控（默认套件跳过）。
  * Run manually (hits the live API):
- *   gradlew :core:test --tests "com.hongguotv.core.SignedPlaybackProbeTest"
+ *   PROBE_LIVE=1 gradlew :core:test --tests "com.hongguotv.core.SignedPlaybackProbeTest"
  */
 class SignedPlaybackProbeTest {
-    @org.junit.Ignore("旧六头签名链路 2026-11-16 起被平台下线；v5 探针替代")
     @org.junit.Test
     fun probe() {
+        org.junit.Assume.assumeTrue(
+            "tab GET 主通道探针：需 PROBE_LIVE=1（默认套件不打真实接口）",
+            System.getenv("PROBE_LIVE") == "1")
         val http = OkHttpClient.Builder().connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
         val transport = AppApiTransport(http)
         val videoId = "7677804745699888153" // 糯糯下山 ep1 - the control that went empty

@@ -36,6 +36,14 @@ import java.util.Locale
  * new endpoint serves bytevc2 lows + bytevc1 1080P only (after the bytevc2 filter
  * just 1080P remains) and takes one video_id per call.
  *
+ * 2026-11-21 (upstream 0.1.35 / 2a1a4cd): the anonymous POST variants (both
+ * /multi_video_model/v1 and /multi_video_model/:dr_scene/v1) went fully silent again
+ * on 2026-11-20 21:00 (HTTP 200 + 0 bytes) while GET
+ * /reading/bookapi/video_tab/multi_video_model/v1 still served models. The model
+ * lookup order is therefore inverted: GET video_tab first, the v5 POST only as a
+ * fallback. Keeping v5 first (v1.0.49 behaviour) wastes a quota unit and an 8s
+ * timeout on a path the platform no longer answers.
+ *
  * Response shapes kept from the earlier migration:
  *  - request body: biz_param + mixed_video_id_map (slot key fixed "1004",
  *    video_platform fixed 1024; other values return code 100001)
@@ -167,24 +175,24 @@ internal class MultiVideoModelStreamSource(
         // outcome lands in the error message, so a TV screenshot shows exactly
         // which host answered what (G:b=200/0B/h2 P:hl=200/17KB/h2 ...).
         val trace = PlaybackRequestTrace()
-        // v5 通道（2026-11-16 事件 / 上游 0.1.32 d338994）：11-16 17:57 起旧链路对
-        // 全部身份返回 200+0B（上游同版本同样失败，issue #108），平台改成
-        // /novel/player/multi_video_model/player/v1 + gzip 请求体 + v5 签名。
-        // 新通道优先；失败再走下面的旧链路（旧链路保留：平台若回滚仍能自愈）。
-        mobileModel(id, trace)?.let {
-            resetIdentityHealing()
-            return Resolved(it)
-        }
-        // GET video_tab FIRST (upstream 0.1.26 PlaybackRoutes: Route(true, host(0))
-        // leads every plan; the POST path is only a fallback). The 2026-11-07 probe
-        // showed the batched POST path returning empty for every batch while the
-        // tab GET on the same identity serves full models - the retired-path
-        // treatment now covers batched reads too. With metadataAhead the tab call
-        // still goes first; when it fails, the batched POST below is the fallback
-        // (one request may still cover three episodes when the POST path works).
+        // GET video_tab FIRST（上游 0.1.35 / 2a1a4cd，2026-11-20 21:00 起）：匿名 POST
+        // 的两个变体（v1 与 :dr_scene/v1）已被平台整体静默关闭（200+0B），而
+        // GET /reading/bookapi/video_tab/multi_video_model/v1 仍能取到模型。
+        // 因此顺序反转为「先 GET tab，失败再退回 v5 POST」——v1.0.49 里这个顺序是
+        // v5 优先，平台 11-20 晚再次收紧后 v5 首位只会白烧一次配额与 8 秒超时。
+        // 2026-11-07 的探针结论依然成立：批量 POST 对每个身份都是空体，而同一身份的
+        // tab GET 能给出完整模型。metadataAhead 时 tab 仍排第一；失败后下面的批量
+        // POST 才是退路（POST 可用时一次请求覆盖三集）。
         tabModel(id, speculative, trace)?.let {
             // Any success (tab included) proves the identity works - reset the
             // empty-round state so a later incident starts counting fresh.
+            resetIdentityHealing()
+            return Resolved(it)
+        }
+        // v5 通道（2026-11-16 事件 / 上游 0.1.32 d338994）：/novel/player/multi_video_model/
+        // player/v1 + gzip 请求体 + v5 签名。11-16 起曾是唯一可用通道，11-20 晚被
+        // 平台关闭；保留为退路（平台若回滚仍能自愈）。
+        mobileModel(id, trace)?.let {
             resetIdentityHealing()
             return Resolved(it)
         }
