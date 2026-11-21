@@ -229,6 +229,62 @@ internal object SearchSuggest {
         return queries
     }
 
+    // ---------- 同系列基名（相关剧集归组用，2026-11-21） ----------
+
+    /**
+     * `第N季` / `第N部` 出现在**任意位置**（原 [seasonSuffix] 只认结尾）。
+     * 真实命名：`魏家逆子成首辅第三季：翰林篇`、`…第十季：兵势篇` —— 季号后面还跟副标题，
+     * 旧正则命中不了，整条标题被当成基名，导致同系列互不认识。
+     */
+    private val seasonAnywhere = Regex("第\\s*([0-9零〇一二两兩三四五六七八九十百]+)\\s*[季部]")
+
+    private fun isPunct(c: Char): Boolean {
+        val type = Character.getType(c)
+        return type == Character.DASH_PUNCTUATION.toInt() ||
+            type == Character.START_PUNCTUATION.toInt() || type == Character.END_PUNCTUATION.toInt() ||
+            type == Character.CONNECTOR_PUNCTUATION.toInt() || type == Character.OTHER_PUNCTUATION.toInt() ||
+            type == Character.INITIAL_QUOTE_PUNCTUATION.toInt() || type == Character.FINAL_QUOTE_PUNCTUATION.toInt()
+    }
+
+    /**
+     * 卷名分篇：`魏家逆子成首辅分宗篇` / `…折桂篇`。短剧用「篇」代替季号，正文里的
+     * 卷名是 2～4 个汉字 + 篇，且剥掉后必须还剩至少 3 个字（避免把正常剧名剥秃）。
+     * 判定按**从右往左**取最短的卷名（"分宗" 而不是 "辅分宗"），正则做不到（leftmost-first）。
+     */
+    private fun stripVolumeSuffix(title: String): String? {
+        if (!title.endsWith("篇")) return null
+        for (length in 2..4) {
+            val cut = title.length - 1 - length
+            if (cut < 3) continue
+            val segment = title.substring(cut, title.length - 1)
+            if (segment.all { it in '\u4e00'..'\u9fff' }) return title.substring(0, cut).trimEnd { it.isWhitespace() || isPunct(it) }
+        }
+        return null
+    }
+
+    /**
+     * 同系列基名：把「季号 / 卷名」从标题上剥掉，剩下的就是系列名。
+     *
+     * 相关剧集以前只认结尾的 `第N季/第N部`，于是
+     *  - `魏家逆子成首辅分宗篇`（篇名分卷）→ 基名退化成完整标题
+     *  - `魏家逆子成首辅第三季：翰林篇`（季号+副标题）→ 同样退化
+     * 两条链路的搜索其实都能召回整族（实测 10/10 命中），是归组判定把候选全丢了。
+     */
+    fun seriesBase(title: String): String {
+        val normalized = Normalizer.normalize(title.trim(), Normalizer.Form.NFKC)
+        seasonAnywhere.find(normalized)?.let { match ->
+            val head = normalized.substring(0, match.range.first).trimEnd { it.isWhitespace() || isPunct(it) }
+            if (head.length >= 3) return head
+        }
+        stripVolumeSuffix(normalized)?.let { return it }
+        return normalized
+    }
+
+    /** 任意位置的季号（排序用）；篇名分卷没有季号 → null。 */
+    fun seasonIndex(title: String): Int? =
+        seasonAnywhere.find(Normalizer.normalize(title, Normalizer.Form.NFKC))
+            ?.groupValues?.get(1)?.let(::parseChineseNumber)
+
     /** Merge two result lists by id, keeping the first occurrence's position (mirrors mergeHongguoSearchDramas). */
     fun mergeDramas(base: List<Series>, batch: List<Series>): List<Series> {
         if (batch.isEmpty()) return base

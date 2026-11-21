@@ -440,33 +440,41 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
     // ---------- related series (season siblings, search-backed) ----------
 
     /**
-     * Other seasons of the same series, for the detail page's bottom card row.
+     * Other parts of the same series, for the detail page's bottom card row.
      * The detail endpoint itself carries no related-content field (recommendations
-     * is always empty), so this walks the search chains with the season-stripped
-     * title: website search + name-search merged, then keeps rows whose own
-     * season-suffix base matches the current title's base (searchText-normalized,
-     * so "持械入宋：第二季" and "持械入宋第二季" share the key "持械入宋").
+     * is always empty), so this walks the search chains with the series BASE title
+     * (see [SearchSuggest.seriesBase]) and keeps rows whose own base matches.
      *
-     * A title WITHOUT a 第N季/部 suffix is treated as its own series base: season 1
-     * is often unmarked ("伪人降临" / "伪人降临第二季" / "伪人降临第三季"), so the
-     * plain title must still find its marked siblings, and a sibling row whose own
-     * title has no suffix matches when its full-title key equals the base key.
-     * Rows are sorted by season (unmarked first = season 1), the current series
-     * excluded by id.
+     * 2026-11-21: the old rule only understood a trailing `第N季/第N部`. Real titles also use
+     *  - 篇名分卷: `魏家逆子成首辅分宗篇` / `…折桂篇`
+     *  - 季号带副标题: `…第三季：翰林篇` / `…第十季：兵势篇`
+     * Both degraded to "base = full title", so every candidate was filtered out and the row
+     * silently disappeared (实测：两条搜索链都能召回整族 10/10，是我们自己的归组判定丢的)。
+     *
+     * 查询顺序：先基名（实测召回最好），不够 2 条再试原标题（老命名靠它兜底）。最多 4 个请求，
+     * 通常 2 个（和旧实现一样）。行按季号升序，篇名分卷（无季号）排在最前 —— 搜索/联想
+     * 给的原始顺序就是剧情顺序（分宗篇 → 折桂篇 → 第三季…）。
      */
     fun relatedSeries(id: String, title: String): List<Series> {
-        val info = SearchSuggest.parseSeason(title)
-        val base = info?.base ?: title.trim()
+        val base = SearchSuggest.seriesBase(title)
         val baseKey = SearchSuggest.searchText(base)
         if (baseKey.isBlank()) return emptyList()
-        val pageResult = runCatching { search(base, 1) }.getOrDefault(CatalogPage(emptyList(), false))
-        val names = runCatching { nameSearch(base) }.getOrDefault(emptyList())
-        val merged = SearchSuggest.mergeDramas(pageResult.items, names)
-        return merged.filter { other ->
-            other.id != id && other.id.matches(Regex("[0-9]{1,30}")) &&
-                SearchSuggest.parseSeason(other.title)?.let { SearchSuggest.searchText(it.base) == baseKey }
-                    ?: (SearchSuggest.searchText(other.title) == baseKey)
-        }.sortedBy { SearchSuggest.parseSeason(it.title)?.season ?: 0 }
+        fun samePart(other: Series) = other.id != id &&
+            other.id.matches(Regex("[0-9]{1,30}")) &&
+            SearchSuggest.searchText(SearchSuggest.seriesBase(other.title)) == baseKey
+        val queries = buildList {
+            add(base)
+            val plain = title.trim()
+            if (SearchSuggest.searchText(plain) != baseKey) add(plain)
+        }
+        var merged = emptyList<Series>()
+        for (query in queries) {
+            val page = runCatching { search(query, 1) }.getOrDefault(CatalogPage(emptyList(), false))
+            val names = runCatching { nameSearch(query) }.getOrDefault(emptyList())
+            merged = SearchSuggest.mergeDramas(merged, SearchSuggest.mergeDramas(page.items, names))
+            if (merged.count(::samePart) >= 2) break
+        }
+        return merged.filter(::samePart).sortedBy { SearchSuggest.seasonIndex(it.title) ?: 0 }
     }
 
     // ---------- detail (website page) ----------
