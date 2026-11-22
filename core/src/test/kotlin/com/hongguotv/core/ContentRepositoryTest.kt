@@ -84,7 +84,7 @@ class ContentRepositoryTest {
         val repo=repository { request ->
             requests+=request
             when (request.url.encodedPath) {
-                MobilePlayback.MODEL_PATH -> ""
+                in MobilePlayback.MODEL_PATHS -> ""
                 "/reading/bookapi/video_tab/multi_video_model/v1/" -> {
                     // The endpoint's documented shape: data.video_model_data[id].video_model
                     // (object or JSON string), five-tier video_list, spade_a keys.
@@ -106,7 +106,7 @@ class ContentRepositoryTest {
         // 通道顺序（上游 2a1a4cd）：tab GET 第一位；它成功后 v5 POST 一次都不打。
         assertTrue(requests.isNotEmpty())
         assertEquals("/reading/bookapi/video_tab/multi_video_model/v1/",requests.first().url.encodedPath)
-        assertFalse(requests.any { it.url.encodedPath == MobilePlayback.MODEL_PATH })
+        assertFalse(requests.any { it.url.encodedPath in MobilePlayback.MODEL_PATHS })
     }
 
     @Test fun videoTabFailureFallsBackToOldPath() {
@@ -120,7 +120,7 @@ class ContentRepositoryTest {
         val repo=repository { request ->
             requests+=request
             // v5 通道（2026-11-16）是第二条：让它空正文 = 不可用，继续验证批量 POST 退路。
-            if(request.url.encodedPath==MobilePlayback.MODEL_PATH) ""
+            if(request.url.encodedPath in MobilePlayback.MODEL_PATHS) ""
             else if(request.url.encodedPath.startsWith("/reading/bookapi/video_tab/"))
                 """{"code":100103,"message":"PARAM_INVALID","data":null}"""
             else if(request.url.encodedPath=="/novel/player/multi_video_model/v1/") {
@@ -135,10 +135,13 @@ class ContentRepositoryTest {
         assertEquals("1080P",result.quality)
         assertTrue(requests.any { it.url.encodedPath=="/reading/bookapi/video_tab/multi_video_model/v1/" })
         assertTrue(requests.any { it.url.encodedPath=="/novel/player/multi_video_model/v1/" })
-        // 通道顺序（上游 2a1a4cd）：tab GET 一定先于 v5 POST，v5 一定先于批量 POST。
+        // 通道顺序：tab GET → v5（两条路径中的任意一条）→ 批量 POST。
         val paths=requests.mapNotNull { it.url.encodedPath }
-        assertTrue(paths.indexOf(MobilePlayback.MODEL_PATH) < paths.indexOf("/novel/player/multi_video_model/v1/"))
-        assertTrue(paths.indexOf("/reading/bookapi/video_tab/multi_video_model/v1/") < paths.indexOf(MobilePlayback.MODEL_PATH))
+        val tabAt = paths.indexOf("/reading/bookapi/video_tab/multi_video_model/v1/")
+        val v5At = paths.indexOfFirst { it in MobilePlayback.MODEL_PATHS }
+        val batchAt = paths.indexOf("/novel/player/multi_video_model/v1/")
+        assertTrue(tabAt in 0 until v5At)
+        assertTrue(v5At in 0 until batchAt)
     }
 
     @Test fun legacyMissingCodecLabelKeepsQualityLimit() {

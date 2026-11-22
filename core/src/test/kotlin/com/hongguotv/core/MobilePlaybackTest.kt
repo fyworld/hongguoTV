@@ -18,6 +18,9 @@ class MobilePlaybackTest {
     private val device = mapOf("device_id" to "123456", "iid" to "654321", "cdid" to "synthetic")
     private val signer = MobilePlaybackSigner { url, _, _ -> MobileSignedRequest(url, emptyMap()) }
 
+    /** 路径记忆是进程级静态状态，用例之间必须复位。 */
+    @org.junit.Before fun resetPathMemory() = MobilePlayback.resetPathMemory()
+
     private fun model(typed: Boolean, encoded: Boolean, id: String = "123"): String {
         val model = JSONObject("""{"video_list":[{"main_url":"https://example.test/video"}]}""")
         val entries = JSONObject().put(id, JSONObject().put("video_model", if (encoded) model.toString() else model))
@@ -66,7 +69,8 @@ class MobilePlaybackTest {
             // 签名绑定的是压缩后的字节，不是明文 JSON。
             assertArrayEquals(signed, bytes)
             assertEquals(target, request.url.toString())
-            assertEquals(MobilePlayback.MODEL_PATH, request.url.encodedPath)
+            // 默认先打 /player/v1（2026-11-22 实测唯一活着的 v5 路径），见 orderedPaths()。
+            assertEquals(MobilePlayback.PLAYER_PATH, request.url.encodedPath)
             assertEquals("123456", request.url.queryParameter("device_id"))
             // 7.4.5.32 起按新版客户端协商（上游 573d75a）；74332 会让 v1 路径回空体。
             assertEquals("7.4.5.32", request.url.queryParameter("version_name"))
@@ -101,5 +105,54 @@ class MobilePlaybackTest {
         val body = JSONObject().put("code", 0).put("data", JSONObject().put("123", JSONObject()
             .put("video_model", JSONObject()))).toString()
         assertThrows(IOException::class.java) { MobilePlayback.model("123", device, http(body), signer, 1000) }
+    }
+
+    /** 按路径分别回答，用来验证路径回退（2026-11-22：platform 在两个 v5 路径间来回切）。 */
+    private fun pathHttp(bodies: Map<String, String>, hits: MutableList<String>) =
+        OkHttpClient.Builder().addInterceptor { chain ->
+            val request = chain.request()
+            hits += request.url.encodedPath
+            val body = bodies[request.url.encodedPath].orEmpty()
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(body.toResponseBody()).build()
+        }.build()
+
+    @Test fun emptyFirstPathFallsBackToTheOtherPath() {
+        val hits = mutableListOf<String>()
+        val http = pathHttp(mapOf(MobilePlayback.MODEL_PATH to model(false, false)), hits)
+        val entry = MobilePlayback.model("123", device, http, signer, 1000)
+        assertEquals(1, entry.getJSONObject("video_model").getJSONArray("video_list").length())
+        // /player/v1 空 → 换平铺 v1 拿到模型
+        assertEquals(listOf(MobilePlayback.PLAYER_PATH, MobilePlayback.MODEL_PATH), hits)
+    }
+
+    @Test fun thePathThatWorkedIsTriedFirstNextTime() {
+        val hits = mutableListOf<String>()
+        val http = pathHttp(mapOf(MobilePlayback.MODEL_PATH to model(false, false)), hits)
+        MobilePlayback.model("123", device, http, signer, 1000) // 记忆 v1
+        hits.clear()
+        MobilePlayback.model("123", device, http, signer, 1000)
+        // 稳态只打一个请求，且先打上次成功的路径
+        assertEquals(listOf(MobilePlayback.MODEL_PATH), hits)
+    }
+
+    @Test fun allPathsEmptyRaisesTheRecoverableEmptyResponse() {
+        val hits = mutableListOf<String>()
+        assertThrows(EmptyPlaybackResponseException::class.java) {
+            MobilePlayback.model("123", device, pathHttp(emptyMap(), hits), signer, 1000)
+        }
+        // 两条路径都试过，才向上报空响应（外层据此轮换身份）
+        assertEquals(2, hits.size)
+        assertEquals(hits.distinct().size, hits.size)
+    }
+
+    @Test fun businessRejectionDoesNotBurnASecondPath() {
+        // 业务码是身份/风控层的事，换路径没有意义 —— 只打一次就抛。
+        val hits = mutableListOf<String>()
+        val http = pathHttp(mapOf(MobilePlayback.PLAYER_PATH to """{"code":110001}"""), hits)
+        assertThrows(AppApiRejectedException::class.java) {
+            MobilePlayback.model("123", device, http, signer, 1000)
+        }
+        assertEquals(1, hits.size)
     }
 }

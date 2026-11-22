@@ -133,7 +133,7 @@ class MultiVideoModelRotationTest {
                     MultiVideoModelStreamSource.TAB_PATH -> respond(request, "")
                     MultiVideoModelStreamSource.PATH -> respond(request, fallbackOnlyModel())
                     // v5 通道（2026-11-16）先打；空正文 = 新通道不可用，回到 0.1.31 链路。
-                    MobilePlayback.MODEL_PATH -> respond(request, "")
+                    in MobilePlayback.MODEL_PATHS -> respond(request, "")
                     else -> {
                         fallbackRequests.add(request)
                         // Original fallback: all bytevc2. Compat request: returns h264.
@@ -167,7 +167,7 @@ class MultiVideoModelRotationTest {
                     MultiVideoModelStreamSource.TAB_PATH -> respond(request, "")
                     MultiVideoModelStreamSource.PATH -> respond(request, fallbackOnlyModel())
                     // v5 通道（2026-11-16）先打；空正文 = 新通道不可用，回到 0.1.31 链路。
-                    MobilePlayback.MODEL_PATH -> respond(request, "")
+                    in MobilePlayback.MODEL_PATHS -> respond(request, "")
                     else -> {
                         fallbackRequests.add(request)
                         respond(request, mixedModel())

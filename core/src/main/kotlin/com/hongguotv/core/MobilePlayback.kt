@@ -57,7 +57,13 @@ internal object MobilePlayback {
         if (Thread.currentThread().isInterrupted) throw IOException("请求已取消")
     }
 
-    /** 取一集的播放模型；失败语义与旧通道一致（空响应/业务码/格式/超限分别抛）。 */
+    /** 取一集的播放模型；失败语义与旧通道一致（空响应/业务码/格式/超限分别抛）。
+     *
+     * 2026-11-22：平台在两个 v5 路径之间来回切（11-20 平铺 `v1` 通、11-21 `video_tab` 通、
+     * 11-22 只有 `/player/v1` 通，另外两条都是 200+0B）。单一固定路径必然周期性被打死，
+     * 所以这里按「最近成功过的优先」依次尝试两条路径，**只在空响应时换路径**
+     * （业务码/网络错误直接抛，避免无意义的双倍超时和配额消耗）。
+     */
     fun model(
         id: String,
         device: Map<String, String>,
@@ -67,16 +73,7 @@ internal object MobilePlayback {
     ): JSONObject {
         require(id.matches(Regex("[0-9]{1,30}")))
         ensureActive()
-        val query = linkedMapOf(
-            "aid" to "8662", "app_name" to "novelread",
-            "version_code" to "74532", "version_name" to "7.4.5.32",
-            "channel" to "vivo_8662_64", "device_platform" to "android",
-            "device_type" to "PGT-AN10", "os_version" to "12", "update_version_code" to "74532",
-            "iid" to device.getValue("iid"), "cdid" to device.getValue("cdid"),
-            "device_id" to device.getValue("device_id"), "_rticket" to now.toString())
-        val url = "$MODEL_BASE$MODEL_PATH".toHttpUrl().newBuilder()
-            .apply { query.forEach { (k, v) -> addQueryParameter(k, v) } }.build()
-        // 电视使用系统解码器，以等级 1 协商兼容资源；仍需按返回的实际编码过滤。
+        // 请求体与路径无关，压缩一次复用（签名绑定的是这份压缩后的字节）。
         // dr_scene 只服务 :dr_scene 变体，v1 路径带上它反而掉空体（上游 573d75a）。
         val payload = JSONObject(
             """{"biz_param":{"detail_page_version":0,"device_level":1,"disable_digg_stat":false,"disable_video_relate_book":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}"""
@@ -84,6 +81,38 @@ internal object MobilePlayback {
         val output = ByteArrayOutputStream()
         GZIPOutputStream(output).use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
         val bytes = output.toByteArray()
+        var empty: EmptyPlaybackResponseException? = null
+        for ((attempt, path) in orderedPaths().withIndex()) {
+            ensureActive()
+            val query = linkedMapOf(
+                "aid" to "8662", "app_name" to "novelread",
+                "version_code" to "74532", "version_name" to "7.4.5.32",
+                "channel" to "vivo_8662_64", "device_platform" to "android",
+                "device_type" to "PGT-AN10", "os_version" to "12", "update_version_code" to "74532",
+                "iid" to device.getValue("iid"), "cdid" to device.getValue("cdid"),
+                "device_id" to device.getValue("device_id"), "_rticket" to (now + attempt).toString())
+            val url = "$MODEL_BASE$path".toHttpUrl().newBuilder()
+                .apply { query.forEach { (k, v) -> addQueryParameter(k, v) } }.build()
+            try {
+                val entry = request(id, url, bytes, device, http, signer)
+                lastGoodPath = path
+                return entry
+            } catch (error: EmptyPlaybackResponseException) {
+                empty = error
+            }
+        }
+        throw empty ?: EmptyPlaybackResponseException("stage=mobile-model")
+    }
+
+    /** 单次请求（一个路径）：签名 → 发送 → 校验信封 → 精确取本集模型。 */
+    private fun request(
+        id: String,
+        url: okhttp3.HttpUrl,
+        bytes: ByteArray,
+        device: Map<String, String>,
+        http: OkHttpClient,
+        signer: MobilePlaybackSigner,
+    ): JSONObject {
         val request = Request.Builder().url(url)
             .header("User-Agent", PLAYBACK_UA)
             .header("Accept", "application/json")
@@ -125,10 +154,30 @@ internal object MobilePlayback {
         }
     }
 
+    /** 最近一次成功的路径（进程内记忆）：平台来回切时，稳态每次只打一个请求。 */
+    @Volatile
+    private var lastGoodPath: String? = null
+
+    private fun orderedPaths(): List<String> {
+        val good = lastGoodPath ?: return MODEL_PATHS
+        return listOf(good) + MODEL_PATHS.filter { it != good }
+    }
+
+    /** 测试用：清掉路径记忆，让下一次调用回到默认顺序。 */
+    internal fun resetPathMemory() {
+        lastGoodPath = null
+    }
+
     const val MODEL_BASE = "https://api5-normal-sinfonlinea.fqnovel.com"
 
-    /** 7.4.5.32 起回到平铺 v1 路径（上游 573d75a）；:dr_scene 变体对匿名请求返回空体。 */
+    /** 7.4.5.32 起上游回到平铺 v1 路径（573d75a）；11-22 起改由 [MODEL_PATHS] 动态回退。 */
     const val MODEL_PATH = "/novel/player/multi_video_model/v1"
+
+    /** 2026-11-22 实测活着的路径（`/v1` 与 `video_tab` 同时 200+0B）。 */
+    const val PLAYER_PATH = "/novel/player/multi_video_model/player/v1"
+
+    /** 可用的 v5 路径（顺序 = 默认优先级）；测试打桩按这个集合匹配。 */
+    internal val MODEL_PATHS = listOf(PLAYER_PATH, MODEL_PATH)
 
     /** v5 请求体自己的 UA（上游 MobilePlayback 原值，不随签名器改写）。 */
     const val PLAYBACK_UA =

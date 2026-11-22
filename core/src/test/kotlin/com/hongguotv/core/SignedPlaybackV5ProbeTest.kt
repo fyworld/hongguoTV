@@ -76,10 +76,13 @@ class SignedPlaybackV5ProbeTest {
                 "cdid" to identity.values.getValue("cdid"),
                 "device_id" to identity.values.getValue("device_id"),
                 "_rticket" to now.toString())
+            // 两条 v5 路径各打一次：平台会在它们之间来回切，逐条打印才知道今天谁活着
+            // （2026-11-22 实测：/v1 200+0B、/player/v1 200+25KB）。
+            for (path in listOf(MobilePlayback.PLAYER_PATH, MobilePlayback.MODEL_PATH)) {
             val signed = MobilePlayback.signer.sign(
-                "${MobilePlayback.MODEL_BASE}${MobilePlayback.MODEL_PATH}?" +
+                "${MobilePlayback.MODEL_BASE}$path?" +
                     Signer.encode(query), body, identity.values)
-            println("V5 headers: ${signed.headers.keys}")
+            println("V5 headers($path): ${signed.headers.keys}")
             val request = Request.Builder().url(signed.url)
                 .header("User-Agent", MobilePlayback.PLAYBACK_UA)
                 .header("Accept", "application/json")
@@ -89,7 +92,7 @@ class SignedPlaybackV5ProbeTest {
                 .build()
             http.newCall(request).execute().use { r ->
                 val bytes = r.body?.bytes() ?: ByteArray(0)
-                println("V5 MODEL round=$round HTTP ${r.code} bytes=${bytes.size}")
+                println("V5 MODEL path=$path round=$round HTTP ${r.code} bytes=${bytes.size}")
                 if (bytes.size > best) {
                     best = bytes.size
                     val text = String(bytes, Charsets.UTF_8)
@@ -98,6 +101,7 @@ class SignedPlaybackV5ProbeTest {
                     lastCode = code
                     println("V5 code=$code")
                 }
+            }
             }
             // 全链路（含精确集号解析与档位过滤）
             val model = runCatching {
