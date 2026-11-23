@@ -6,6 +6,18 @@ package com.hongguotv.core
 internal object V5Constants {
     val magic = hex("2d4b4fca49750d433fb5ae2c226dcc56")
     const val license = "646637794"
+
+    /**
+     * medusa 明文 wire field 21（上游 N3urda/hongguoTV ef328f3，2026-11-23）。
+     *
+     * 原值 377 自 11-23 起被服务端判成无效签名，**全部播放形态返回 200 + 0 字节**
+     * （同一天 tsukiyo-zero 0.1.37 官方包也一起挂）。上游用「同 URL / 同 gzip 体 /
+     * 同身份 / 同时间戳」，只替换这一个字段做 A/B：377 → 200/0B，312 → 正常返回模型，
+     * 且可重复命中。该字段在官方 SDK 里的语义未知（不是设备/会话值），
+     * 但必须与 7.4.5.32 官方请求一致才能通过签名校验。
+     */
+    const val field21 = 312
+
     val signKey = hex("b23c2a470a20d105dc3f8c4438f8272ed46d6c89ffdcdedd5108698d26e9489d")
     val sbox = hex(
         "53290fe9e51f316f90f74a7e034d367784ab49237cd0135cdc632c322fd3be0e2624a417ecd9151a7ff64f60730a87f9445ec6ada2f865d22b696c4188f24c0d" +

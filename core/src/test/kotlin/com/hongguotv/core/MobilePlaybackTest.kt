@@ -82,9 +82,17 @@ class MobilePlaybackTest {
             // 默认路径是 player 变体（上游 41ba81c：调用方按形态传 segment）。
             assertEquals(MobilePlayback.PLAYER_PATH, request.url.encodedPath)
             assertEquals("123456", request.url.queryParameter("device_id"))
-            // 7.4.5.32 起按新版客户端协商（上游 573d75a）；74332 会让路径回空体。
+            // 官方 74532 App 画像（上游 N3urda ef328f3）：这几个字段一旦退回旧值
+            // （vivo_8662_64 / PGT-AN10 / os 12）就会 200+0B，与签名无关。
             assertEquals("7.4.5.32", request.url.queryParameter("version_name"))
             assertEquals("74532", request.url.queryParameter("version_code"))
+            assertEquals("74532", request.url.queryParameter("manifest_version_code"))
+            assertEquals("update_64", request.url.queryParameter("channel"))
+            assertEquals("25053RT47C", request.url.queryParameter("device_type"))
+            assertEquals("Redmi", request.url.queryParameter("device_brand"))
+            assertEquals("16", request.url.queryParameter("os_version"))
+            assertEquals("36", request.url.queryParameter("os_api"))
+            assertEquals("arm64-v8a", request.url.queryParameter("host_abi"))
             assertEquals("gzip", request.header("Content-Encoding"))
             assertEquals("synthetic", request.header("x-medusa"))
             assertNull(request.header("Cookie"))
@@ -110,24 +118,50 @@ class MobilePlaybackTest {
         val signing = MobilePlaybackSigner { url, bytes, identity ->
             assertEquals(device, identity)
             signedBytes = bytes
-            MobileSignedRequest(url, mapOf("x-khronos" to "synthetic"))
+            MobileSignedRequest(url, mapOf("x-khronos" to "synthetic", "x-ss-stub" to "must-be-dropped"))
         }
         MobilePlayback.getVideoTab("123", device, http(tabModel(false)) { request ->
             assertEquals("GET", request.method)
             assertEquals("/${MobilePlayback.GET_TAB_SEGMENT}", request.url.encodedPath)
             assertEquals(MobilePlayback.GET_TAB_BASE.substringAfter("//"), request.url.host)
-            // 与 POST 形态共用 74532 / 7.4.5.32 参数（上游 ff4d1d2）。
+            // 与 POST 形态共用 74532 官方画像（上游 ff4d1d2 / ef328f3）。
             assertEquals("74532", request.url.queryParameter("version_code"))
             assertEquals("7.4.5.32", request.url.queryParameter("version_name"))
+            assertEquals("update_64", request.url.queryParameter("channel"))
+            assertEquals("25053RT47C", request.url.queryParameter("device_type"))
             assertEquals("123", request.url.queryParameter("video_id"))
             assertEquals("1", request.url.queryParameter("device_level"))
             assertEquals("synthetic", request.header("x-khronos"))
             assertNull(request.header("x-argus"))
             assertNull(request.header("Cookie"))
+            // GET 没有请求体：空字节只是签名输入，这些 POST 头会暴露伪造特征。
+            assertNull(request.header("x-ss-stub"))
+            assertNull(request.header("Content-Type"))
+            assertNull(request.header("Content-Encoding"))
+            assertEquals(MobilePlayback.GET_TAB_UA, request.header("User-Agent"))
         }, signing, 1000)
         // GET 无请求体：签名绑定空字节。
         assertNotNull(signedBytes)
         assertTrue(signedBytes!!.isEmpty())
+    }
+
+    @Test fun preloadVariantCarriesOfficialHostLevelAndScene() {
+        // 官方现行端点（上游 N3urda ef328f3）：reading.snssdk.com + preload/v1，
+        // 体里 device_level=2 且带 dr_scene=preload。
+        var seen = 0
+        MobilePlayback.model(
+            "123", device, http(model(false, false)) { request ->
+                seen++
+                assertEquals("reading.snssdk.com", request.url.host)
+                assertEquals("/${MobilePlayback.PRELOAD_SEGMENT}", request.url.encodedPath)
+                val body = Buffer().apply { request.body!!.writeTo(this) }.readByteArray()
+                val payload = JSONObject(GZIPInputStream(body.inputStream()).reader().readText())
+                assertEquals(2, payload.getJSONObject("biz_param").getInt("device_level"))
+                assertEquals("preload", payload.getString("dr_scene"))
+            }, signer, 1000,
+            segment = MobilePlayback.PRELOAD_SEGMENT, host = MobilePlayback.PRELOAD_BASE,
+            drScene = "preload", deviceLevel = 2)
+        assertEquals(1, seen)
     }
 
     @Test fun getVideoTabParsesBothModelShapes() {

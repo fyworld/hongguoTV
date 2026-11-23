@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Adapted from N3urda/hongguoTV 6672b55 via tsukiyo-zero/hongguoTV 0236976; GPL-3.0-only.
-// 2026-11-23 对齐上游 41ba81c：本文件只负责「单个形态的一次请求」，路径轮换由
-// MultiVideoModelStreamSource + PlaybackShapeMemory 负责（getVideoTab 亦来自上游 ff4d1d2）。
+// 2026-11-23 再对齐 N3urda/hongguoTV ef328f3「纯 Kotlin 播放恢复」：
+// 请求画像换成 74532 官方 App（channel=update_64 / 25053RT47C / Redmi / os16 / os_api36 /
+// host_abi=arm64-v8a），配合 V5Constants.field21=312 —— 平台按「画像 + 签名」双重校验。
+// 本文件只负责「单个形态的一次请求」，路径轮换由 MultiVideoModelStreamSource +
+// PlaybackShapeMemory 负责（矩阵来自 tsukiyo-zero 41ba81c）。
 package com.hongguotv.core
 
 import java.io.ByteArrayOutputStream
@@ -14,33 +17,26 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 播放模型 v5 通道（官方 App v04.10.03，2026-11-16 事件）。
+ * 播放模型 v5 通道（官方 App v04.10.03）。
  *
- * 2026-11-16 17:57 起旧链路（video_tab GET / 批量 POST，六头签名）对全部身份返回
- * HTTP 200 + 0 字节；上游同版本同网络也一样。上游 0.1.32 (d338994) 的结论是
- * 「接口和签名又换了」：新接口 /novel/player/multi_video_model/player/v1 +
- * gzip 请求体 + v5 签名（只带 x-khronos/x-helios/x-medusa）。对照实测同一集、
- * 同一匿名身份：旧签名 0 字节，v5 签名 24345 字节、码 0、5 档模型。
- *
- * 2026-11-20（上游 0.1.33 573d75a）：11-20 起 `player/v1` 形态对匿名请求回到
- * 200 + 0 字节（`stage=mobile-model`）。官方 7.4.5.32 客户端回到平铺的
- * /novel/player/multi_video_model/v1 路径（不带 dr_scene），并把版本号参数
- * 提升到 74532 / 7.4.5.32；实测该组合 + 同一套 v5 签名能取到 24KB 模型。
- *
- * 2026-11-23（上游 41ba81c）：平台在「路径」与「签名规范」两条轴上同时来回切
- * （11-23 起 GET video_tab 只认 v5 签名，旧 Argus 签名被静默丢弃）。因此本类
- * 不再自己记路径，只提供「按指定路径发一次请求」的原语：
- *  - [model]      POST，v5 签名，路径由调用方给（player/v1 或平铺 v1）；
- *  - [getVideoTab] GET，v5 签名 + 74532 参数（上游 ff4d1d2 新增）。
- * 轮换、记忆与预算均分在 MultiVideoModelStreamSource.resolvePlaybackModel。
+ * 演进（每次都是平台换校验维度，写死即死）：
+ *  - 2026-11-16（上游 0.1.32 d338994）：旧六头签名全 0B，改 `/player/v1` + gzip + v5 签名
+ *  - 2026-11-20（上游 0.1.33 573d75a）：`player/v1` 回 0B，改平铺 `v1` + 74532/7.4.5.32
+ *  - 2026-11-22（上游 e096fe4）：路径再反转，改回 `player/v1`
+ *  - 2026-11-23（上游 ff4d1d2/41ba81c）：GET video_tab 改用 v5 签名 + 路径 × 签名矩阵
+ *  - **2026-11-23 晚（上游 N3urda ef328f3）**：平台改为校验**请求画像**——
+ *    老的 `channel=vivo_8662_64 / device_type=PGT-AN10 / os_version=12` 全部 200+0B，
+ *    必须连同 medusa 明文 wire field 21（377→312）一起换掉才能取到模型。
+ *    实测：同一路径下只换画像即 200/23846B；三条路径（player / preload / video_tab）
+ *    当前都通，UA 也不敏感（okhttp UA 与官方 App UA 都能过）。
  *
  * 与旧通道的差异（都必须保留，少一处就回到 0 字节）：
  *  - 请求体 gzip 压缩，签名绑定的是**压缩后**的字节，x-ss-stub 也是压缩后 MD5；
- *  - query 用官方手机端 profile（74532 / 7.4.5.32 / vivo_8662_64 / PGT-AN10 / os 12），
- *    不用我们的设备表；
+ *  - query 用官方 74532 App 画像（见 [currentAppQuery]），不用我们的设备表；
  *  - 只读目标集，精确匹配 video_id（data["1004"][id].video_model，可平铺或字符串）；
  *  - 不带注册 Cookie，连接池现开现关。
  */
@@ -66,21 +62,35 @@ internal object MobilePlayback {
         if (Thread.currentThread().isInterrupted) throw IOException("请求已取消")
     }
 
-    /** 74532 / 7.4.5.32 公共参数（POST 与 GET 形态共用，上游 ff4d1d2 起一致）。 */
-    private fun commonQuery(device: Map<String, String>, now: Long): LinkedHashMap<String, String> =
+    /**
+     * 官方 74532 App 请求画像（上游 N3urda ef328f3「current app protocol」）。
+     *
+     * 这些字段不是装饰：平台按 `channel / device_type / os_version / os_api / host_abi`
+     * 判断「是不是当前官方客户端」。用旧的 `vivo_8662_64 / PGT-AN10 / os 12` 画像，
+     * 即使签名完全正确也一律 200+0B。
+     * `_rticket` 由调用方追加在末尾（与上游同序）。
+     */
+    private fun currentAppQuery(device: Map<String, String>): LinkedHashMap<String, String> =
         linkedMapOf(
             "aid" to "8662", "app_name" to "novelread",
             "version_code" to "74532", "version_name" to "7.4.5.32",
-            "channel" to "vivo_8662_64", "device_platform" to "android",
-            "device_type" to "PGT-AN10", "os_version" to "12", "update_version_code" to "74532",
+            "update_version_code" to "74532", "manifest_version_code" to "74532",
+            "os" to "android", "ssmix" to "a", "channel" to "update_64",
+            "device_platform" to "android", "device_type" to "25053RT47C",
+            "device_brand" to "Redmi", "os_version" to "16", "os_api" to "36",
+            "ac" to "wifi", "language" to "zh", "host_abi" to "arm64-v8a",
             "iid" to device.getValue("iid"), "cdid" to device.getValue("cdid"),
-            "device_id" to device.getValue("device_id"), "_rticket" to now.toString())
+            "device_id" to device.getValue("device_id"))
 
-    /** 取一集的播放模型（POST 形态，v5 签名 + gzip 体）。
+    /**
+     * 取一集的播放模型（POST 形态，v5 签名 + gzip 体）。
      *
-     * [segment] 由调用方按形态指定（player/v1 或平铺 v1）。本函数只打一次：
-     * 空响应/业务码/网络错误直接抛，路径轮换交给上层（单次多路径会让每次起播
-     * 白烧配额与超时，上游 41ba81c 已把轮换移到形态层）。
+     * [segment] 由调用方按形态指定（player/v1、preload/v1 或平铺 v1）。
+     * [host] 默认为 a 域；preload 变体走 `reading.snssdk.com`（官方现行端点）。
+     * [drScene] 非空时写入请求体 `dr_scene`（preload 变体需要；平铺 v1 带上会掉空体）。
+     * [deviceLevel] preload 变体用 2（官方），其余用 1（TV 侧协商兼容档位）。
+     *
+     * 本函数只打一次：空响应/业务码/网络错误直接抛，路径轮换交给上层形态矩阵。
      */
     fun model(
         id: String,
@@ -89,19 +99,35 @@ internal object MobilePlayback {
         signer: MobilePlaybackSigner,
         now: Long,
         segment: String = PLAYER_SEGMENT,
+        host: String = MODEL_BASE,
+        drScene: String? = null,
+        deviceLevel: Int = 1,
     ): JSONObject {
         require(id.matches(Regex("[0-9]{1,30}")))
         ensureActive()
-        val payload = JSONObject(
-            """{"biz_param":{"detail_page_version":0,"device_level":1,"disable_digg_stat":false,"disable_video_relate_book":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$id"]}}"""
-        )
+        val bizParam = JSONObject()
+            .put("detail_page_version", 0)
+            .put("device_level", deviceLevel)
+            .put("disable_digg_stat", false)
+            .put("disable_video_relate_book", false)
+            .put("need_all_video_definition", true)
+            .put("need_mp4_align", false)
+            .put("use_os_player", false)
+            .put("use_server_dns", false)
+            .put("video_platform", 1024)
+        val payload = JSONObject()
+            .put("biz_param", bizParam)
+            .put("mixed_video_id_map", JSONObject().put("1004", JSONArray().put(id)))
+        if (drScene != null) payload.put("dr_scene", drScene)
         val output = ByteArrayOutputStream()
         GZIPOutputStream(output).use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
         val bytes = output.toByteArray()
-        val url = "$MODEL_BASE/${segment.trimStart('/')}".toHttpUrl().newBuilder()
-            .apply { commonQuery(device, now).forEach { (k, v) -> addQueryParameter(k, v) } }.build()
+        val url = "$host/${segment.trimStart('/')}".toHttpUrl().newBuilder().apply {
+            currentAppQuery(device).forEach { (k, v) -> addQueryParameter(k, v) }
+            addQueryParameter("_rticket", now.toString())
+        }.build()
         val request = Request.Builder().url(url)
-            .header("User-Agent", PLAYBACK_UA)
+            .header("User-Agent", okhttpUserAgent())
             .header("Accept", "application/json")
             .header("Content-Encoding", "gzip")
             .header("x-ss-stub", MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02X".format(it) })
@@ -112,7 +138,7 @@ internal object MobilePlayback {
         request.post(bytes.toRequestBody("application/json; charset=utf-8".toMediaType()))
         val transport = http.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
         return RequestScope.execute(transport.newCall(request.build())) { response ->
-            readModel(response, id, emptyDetail = "stage=mobile-model") { root, data ->
+            readModel(response, id, emptyDetail = "stage=mobile-model") { data ->
                 // POST 形态：data["1004"][id].video_model（也可平铺 data[id]）。
                 val entries = data.optJSONObject("1004") ?: data
                 entries.optJSONObject(id)?.opt("video_model")
@@ -121,12 +147,12 @@ internal object MobilePlayback {
     }
 
     /**
-     * 形态「GET video_tab」（上游 ff4d1d2，2026-11-23）：与 [model] 共用同一套 v5
-     * 签名与 7.4.5.32 参数，只是改成 GET + 查询参数。
+     * 形态「GET video_tab」（上游 ff4d1d2 / N3urda videoTabRequest）：与 [model] 共用同一套
+     * v5 签名与 74532 画像，只是改成 GET + 查询参数。
      *
-     * 平台从 11-23 起只放行这一条；旧的 Argus 签名 GET（[MultiVideoModelStreamSource.tabModel]）
-     * 被静默丢弃（200+0B），保留给 legacy 流程与诊断使用。响应结构为
-     * `data.video_model_data[id].video_model`。
+     * 与 POST 的三处差异（上游原样）：UA 用 73932 + 25053RT47C；Accept 带 charset +
+     * Accept-Language；**必须去掉 x-ss-stub / Content-Type / Content-Encoding**
+     * （空字节只是签名输入，GET 没有请求体，带上这些头会被当成伪造特征）。
      */
     fun getVideoTab(
         id: String,
@@ -137,24 +163,34 @@ internal object MobilePlayback {
     ): JSONObject {
         require(id.matches(Regex("[0-9]{1,30}")))
         ensureActive()
-        val query = commonQuery(device, now).apply {
-            put("video_id", id); put("video_id_type", "0"); put("device_level", "1")
-            put("need_all_video_definition", "1"); put("need_mp4_align", "0")
-            put("use_os_player", "0"); put("video_platform", "1024")
-            put("source", "0"); put("from_video_id", "")
-        }
-        val url = "$GET_TAB_BASE/${GET_TAB_SEGMENT.trimStart('/')}".toHttpUrl().newBuilder()
-            .apply { query.forEach { (k, v) -> addQueryParameter(k, v) } }.build()
+        val url = "$GET_TAB_BASE/${GET_TAB_SEGMENT.trimStart('/')}".toHttpUrl().newBuilder().apply {
+            currentAppQuery(device).forEach { (k, v) -> addQueryParameter(k, v) }
+            addQueryParameter("video_id", id)
+            addQueryParameter("video_id_type", "0")
+            addQueryParameter("device_level", "1")
+            addQueryParameter("need_all_video_definition", "1")
+            addQueryParameter("need_mp4_align", "0")
+            addQueryParameter("use_os_player", "0")
+            addQueryParameter("video_platform", "1024")
+            addQueryParameter("source", "0")
+            addQueryParameter("from_video_id", "")
+            addQueryParameter("_rticket", now.toString())
+        }.build()
         val signed = signer.sign(url.toString(), ByteArray(0), device)
-        val request = Request.Builder()
-            .url(signed.url)
-            .header("User-Agent", V5_TAB_UA)
-            .header("Accept", "application/json")
-            .apply { signed.headers.forEach { (k, v) -> header(k, v) } }
-            .get()
+        val request = Request.Builder().url(signed.url).get()
+            .header("User-Agent", GET_TAB_UA)
+            .header("Accept", "application/json; charset=utf-8")
+            .header("Accept-Language", "zh-CN,zh;q=0.9")
+            .apply {
+                signed.headers.forEach { (k, v) -> header(k, v) }
+                // 空字节只是签名输入：GET 没有请求体，这些头会暴露伪造特征。
+                removeHeader("x-ss-stub")
+                removeHeader("Content-Type")
+                removeHeader("Content-Encoding")
+            }
         val transport = http.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
         return RequestScope.execute(transport.newCall(request.build())) { response ->
-            readModel(response, id, emptyDetail = "shape=get") { _, data ->
+            readModel(response, id, emptyDetail = "shape=get") { data ->
                 val rows = data.optJSONObject("video_model_data") ?: data
                 rows.optJSONObject(id)?.opt("video_model")
             }
@@ -169,7 +205,7 @@ internal object MobilePlayback {
         response: okhttp3.Response,
         id: String,
         emptyDetail: String,
-        pick: (JSONObject, JSONObject) -> Any?,
+        pick: (JSONObject) -> Any?,
     ): JSONObject {
         if (!response.isSuccessful) throw IOException("播放接口 HTTP ${response.code}")
         val body = response.body ?: throw IOException("播放信息格式异常")
@@ -186,7 +222,7 @@ internal object MobilePlayback {
         val code = root.optInt("Code", root.optInt("code", 0))
         if (code != 0) throw AppApiRejectedException(code)
         val data = root.optJSONObject("data") ?: throw IOException("播放信息为空")
-        val raw = pick(root, data)
+        val raw = pick(data)
         val model = when (raw) {
             is JSONObject -> raw
             is String -> runCatching { JSONObject(raw) }.getOrNull()
@@ -198,15 +234,25 @@ internal object MobilePlayback {
         return JSONObject().put("video_model", model)
     }
 
+    /** 系统 http.agent（Android 上就是 `okhttp/x.y.z`）；上游 ef328f3 已证明 UA 不敏感。 */
+    private fun okhttpUserAgent(): String = System.getProperty("http.agent", "okhttp/4.12.0")
+
+    /** POST 形态的默认域名（a 域）。 */
     const val MODEL_BASE = "https://api5-normal-sinfonlinea.fqnovel.com"
+
+    /** preload 变体的官方域名（上游 ef328f3 现行端点）。 */
+    const val PRELOAD_BASE = "https://reading.snssdk.com"
 
     /** GET 形态走 b 域（上游 getVideoTab 原值）；POST 形态走 a 域。 */
     const val GET_TAB_BASE = "https://api5-normal-sinfonlineb.fqnovel.com"
 
-    /** POST player 变体路径（[PlaybackPath.POST_PLAYER.segment]）。 */
+    /** POST player 变体路径。 */
     const val PLAYER_SEGMENT = "novel/player/multi_video_model/player/v1"
 
-    /** 平铺 v1 路径（[PlaybackPath.POST_V1.segment]）；7.4.5.32 起上游回到这里（573d75a）。 */
+    /** 官方现行 preload 端点（体需 device_level=2 + dr_scene=preload）。 */
+    const val PRELOAD_SEGMENT = "novel/player/multi_video_model/preload/v1"
+
+    /** 平铺 v1 路径（7.4.5.32 起上游曾回到这里，573d75a）。 */
     const val MODEL_SEGMENT = "novel/player/multi_video_model/v1"
 
     const val GET_TAB_SEGMENT = "reading/bookapi/video_tab/multi_video_model/v1"
@@ -215,11 +261,11 @@ internal object MobilePlayback {
     const val MODEL_PATH = "/$MODEL_SEGMENT"
     const val PLAYER_PATH = "/$PLAYER_SEGMENT"
 
-    /** v5 POST 请求体自己的 UA（上游 MobilePlayback 原值，不随签名器改写）。 */
+    /** 旧 v5 POST 请求体的 UA（仅诊断/对照保留；正式请求用系统 http.agent）。 */
     const val PLAYBACK_UA =
         "com.phoenix.read/73932 (Linux; U; Android 12; zh_CN_#Hans; PGT-AN10; Build/V417IR;tt-ok/3.12.13.20)"
 
-    /** GET video_tab 的 v5 UA：上游 ff4d1d2 用 74532（与 query 参数版本一致）。 */
-    const val V5_TAB_UA =
-        "com.phoenix.read/74532 (Linux; U; Android 12; zh_CN_#Hans; PGT-AN10; Build/V417IR;tt-ok/3.12.13.20)"
+    /** GET video_tab 的 UA：73932 + 25053RT47C（上游 videoTabRequest 原值）。 */
+    const val GET_TAB_UA =
+        "com.phoenix.read/73932 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
 }

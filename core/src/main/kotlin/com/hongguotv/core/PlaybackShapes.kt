@@ -7,11 +7,24 @@ package com.hongguotv.core
  * 播放模型的请求路径。
  *
  * 平台在 2026-11 反复切换：11-20 早只放 v1、11-20 晚只放 GET、11-22 恢复 player、
- * 11-23 再次只放 GET。
+ * 11-23 再次只放 GET；同日晚上解禁但改按「请求画像」校验（见 [PlaybackSigner]）。
+ *
+ * [host] / [drScene] / [deviceLevel] 是路径自带的请求体差异：
+ * preload 变体是官方现行端点（`reading.snssdk.com`，体 device_level=2 + dr_scene=preload）。
  */
-enum class PlaybackPath(val label: String, val segment: String) {
+enum class PlaybackPath(
+    val label: String,
+    val segment: String,
+    val host: String = MobilePlayback.MODEL_BASE,
+    val drScene: String? = null,
+    val deviceLevel: Int = 1,
+) {
     GET_VIDEO_TAB("get", "reading/bookapi/video_tab/multi_video_model/v1"),
     POST_PLAYER("player", "novel/player/multi_video_model/player/v1"),
+    POST_PRELOAD(
+        "preload", "novel/player/multi_video_model/preload/v1",
+        host = MobilePlayback.PRELOAD_BASE, drScene = "preload", deviceLevel = 2,
+    ),
     POST_V1("v1", "novel/player/multi_video_model/v1"),
 }
 
@@ -36,10 +49,12 @@ data class PlaybackShape(val path: PlaybackPath, val signer: PlaybackSigner) {
             listOf(
                 PlaybackShape(PlaybackPath.GET_VIDEO_TAB, PlaybackSigner.V5),
                 PlaybackShape(PlaybackPath.POST_PLAYER, PlaybackSigner.V5),
+                PlaybackShape(PlaybackPath.POST_PRELOAD, PlaybackSigner.V5),
                 PlaybackShape(PlaybackPath.POST_V1, PlaybackSigner.ARGUS),
                 PlaybackShape(PlaybackPath.GET_VIDEO_TAB, PlaybackSigner.ARGUS),
                 PlaybackShape(PlaybackPath.POST_V1, PlaybackSigner.V5),
                 PlaybackShape(PlaybackPath.POST_PLAYER, PlaybackSigner.ARGUS),
+                PlaybackShape(PlaybackPath.POST_PRELOAD, PlaybackSigner.ARGUS),
             )
 
         fun parse(value: String?): PlaybackShape? = all.firstOrNull { it.label == value }

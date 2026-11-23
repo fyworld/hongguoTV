@@ -275,9 +275,12 @@ internal class MultiVideoModelStreamSource(
                     entry.optJSONObject("video_model") ?: normalizeModel(entry.get("video_model"))
                 }
                 else -> {
+                    // preload 变体自带 host / dr_scene / device_level（官方现行端点）。
                     val entry = MobilePlayback.model(
                         id, identity.values, client, MobilePlayback.signer,
-                        System.currentTimeMillis(), segment = segment)
+                        System.currentTimeMillis(), segment = segment,
+                        host = shape.path.host, drScene = shape.path.drScene,
+                        deviceLevel = shape.path.deviceLevel)
                     entry.optJSONObject("video_model") ?: throw IOException("播放信息没有可用资源")
                 }
             }
