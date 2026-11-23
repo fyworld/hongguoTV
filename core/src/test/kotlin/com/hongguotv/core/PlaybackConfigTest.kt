@@ -227,6 +227,20 @@ class PlaybackConfigTest {
         assertEquals(PlaybackConfigStore.SOURCES.size * 2, hits)
     }
 
+    @Test fun installingANewConfigClearsTheLearnedShape() {
+        // 旧配置下学到 get-v5 可用；配置一换，旧形态可能已失效，必须清空重学
+        PlaybackShapeMemory.reset()
+        PlaybackShapeMemory.restore(PlaybackShape(PlaybackPath.GET_VIDEO_TAB, PlaybackSigner.V5))
+        assertEquals("get-v5", PlaybackShapeMemory.current()?.label)
+        assertTrue(PlaybackConfigStore.install(configJson(version = 8), "test"))
+        org.junit.Assert.assertNull("配置变更后形态记忆必须清空", PlaybackShapeMemory.current())
+        // 同版本重装不算变更，不清记忆
+        PlaybackShapeMemory.restore(PlaybackShape(PlaybackPath.POST_PLAYER, PlaybackSigner.V5))
+        assertTrue(PlaybackConfigStore.install(configJson(version = 8), "test"))
+        assertEquals("player-v5", PlaybackShapeMemory.current()?.label)
+        PlaybackShapeMemory.reset()
+    }
+
     @Test fun selfHealIsDisabledWhileRemoteIsOff() {        // remoteEnabled=false 时（单元测试默认）绝不能起后台线程去打外网
         PlaybackConfigStore.remoteEnabled = false
         PlaybackConfigStore.healAfterEmptyAsync(OkHttpClient.Builder().callTimeout(1, TimeUnit.SECONDS).build())

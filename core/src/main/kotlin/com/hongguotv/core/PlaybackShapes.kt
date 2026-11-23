@@ -148,4 +148,19 @@ object PlaybackShapeMemory {
         restore(null)
         onChange = null
     }
+
+    /**
+     * 配置热更新后清空形态记忆（2026-11-24）。
+     *
+     * 记忆里的「上次成功形态」是按旧配置学到的；配置一变（路径/画像/常量），
+     * 那条形态很可能先空转两次才被清掉，白烧配额。这里连同偏好一起重置，
+     * 让新一轮直接从新配置的首选形态开始。
+     */
+    @Synchronized
+    internal fun onConfigChanged() {
+        val changed = preferred != null
+        preferred = null
+        failures.clear()
+        if (changed) onChange?.invoke(null)
+    }
 }

@@ -120,9 +120,13 @@ object PlaybackConfigStore {
                 log.warning("playback config downgrade ignored: ${parsed.configVersion} < ${active.configVersion}")
                 return false
             }
+            val changed = parsed.configVersion != active.configVersion
             active = parsed
             activeRaw = raw
             source = from
+            // 配置换了，按旧配置学到的「上次成功形态」很可能已经失效：清空，
+            // 避免下一次起播先拿旧形态空转两次（那两次也是配额）。
+            if (changed) PlaybackShapeMemory.onConfigChanged()
         }
         cacheFile?.let { file ->
             runCatching {
