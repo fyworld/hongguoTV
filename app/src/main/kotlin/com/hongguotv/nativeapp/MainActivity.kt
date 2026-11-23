@@ -358,6 +358,8 @@ class MainActivity: Activity() {
         store.setAppVersion(code)
         store.bindCache(java.io.File(filesDir,"playback-config.json"))
         store.remoteEnabled=true
+        // 自检：远端配置必须先真打一次接口通过才上线，避免推错配置把所有人打死
+        store.useBuiltInSelfCheck(okhttp3.OkHttpClient())
         io.submit { runCatching { store.refresh(okhttp3.OkHttpClient()) } }
     }
     private fun showLibraryError(problem: Throwable) {        val body=base(); error(body,problem) { message(base(),"正在读取本机记录…"); loadLibrary() }

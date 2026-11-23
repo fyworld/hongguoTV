@@ -137,11 +137,7 @@ internal object MobilePlayback {
         request.post(bytes.toRequestBody("application/json; charset=utf-8".toMediaType()))
         val transport = http.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
         return RequestScope.execute(transport.newCall(request.build())) { response ->
-            readModel(response, id, emptyDetail = "stage=mobile-model") { data ->
-                // POST 形态：data["1004"][id].video_model（也可平铺 data[id]）。
-                val entries = data.optJSONObject("1004") ?: data
-                entries.optJSONObject(id)?.opt("video_model")
-            }
+            readModel(response, id, emptyDetail = "stage=mobile-model")
         }
     }
 
@@ -193,22 +189,22 @@ internal object MobilePlayback {
             }
         val transport = http.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
         return RequestScope.execute(transport.newCall(request.build())) { response ->
-            readModel(response, id, emptyDetail = "shape=get") { data ->
-                val rows = data.optJSONObject("video_model_data") ?: data
-                rows.optJSONObject(id)?.opt("video_model")
-            }
+            readModel(response, id, emptyDetail = "shape=get")
         }
     }
 
     /**
      * 两种形态共用的响应解码：HTTP 状态、2MiB 上限、空体→可自愈异常、业务码→风控异常、
-     * 只取目标集的 video_model（对象或 JSON 字符串），并校验至少有 video_list 或 fallback_api。
+     * 按**配置的路径表**取目标集的 video_model（支持对象/JSON 字符串/数组下标），
+     * 并校验至少有 video_list 或 fallback_api。
+     *
+     * 2026-11-24（P1-a）：取值路径由 `configs/playback.json` 的 `response.pick` 提供，
+     * 平台再改返回结构（如 `1004` → `1005`、`video_model` → `video_model_v2`）不用发版。
      */
-    private inline fun readModel(
+    private fun readModel(
         response: okhttp3.Response,
         id: String,
         emptyDetail: String,
-        pick: (JSONObject) -> Any?,
     ): JSONObject {
         if (!response.isSuccessful) throw IOException("播放接口 HTTP ${response.code}")
         val body = response.body ?: throw IOException("播放信息格式异常")
@@ -224,13 +220,9 @@ internal object MobilePlayback {
         }
         val code = root.optInt("Code", root.optInt("code", 0))
         if (code != 0) throw AppApiRejectedException(code)
-        val data = root.optJSONObject("data") ?: throw IOException("播放信息为空")
-        val raw = pick(data)
-        val model = when (raw) {
-            is JSONObject -> raw
-            is String -> runCatching { JSONObject(raw) }.getOrNull()
-            else -> null
-        } ?: throw IOException("播放信息未包含指定剧集")
+        if (!root.has("data")) throw IOException("播放信息为空")
+        val model = PlaybackResponse.modelOf(root, id, PlaybackConfigStore.current())
+            ?: throw IOException("播放信息未包含指定剧集")
         if ((model.optJSONObject("video_list")?.length() ?: 0) == 0 &&
             (model.optJSONArray("video_list")?.length() ?: 0) == 0 && !model.has("fallback_api"))
             throw IOException("播放信息没有可用资源")

@@ -80,6 +80,31 @@ object PlaybackConfigStore {
      */
     @Volatile var remoteEnabled: Boolean = false
 
+    /**
+     * 配置自检器（app 层注入）：用**候选配置**真打一次接口，返回是否可用。
+     *
+     * 注入后，远端配置必须自检通过才会上线——推错配置最坏等于没更新。
+     * 测试里置 null 即跳过自检（默认行为）。
+     */
+    @Volatile var verifier: ((PlaybackConfig) -> Boolean)? = null
+
+    /**
+     * 启用内置自检（app 启动时调用一次）：用共享身份 + 探针集，按候选配置真打一次接口。
+     * 自检失败 → 该配置不上线，保持旧配置（日志 `playback config self-check failed`）。
+     */
+    fun useBuiltInSelfCheck(http: OkHttpClient) {
+        verifier = { _ ->
+            runCatching {
+                val client = http.newBuilder()
+                    .connectTimeout(3, TimeUnit.SECONDS)
+                    .readTimeout(4, TimeUnit.SECONDS)
+                    .build()
+                val device = PlaybackDeviceSession.shared.profile(client).values
+                PlaybackConfigSelfCheck.run(client, device)
+            }.getOrDefault(false)
+        }
+    }
+
     /** app 层启动时注入自身 versionCode，用于 `minAppVersion` 校验。 */
     fun setAppVersion(code: Int) {
         appVersionCode = code
@@ -106,21 +131,40 @@ object PlaybackConfigStore {
     }
 
     /**
-     * 安装一份配置文本：校验 → 版本单调 → 切换 → 落盘。
+     * 安装一份配置文本：校验 → 自检（可选）→ 版本单调 → 切换 → 落盘。
+     * @param verify 远端安装时传 true：先按候选配置真打一次接口，通过才上线
      * @return 是否被接受
      */
-    internal fun install(raw: String, from: String, now: Long = System.currentTimeMillis()): Boolean {
+    internal fun install(
+        raw: String,
+        from: String,
+        now: Long = System.currentTimeMillis(),
+        verify: Boolean = false,
+    ): Boolean {
         val parsed = runCatching { PlaybackConfig.parse(raw, appVersionCode) }
             .getOrElse {
                 log.warning("playback config rejected ($from): ${it.message}")
                 return false
             }
+        val check = if (verify) verifier else null
         synchronized(lock) {
-            if (parsed.configVersion < active.configVersion) {
-                log.warning("playback config downgrade ignored: ${parsed.configVersion} < ${active.configVersion}")
+            val previous = active
+            if (parsed.configVersion < previous.configVersion) {
+                log.warning("playback config downgrade ignored: ${parsed.configVersion} < ${previous.configVersion}")
                 return false
             }
-            val changed = parsed.configVersion != active.configVersion
+            if (check != null) {
+                // 候选配置临时生效，自检才能按新画像/新路径发请求；失败立刻回滚。
+                // 窗口内并发的播放请求会用到候选配置——若它确实是坏的，那些请求本来也会失败。
+                active = parsed
+                val ok = runCatching { check(parsed) }.getOrDefault(false)
+                if (!ok) {
+                    active = previous
+                    log.warning("playback config self-check failed: v${parsed.configVersion} from $from")
+                    return false
+                }
+            }
+            val changed = parsed.configVersion != previous.configVersion
             active = parsed
             activeRaw = raw
             source = from
@@ -172,7 +216,7 @@ object PlaybackConfigStore {
                     response.body?.string() ?: ""
                 }
                 if (raw.isBlank()) continue
-                if (install(raw, "remote:$url", now)) {
+                if (install(raw, "remote:$url", now, verify = true)) {
                     nextRetryAt = now + REFRESH_INTERVAL_MS
                     return true
                 }
@@ -208,6 +252,7 @@ object PlaybackConfigStore {
             source = "builtin"
             lastAttemptAt = 0L
             nextRetryAt = 0L
+            verifier = null
         }
     }
 

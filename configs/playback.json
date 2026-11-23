@@ -73,5 +73,14 @@
     "player-argus",
     "preload-argus"
   ],
+  "response": {
+    "pick": [
+      "data.1004.{id}.video_model",
+      "data.{id}.video_model",
+      "data.video_model_data.{id}.video_model",
+      "data.video_model"
+    ],
+    "require": ["video_list", "fallback_api"]
+  },
   "budgetFloorMs": 600
 }

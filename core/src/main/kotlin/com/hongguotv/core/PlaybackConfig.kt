@@ -37,6 +37,17 @@ data class PlaybackConfig(
     val endpoints: List<PlaybackEndpoint>,
     /** 形态尝试顺序（如 "get-v5"）；空 = 用内置顺序。 */
     val shapeOrder: List<String>,
+    /**
+     * 响应里 `video_model` 的取值路径（P1-a，2026-11-24）。
+     *
+     * 平台改过一次返回结构（`data.video_model_data[id]` → `data["1004"][id]`），
+     * 以前这种变更必须发版。现在按顺序尝试这几条路径，命中即停：
+     *  - `{id}` 会被替换成当前集号
+     *  - 支持嵌套 key 与数组下标 `[0]`
+     */
+    val responsePick: List<String>,
+    /** 取到的模型里至少要有一个这些字段之一（默认 `video_list` / `fallback_api`）。 */
+    val responseRequire: List<String>,
     /** 每条形态的最小超时预算（毫秒）。 */
     val budgetFloorMs: Long,
 ) {
@@ -99,6 +110,13 @@ data class PlaybackConfig(
                 "get-v5", "player-v5", "preload-v5", "v1-argus",
                 "get-argus", "v1-v5", "player-argus", "preload-argus",
             ),
+            responsePick = listOf(
+                "data.1004.{id}.video_model",
+                "data.{id}.video_model",
+                "data.video_model_data.{id}.video_model",
+                "data.video_model",
+            ),
+            responseRequire = listOf("video_list", "fallback_api"),
             budgetFloorMs = 600L,
         )
 
@@ -174,6 +192,26 @@ data class PlaybackConfig(
             val floor = root.optLong("budgetFloorMs", 600L)
             require(floor in 200L..5_000L) { "budgetFloorMs 非法" }
 
+            // ---- 响应取值路径（可选；缺省用内置那套兼容列表）----
+            val defaults = defaults()
+            val response = root.optJSONObject("response")
+            val pick = response?.optJSONArray("pick")?.let { array ->
+                require(array.length() in 1..8) { "response.pick 数量异常" }
+                (0 until array.length()).map { array.optString(it, "") }
+            } ?: defaults.responsePick
+            for (path in pick) {
+                require(path.length in 3..120) { "response.pick 路径长度异常" }
+                require(PICK_SEGMENT.matches(path)) { "response.pick 含非法字符：$path" }
+            }
+            require(pick.any { it.contains("{id}") } || pick.any { it.startsWith("data.") }) {
+                "response.pick 至少要有一条以 data. 开头"
+            }
+            val requireFields = response?.optJSONArray("require")?.let { array ->
+                require(array.length() in 0..4) { "response.require 数量异常" }
+                (0 until array.length()).map { array.optString(it, "") }
+            } ?: defaults.responseRequire
+            for (field in requireFields) require(FIELD_NAME.matches(field)) { "response.require 字段名非法：$field" }
+
             return PlaybackConfig(
                 schema = schema,
                 configVersion = version,
@@ -185,9 +223,15 @@ data class PlaybackConfig(
                 uaPost = uaPost,
                 endpoints = endpoints,
                 shapeOrder = shapeOrder,
+                responsePick = pick,
+                responseRequire = requireFields,
                 budgetFloorMs = floor,
             )
         }
+
+        /** 路径只允许 key / `{id}` / `[n]` 与点分隔，避免拿配置去拼任意表达式。 */
+        private val PICK_SEGMENT = Regex("[A-Za-z0-9_{}\\[\\].]{3,120}")
+        private val FIELD_NAME = Regex("[A-Za-z0-9_]{1,40}")
 
         private fun allowedHost(host: String): Boolean {
             if (!host.startsWith("https://")) return false

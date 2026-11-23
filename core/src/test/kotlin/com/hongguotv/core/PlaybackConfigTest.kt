@@ -241,7 +241,42 @@ class PlaybackConfigTest {
         PlaybackShapeMemory.reset()
     }
 
-    @Test fun selfHealIsDisabledWhileRemoteIsOff() {        // remoteEnabled=false 时（单元测试默认）绝不能起后台线程去打外网
+    // ---------- 配置自检 ----------
+
+    @Test fun selfCheckFailureBlocksTheNewConfig() {
+        var called = 0
+        PlaybackConfigStore.verifier = { called++; false }
+        assertFalse(PlaybackConfigStore.install(configJson(version = 21, field21 = 400), "remote:test", verify = true))
+        assertEquals("自检必须被调用", 1, called)
+        assertEquals("旧配置必须原样保留", 1, PlaybackConfigStore.current().configVersion)
+        assertEquals(312, PlaybackConfigStore.current().medusaField21)
+    }
+
+    @Test fun selfCheckPassLetsItThrough() {
+        PlaybackConfigStore.verifier = { true }
+        assertTrue(PlaybackConfigStore.install(configJson(version = 22, field21 = 401), "remote:test", verify = true))
+        assertEquals(401, PlaybackConfigStore.current().medusaField21)
+        assertEquals(22, PlaybackConfigStore.current().configVersion)
+    }
+
+    @Test fun localAndCacheInstallsSkipSelfCheck() {
+        var called = 0
+        PlaybackConfigStore.verifier = { called++; true }
+        assertTrue(PlaybackConfigStore.install(configJson(version = 23), "test", verify = false))
+        assertEquals("本地/缓存安装不该触发自检", 0, called)
+    }
+
+    @Test fun refreshRejectsConfigThatFailsSelfCheck() {
+        PlaybackConfigStore.remoteEnabled = true
+        PlaybackConfigStore.verifier = { false }
+        val http = stub { configJson(version = 24, field21 = 402) }
+        assertFalse(PlaybackConfigStore.refresh(http, force = true))
+        assertEquals("自检失败 → 保持内置基线", 312, PlaybackConfigStore.current().medusaField21)
+        assertEquals("builtin", PlaybackConfigStore.source)
+    }
+
+    @Test fun selfHealIsDisabledWhileRemoteIsOff() {
+        // remoteEnabled=false 时（单元测试默认）绝不能起后台线程去打外网
         PlaybackConfigStore.remoteEnabled = false
         PlaybackConfigStore.healAfterEmptyAsync(OkHttpClient.Builder().callTimeout(1, TimeUnit.SECONDS).build())
         assertEquals("builtin", PlaybackConfigStore.source)
@@ -267,6 +302,55 @@ class PlaybackConfigTest {
         assertEquals(builtin.uaGetTab, parsed.uaGetTab)
         assertEquals(builtin.endpoints, parsed.endpoints)
         assertEquals(builtin.shapeOrder, parsed.shapeOrder)
+        assertEquals(builtin.responsePick, parsed.responsePick)
+        assertEquals(builtin.responseRequire, parsed.responseRequire)
         assertEquals(builtin.budgetFloorMs, parsed.budgetFloorMs)
+    }
+
+    // ---------- P1-a 响应结构配置化 ----------
+
+    private fun modelJson(): String =
+        """{"code":0,"data":{"1004":{"123":{"video_model":{"video_list":[{"main_url":"https://x"}]}}}}}"""
+
+    @Test fun extractsModelFromNestedPathsAndArrayIndexes() {
+        val root = org.json.JSONObject("""{"data":{"1004":{"123":{"video_model":{"a":1}}}},"list":[{"m":2}]}""")
+        assertEquals(1, (PlaybackResponse.extract(root, "data.1004.{id}.video_model", "123") as org.json.JSONObject).getInt("a"))
+        assertEquals(2, (PlaybackResponse.extract(root, "list[0].m", "123")) )
+        assertEquals(null, PlaybackResponse.extract(root, "data.1005.{id}.video_model", "123"))
+        assertEquals(null, PlaybackResponse.extract(root, "list[9].m", "123"))
+        assertEquals(null, PlaybackResponse.extract(root, "data.1004.{id}", "999"))
+    }
+
+    @Test fun fallsBackToTheNextPathWhenTheFirstDoesNotMatch() {
+        // 平台把 1004 换成 1005：只要配置里补一条就能取到，不用发版
+        assertTrue(PlaybackConfigStore.install(
+            configJson(version = 11).replace(
+                "\"shapeOrder\"",
+                "\"response\":{\"pick\":[\"data.1005.{id}.video_model\",\"data.1004.{id}.video_model\"]},\"shapeOrder\""),
+            "test"))
+        val root = org.json.JSONObject(modelJson())
+        val model = PlaybackResponse.modelOf(root, "123", PlaybackConfigStore.current())
+        org.junit.Assert.assertNotNull(model)
+        assertEquals(1, model!!.getJSONArray("video_list").length())
+    }
+
+    @Test fun rejectsDangerousOrTooLongPickPaths() {
+        val base = configJson(version = 12)
+        for (bad in listOf("data.\$where.video_model", "data[0]", "<script>", "data." + "a".repeat(140))) {
+            val json = base.replace("\"shapeOrder\"", "\"response\":{\"pick\":[\"$bad\"]},\"shapeOrder\"")
+            assertFalse("应拒绝：$bad", PlaybackConfigStore.install(json, "test"))
+        }
+        assertEquals(1, PlaybackConfigStore.current().configVersion)
+    }
+
+    @Test fun requireFieldsFilterOutModelsWithoutResources() {
+        assertTrue(PlaybackConfigStore.install(
+            configJson(version = 13).replace(
+                "\"shapeOrder\"",
+                "\"response\":{\"pick\":[\"data.{id}.video_model\"],\"require\":[\"video_list\"]},\"shapeOrder\""),
+            "test"))
+        // 模型存在但既没有 video_list 也没有 fallback_api → 视为未命中，继续换路径（这里没有下一条 → null）
+        val root = org.json.JSONObject("""{"code":0,"data":{"123":{"video_model":{"foo":1}}}}""")
+        org.junit.Assert.assertNull(PlaybackResponse.modelOf(root, "123", PlaybackConfigStore.current()))
     }
 }
