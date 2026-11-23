@@ -34,15 +34,16 @@ object PlaybackConfigStore {
      * 有账号时可以在这里再加一条，优先级放到最前。
      */
     internal val SOURCES = listOf(
-        // jsDelivr：同一份内容的多个 CNAME，国内/海外各有可用的
+        // GitHub 加速中转：实时回源（无 CDN 缓存），配置更新立刻可见。放最前，
+        // 因为「平台换了参数 → 我们希望几小时内生效」，jsDelivr 的分支缓存会拖到 12h。
+        "https://ghfast.top/https://raw.githubusercontent.com/fyworld/hongguoTV/main/configs/playback.json",
+        "https://gh-proxy.com/https://raw.githubusercontent.com/fyworld/hongguoTV/main/configs/playback.json",
+        "https://ghproxy.net/https://raw.githubusercontent.com/fyworld/hongguoTV/main/configs/playback.json",
+        // jsDelivr：最稳定，但 `@main` 是分支引用（最长 12h 缓存），只作兜底
         "https://gcore.jsdelivr.net/gh/fyworld/hongguoTV@main/configs/playback.json",
         "https://fastly.jsdelivr.net/gh/fyworld/hongguoTV@main/configs/playback.json",
         "https://testingcf.jsdelivr.net/gh/fyworld/hongguoTV@main/configs/playback.json",
         "https://cdn.jsdelivr.net/gh/fyworld/hongguoTV@main/configs/playback.json",
-        // GitHub 加速中转（raw 直连在国内基本不可用）
-        "https://ghfast.top/https://raw.githubusercontent.com/fyworld/hongguoTV/main/configs/playback.json",
-        "https://gh-proxy.com/https://raw.githubusercontent.com/fyworld/hongguoTV/main/configs/playback.json",
-        "https://ghproxy.net/https://raw.githubusercontent.com/fyworld/hongguoTV/main/configs/playback.json",
         // 直连 raw：海外/已代理网络最快，国内通常最后才用到
         "https://raw.githubusercontent.com/fyworld/hongguoTV/main/configs/playback.json",
     )
