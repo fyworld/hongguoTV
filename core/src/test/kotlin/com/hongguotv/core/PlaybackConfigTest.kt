@@ -200,8 +200,34 @@ class PlaybackConfigTest {
         assertEquals(2, hits)
     }
 
-    @Test fun selfHealIsDisabledWhileRemoteIsOff() {
-        // remoteEnabled=false 时（单元测试默认）绝不能起后台线程去打外网
+    @Test fun sourcesCoverDomesticMirrorsAndAreAllHttps() {
+        val sources = PlaybackConfigStore.SOURCES
+        assertTrue("至少要有多个源", sources.size >= 4)
+        assertTrue("必须全是 https", sources.all { it.startsWith("https://") })
+        assertEquals("不能有重复源", sources.size, sources.distinct().size)
+        // 国内网络 raw 直连基本不通，必须至少有一个 jsDelivr CNAME 和一个 GitHub 加速中转
+        assertTrue(sources.any { it.contains("jsdelivr.net") })
+        assertTrue(sources.any { it.contains("ghfast.top") || it.contains("gh-proxy.com") || it.contains("ghproxy.net") })
+        // raw 兜底保留在最后（海外/已代理网络最快，但国内一般最后才用）
+        assertTrue(sources.last().startsWith("https://raw.githubusercontent.com/"))
+    }
+
+    @Test fun failureBacksOffThirtyMinutesInsteadOfTwentyFourHours() {
+        PlaybackConfigStore.remoteEnabled = true
+        var hits = 0
+        val http = stub { hits++; """{"schema":1}""" } // 校验必失败
+        val now = 1_800_000_000_000L
+        assertFalse(PlaybackConfigStore.refresh(http, now = now))
+        assertEquals("每个源都要试一次", PlaybackConfigStore.SOURCES.size, hits)
+        // 失败后 30 分钟内不重试（镜像临时抖动时不会一直空转）
+        assertFalse(PlaybackConfigStore.refresh(http, now = now + 10 * 60_000L))
+        assertEquals(PlaybackConfigStore.SOURCES.size, hits)
+        // 超过退避期才重试
+        assertFalse(PlaybackConfigStore.refresh(http, now = now + 31 * 60_000L))
+        assertEquals(PlaybackConfigStore.SOURCES.size * 2, hits)
+    }
+
+    @Test fun selfHealIsDisabledWhileRemoteIsOff() {        // remoteEnabled=false 时（单元测试默认）绝不能起后台线程去打外网
         PlaybackConfigStore.remoteEnabled = false
         PlaybackConfigStore.healAfterEmptyAsync(OkHttpClient.Builder().callTimeout(1, TimeUnit.SECONDS).build())
         assertEquals("builtin", PlaybackConfigStore.source)

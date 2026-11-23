@@ -24,22 +24,48 @@ import okhttp3.Request
 object PlaybackConfigStore {
     private val log = Logger.getLogger("com.hongguotv.core.playback")
 
-    /** 远端配置源（同一份内容，双 CDN）。放在仓库 main 分支，push 即生效。 */
+    /**
+     * 远端配置源，按「国内可达性」排序，逐个尝试直到有一个成功。
+     *
+     * 2026-11-24 实测（本机全部 200/1980B）：raw、jsDelivr 四个 CNAME、ghproxy 三个中转都通。
+     * 但国内网络对 `raw.githubusercontent.com` 大多不通、`cdn.jsdelivr.net` 也常被干扰，
+     * 所以顺序上把 jsDelivr 的国内 CNAME（testingcf 走腾讯云）和 GitHub 加速中转放前面，
+     * raw 作为最后兜底。**多源不是银弹**：真正常年稳定的是自己的对象存储（COS/OSS），
+     * 有账号时可以在这里再加一条，优先级放到最前。
+     */
     internal val SOURCES = listOf(
-        "https://raw.githubusercontent.com/fyworld/hongguoTV/main/configs/playback.json",
+        // jsDelivr：同一份内容的多个 CNAME，国内/海外各有可用的
+        "https://gcore.jsdelivr.net/gh/fyworld/hongguoTV@main/configs/playback.json",
+        "https://fastly.jsdelivr.net/gh/fyworld/hongguoTV@main/configs/playback.json",
+        "https://testingcf.jsdelivr.net/gh/fyworld/hongguoTV@main/configs/playback.json",
         "https://cdn.jsdelivr.net/gh/fyworld/hongguoTV@main/configs/playback.json",
+        // GitHub 加速中转（raw 直连在国内基本不可用）
+        "https://ghfast.top/https://raw.githubusercontent.com/fyworld/hongguoTV/main/configs/playback.json",
+        "https://gh-proxy.com/https://raw.githubusercontent.com/fyworld/hongguoTV/main/configs/playback.json",
+        "https://ghproxy.net/https://raw.githubusercontent.com/fyworld/hongguoTV/main/configs/playback.json",
+        // 直连 raw：海外/已代理网络最快，国内通常最后才用到
+        "https://raw.githubusercontent.com/fyworld/hongguoTV/main/configs/playback.json",
     )
 
-    /** 常规检查间隔。 */
+    /** 常规检查间隔（成功后）。 */
     private const val REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000L
+
+    /** 失败退避：比 24h 短得多，镜像临时不可用/网络抖动后能较快重试。 */
+    private const val FAILURE_BACKOFF_MS = 30 * 60 * 1000L
 
     /** 自愈（空响应触发）的最小间隔，避免每次起播都去拉配置。 */
     private const val HEAL_INTERVAL_MS = 5 * 60 * 1000L
+
+    /** 一次 refresh 的总预算：多源顺序尝试时不能无限叠加（每个源都要 3~5s）。 */
+    private const val TOTAL_BUDGET_MS = 10_000L
 
     @Volatile private var active: PlaybackConfig = PlaybackConfig.defaults()
     @Volatile private var activeRaw: String? = null
     @Volatile private var appVersionCode: Int = 0
     @Volatile private var lastAttemptAt: Long = 0L
+
+    /** 下一次允许常规拉取的时间：成功 +24h、失败 +30min。 */
+    @Volatile private var nextRetryAt: Long = 0L
 
     private var cacheFile: File? = null
     private val lock = Any()
@@ -108,21 +134,29 @@ object PlaybackConfigStore {
     }
 
     /**
-     * 拉取远端配置。默认 24h 节流；[force]（空响应自愈）时 5 分钟节流。
-     * 网络/HTTP/校验失败全部返回 false，不抛。
+     * 拉取远端配置。成功后 24h 节流、失败后 30 分钟退避；[force]（空响应自愈）
+     * 只受 5 分钟最小间隔约束，无视退避。
+     *
+     * 多源顺序尝试，整体预算 [TOTAL_BUDGET_MS]（单源 2s 连接 / 4s 读取），
+     * 避免镜像都不通时把起播拖成半分钟。
      */
     fun refresh(http: OkHttpClient, force: Boolean = false, now: Long = System.currentTimeMillis()): Boolean {
-        val interval = if (force) HEAL_INTERVAL_MS else REFRESH_INTERVAL_MS
         synchronized(lock) {
-            if (lastAttemptAt > 0 && now - lastAttemptAt < interval) return false
+            // 自愈：只保证不刷得太勤
+            if (force && lastAttemptAt > 0 && now - lastAttemptAt < HEAL_INTERVAL_MS) return false
+            // 常规：成功后 24h、失败后 30 分钟才允许下一次
+            if (!force && nextRetryAt > 0 && now < nextRetryAt) return false
             lastAttemptAt = now
         }
-        val client = http.newBuilder()
-            .connectTimeout(3, TimeUnit.SECONDS)
-            .readTimeout(5, TimeUnit.SECONDS)
-            .callTimeout(8, TimeUnit.SECONDS)
-            .build()
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TOTAL_BUDGET_MS)
         for (url in SOURCES) {
+            val leftMs = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime())
+            if (leftMs < 500) break
+            val client = http.newBuilder()
+                .connectTimeout(minOf(leftMs, 2_000L), TimeUnit.MILLISECONDS)
+                .readTimeout(minOf(leftMs, 4_000L), TimeUnit.MILLISECONDS)
+                .callTimeout(minOf(leftMs, 5_000L), TimeUnit.MILLISECONDS)
+                .build()
             try {
                 val request = Request.Builder().url(url)
                     .header("Accept", "application/json")
@@ -133,13 +167,17 @@ object PlaybackConfigStore {
                     response.body?.string() ?: ""
                 }
                 if (raw.isBlank()) continue
-                if (install(raw, "remote:$url", now)) return true
+                if (install(raw, "remote:$url", now)) {
+                    nextRetryAt = now + REFRESH_INTERVAL_MS
+                    return true
+                }
             } catch (e: IOException) {
                 log.fine("playback config fetch failed ($url): ${e.message}")
             } catch (e: RuntimeException) {
                 log.fine("playback config fetch failed ($url): ${e.message}")
             }
         }
+        nextRetryAt = now + FAILURE_BACKOFF_MS
         return false
     }
 
@@ -164,6 +202,7 @@ object PlaybackConfigStore {
             activeRaw = null
             source = "builtin"
             lastAttemptAt = 0L
+            nextRetryAt = 0L
         }
     }
 
