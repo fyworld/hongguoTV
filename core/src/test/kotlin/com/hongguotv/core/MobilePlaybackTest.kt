@@ -13,19 +13,29 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
-/** v5 通道的请求构造与响应解析（离线，全部打桩）。 */
+/**
+ * v5 通道的请求构造与响应解析（离线，全部打桩）。
+ *
+ * 2026-11-23（上游 41ba81c）：本类只发「一个形态的一次请求」——路径由调用方给，
+ * 不再自己做路径回退（轮换在 MultiVideoModelStreamSource + PlaybackShapeMemory）。
+ */
 class MobilePlaybackTest {
     private val device = mapOf("device_id" to "123456", "iid" to "654321", "cdid" to "synthetic")
     private val signer = MobilePlaybackSigner { url, _, _ -> MobileSignedRequest(url, emptyMap()) }
-
-    /** 路径记忆是进程级静态状态，用例之间必须复位。 */
-    @org.junit.Before fun resetPathMemory() = MobilePlayback.resetPathMemory()
 
     private fun model(typed: Boolean, encoded: Boolean, id: String = "123"): String {
         val model = JSONObject("""{"video_list":[{"main_url":"https://example.test/video"}]}""")
         val entries = JSONObject().put(id, JSONObject().put("video_model", if (encoded) model.toString() else model))
         return JSONObject().put("code", 0)
             .put("data", if (typed) JSONObject().put("1004", entries) else entries).toString()
+    }
+
+    /** GET 形态的响应：data.video_model_data[id].video_model。 */
+    private fun tabModel(encoded: Boolean, id: String = "123"): String {
+        val model = JSONObject("""{"video_list":[{"main_url":"https://example.test/video"}]}""")
+        return JSONObject().put("code", 0).put("data", JSONObject()
+            .put("video_model_data", JSONObject().put(id, JSONObject()
+                .put("video_model", if (encoded) model.toString() else model)))).toString()
     }
 
     private fun http(body: String, inspect: (okhttp3.Request) -> Unit = {}) = OkHttpClient.Builder()
@@ -69,10 +79,10 @@ class MobilePlaybackTest {
             // 签名绑定的是压缩后的字节，不是明文 JSON。
             assertArrayEquals(signed, bytes)
             assertEquals(target, request.url.toString())
-            // 默认先打 /player/v1（2026-11-22 实测唯一活着的 v5 路径），见 orderedPaths()。
+            // 默认路径是 player 变体（上游 41ba81c：调用方按形态传 segment）。
             assertEquals(MobilePlayback.PLAYER_PATH, request.url.encodedPath)
             assertEquals("123456", request.url.queryParameter("device_id"))
-            // 7.4.5.32 起按新版客户端协商（上游 573d75a）；74332 会让 v1 路径回空体。
+            // 7.4.5.32 起按新版客户端协商（上游 573d75a）；74332 会让路径回空体。
             assertEquals("7.4.5.32", request.url.queryParameter("version_name"))
             assertEquals("74532", request.url.queryParameter("version_code"))
             assertEquals("gzip", request.header("Content-Encoding"))
@@ -87,6 +97,51 @@ class MobilePlaybackTest {
         }, signing, 1000)
     }
 
+    @Test fun segmentParameterSelectsThePath() {
+        // 上层的形态矩阵要能把同一个 v5 签名打在不同路径上（41ba81c 起）。
+        val hits = mutableListOf<String>()
+        val http = http(model(false, false)) { hits += it.url.encodedPath }
+        MobilePlayback.model("123", device, http, signer, 1000, segment = MobilePlayback.MODEL_SEGMENT)
+        assertEquals(listOf("/${MobilePlayback.MODEL_SEGMENT}"), hits)
+    }
+
+    @Test fun getVideoTabUsesV5SignatureAndServiceEndpoint() {
+        var signedBytes: ByteArray? = null
+        val signing = MobilePlaybackSigner { url, bytes, identity ->
+            assertEquals(device, identity)
+            signedBytes = bytes
+            MobileSignedRequest(url, mapOf("x-khronos" to "synthetic"))
+        }
+        MobilePlayback.getVideoTab("123", device, http(tabModel(false)) { request ->
+            assertEquals("GET", request.method)
+            assertEquals("/${MobilePlayback.GET_TAB_SEGMENT}", request.url.encodedPath)
+            assertEquals(MobilePlayback.GET_TAB_BASE.substringAfter("//"), request.url.host)
+            // 与 POST 形态共用 74532 / 7.4.5.32 参数（上游 ff4d1d2）。
+            assertEquals("74532", request.url.queryParameter("version_code"))
+            assertEquals("7.4.5.32", request.url.queryParameter("version_name"))
+            assertEquals("123", request.url.queryParameter("video_id"))
+            assertEquals("1", request.url.queryParameter("device_level"))
+            assertEquals("synthetic", request.header("x-khronos"))
+            assertNull(request.header("x-argus"))
+            assertNull(request.header("Cookie"))
+        }, signing, 1000)
+        // GET 无请求体：签名绑定空字节。
+        assertNotNull(signedBytes)
+        assertTrue(signedBytes!!.isEmpty())
+    }
+
+    @Test fun getVideoTabParsesBothModelShapes() {
+        for (encoded in listOf(false, true)) {
+            val list = MobilePlayback.getVideoTab("123", device, http(tabModel(encoded)), signer, 1000)
+                .getJSONObject("video_model").getJSONArray("video_list")
+            assertEquals(1, list.length())
+        }
+        // 别的集不能拿来顶替。
+        assertThrows(IOException::class.java) {
+            MobilePlayback.getVideoTab("123", device, http(tabModel(false, "456")), signer, 1000)
+        }
+    }
+
     @Test fun businessFailureEmptyOversizedAndMalformedBodiesRemainFailures() {
         // 业务码（110001 风控）、坏 JSON、超 2MiB 都必须失败；空正文走可自愈的空响应异常。
         val rejection = assertThrows(AppApiRejectedException::class.java) {
@@ -99,6 +154,9 @@ class MobilePlaybackTest {
         assertThrows(EmptyPlaybackResponseException::class.java) {
             MobilePlayback.model("123", device, http(""), signer, 1000)
         }
+        assertThrows(EmptyPlaybackResponseException::class.java) {
+            MobilePlayback.getVideoTab("123", device, http(""), signer, 1000)
+        }
     }
 
     @Test fun modelWithoutAnyResourceIsAFailure() {
@@ -107,52 +165,18 @@ class MobilePlaybackTest {
         assertThrows(IOException::class.java) { MobilePlayback.model("123", device, http(body), signer, 1000) }
     }
 
-    /** 按路径分别回答，用来验证路径回退（2026-11-22：platform 在两个 v5 路径间来回切）。 */
-    private fun pathHttp(bodies: Map<String, String>, hits: MutableList<String>) =
-        OkHttpClient.Builder().addInterceptor { chain ->
-            val request = chain.request()
-            hits += request.url.encodedPath
-            val body = bodies[request.url.encodedPath].orEmpty()
-            Response.Builder().request(request).protocol(Protocol.HTTP_1_1)
-                .code(200).message("OK").body(body.toResponseBody()).build()
-        }.build()
-
-    @Test fun emptyFirstPathFallsBackToTheOtherPath() {
+    @Test fun emptyBodyIsSingleShotNoInternalPathRetry() {
+        // 单次语义：一次调用只打一条路径（轮换由上层负责）。否则上层再轮换会翻倍消耗配额。
         val hits = mutableListOf<String>()
-        val http = pathHttp(mapOf(MobilePlayback.MODEL_PATH to model(false, false)), hits)
-        val entry = MobilePlayback.model("123", device, http, signer, 1000)
-        assertEquals(1, entry.getJSONObject("video_model").getJSONArray("video_list").length())
-        // /player/v1 空 → 换平铺 v1 拿到模型
-        assertEquals(listOf(MobilePlayback.PLAYER_PATH, MobilePlayback.MODEL_PATH), hits)
-    }
-
-    @Test fun thePathThatWorkedIsTriedFirstNextTime() {
-        val hits = mutableListOf<String>()
-        val http = pathHttp(mapOf(MobilePlayback.MODEL_PATH to model(false, false)), hits)
-        MobilePlayback.model("123", device, http, signer, 1000) // 记忆 v1
-        hits.clear()
-        MobilePlayback.model("123", device, http, signer, 1000)
-        // 稳态只打一个请求，且先打上次成功的路径
-        assertEquals(listOf(MobilePlayback.MODEL_PATH), hits)
-    }
-
-    @Test fun allPathsEmptyRaisesTheRecoverableEmptyResponse() {
-        val hits = mutableListOf<String>()
+        val http = http("") { hits += it.url.encodedPath }
         assertThrows(EmptyPlaybackResponseException::class.java) {
-            MobilePlayback.model("123", device, pathHttp(emptyMap(), hits), signer, 1000)
-        }
-        // 两条路径都试过，才向上报空响应（外层据此轮换身份）
-        assertEquals(2, hits.size)
-        assertEquals(hits.distinct().size, hits.size)
-    }
-
-    @Test fun businessRejectionDoesNotBurnASecondPath() {
-        // 业务码是身份/风控层的事，换路径没有意义 —— 只打一次就抛。
-        val hits = mutableListOf<String>()
-        val http = pathHttp(mapOf(MobilePlayback.PLAYER_PATH to """{"code":110001}"""), hits)
-        assertThrows(AppApiRejectedException::class.java) {
             MobilePlayback.model("123", device, http, signer, 1000)
         }
         assertEquals(1, hits.size)
     }
+
+    private fun digest(algorithm: String, bytes: ByteArray): ByteArray =
+        java.security.MessageDigest.getInstance(algorithm).digest(bytes)
+
+    private fun ByteArray.hex(): String = joinToString("") { "%02x".format(it) }
 }

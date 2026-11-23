@@ -13,10 +13,19 @@ import org.junit.Test
 import java.io.IOException
 
 class ContentRepositoryTest {
+    /**
+     * 形态记忆（2026-11-23 上游 41ba81c）与路由健康都是进程级静态状态：
+     * 用例之间必须复位，否则前一个用例"记住成功形态"会改变后一个用例的首发顺序。
+     */
+    @org.junit.Before fun resetPlaybackState() {
+        PlaybackShapeMemory.reset()
+        PlaybackRoutes.shared.reset()
+    }
+
     private fun streamRepository(vararg variants: Triple<Int,String,String>) = repository { request ->
         // The playback model tries the video_tab endpoint first (2026-11-02); these
         // fixtures verify the OLD path's behavior, so answer the new endpoint with a
-        // business error to push the flow back to the old POST chain.
+        // business error to push the flow back to the POST chain.
         if (request.url.encodedPath.startsWith("/reading/bookapi/video_tab/"))
             """{"code":100103,"message":"PARAM_INVALID","data":null}"""
         else {
@@ -75,17 +84,14 @@ class ContentRepositoryTest {
         // 2026-11-02: the old POST /novel/player path is retired server-side (all
         // eight api5/api3 domains return 200 + 0 bytes); the official client reads
         // GET /reading/bookapi/video_tab/multi_video_model/v1/ with snake_case params
-        // (missing any returns 100103). A healthy video_tab answer must serve the
-        // playback WITHOUT touching the old POST path.
-        // 2026-11-21 (上游 0.1.35 / 2a1a4cd): GET video_tab 重新排到第一位 —— 匿名 POST
-        // 的 v1 与 :dr_scene 变体都被平台静默关闭；tab 成功时连 v5 POST 都不该碰。
-        PlaybackRoutes.shared.reset() // process-wide route health - start clean
+        // (missing any returns 100103).
+        // 2026-11-23 (上游 ff4d1d2 / 41ba81c): 默认形态顺序仍是 `get-v5` 打头 ——
+        // 平台 11-23 起只放行「GET video_tab + v5 签名」，其余形态作兜底。
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
             when (request.url.encodedPath) {
-                in MobilePlayback.MODEL_PATHS -> ""
-                "/reading/bookapi/video_tab/multi_video_model/v1/" -> {
+                "/reading/bookapi/video_tab/multi_video_model/v1" -> {
                     // The endpoint's documented shape: data.video_model_data[id].video_model
                     // (object or JSON string), five-tier video_list, spade_a keys.
                     JSONObject().put("code",0).put("data",JSONObject()
@@ -95,53 +101,55 @@ class ContentRepositoryTest {
                                 .put("v1",JSONObject().put("video_meta",JSONObject().put("vheight",1080).put("codec_type","bytevc1")).put("main_url","https://example.com/vtab-1080")))))))
                         .toString()
                 }
-                else -> throw AssertionError("video_tab hit must not fall back to the old path: "+request.url)
+                else -> throw AssertionError("video_tab hit must not fall back to any other shape: "+request.url)
             }
         }
         val result=repo.stream("123",1080)
         assertEquals("https://example.com/vtab-1080",result.url)
         assertEquals("1080P",result.quality)
-        // 退役的批量 POST 路径一次都不许碰（v5 走的是 /player/v1，不是它）。
-        assertTrue(requests.none { it.url.encodedPath == MultiVideoModelStreamSource.PATH })
-        // 通道顺序（上游 2a1a4cd）：tab GET 第一位；它成功后 v5 POST 一次都不打。
+        // `get-v5` 成功后一次请求到底：所有 POST 形态、旧 Argus GET 都不该被碰。
         assertTrue(requests.isNotEmpty())
-        assertEquals("/reading/bookapi/video_tab/multi_video_model/v1/",requests.first().url.encodedPath)
-        assertFalse(requests.any { it.url.encodedPath in MobilePlayback.MODEL_PATHS })
+        assertEquals("/reading/bookapi/video_tab/multi_video_model/v1",requests.single().url.encodedPath)
+        assertEquals("GET",requests.single().method)
+        // v5 形态的标记：只带 x-khronos/x-ss-stub，不带旧 Argus 链。
+        assertNotNull(requests.single().header("x-khronos"))
+        assertNull(requests.single().header("x-argus"))
+        assertEquals("74532",requests.single().url.queryParameter("version_code"))
+        assertEquals("7.4.5.32",requests.single().url.queryParameter("version_name"))
     }
 
-    @Test fun videoTabFailureFallsBackToOldPath() {
-        // Any video_tab failure (business code, empty body, shape mismatch, network
-        // error) falls back to the old POST flow; the old path's retry and identity
-        // semantics stay unchanged.
-        // 2026-11-21 (上游 0.1.35 / 2a1a4cd): 顺序是 tab GET → v5 POST → 批量 POST。
-        // 本用例让 tab 与 v5 都空，验证最后的批量 POST 退路仍然完好。
-        PlaybackRoutes.shared.reset() // process-wide route health - start clean
+    @Test fun videoTabFailureFallsBackThroughTheShapeMatrix() {
+        // Any shape failure (business code, empty body, shape mismatch, network error)
+        // moves to the next shape in PlaybackShapeMemory.order(); the LAST shape in the
+        // matrix (POST player + Argus) keeps the old POST flow and its retry semantics.
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
-            // v5 通道（2026-11-16）是第二条：让它空正文 = 不可用，继续验证批量 POST 退路。
-            if(request.url.encodedPath in MobilePlayback.MODEL_PATHS) ""
-            else if(request.url.encodedPath.startsWith("/reading/bookapi/video_tab/"))
-                """{"code":100103,"message":"PARAM_INVALID","data":null}"""
-            else if(request.url.encodedPath=="/novel/player/multi_video_model/v1/") {
-                val rows=JSONObject()
-                rows.put("video_0",JSONObject().put("video_meta",JSONObject().put("vheight",1080).put("codec_type","h264")).put("main_url","https://example.com/old-1080"))
-                JSONObject().put("code",0).put("data",JSONObject().put("video_model",JSONObject().put("video_list",rows))).toString()
+            when {
+                // 前三个默认形态全部失败：get-v5 空体、player-v5 空体、v1-argus 业务码。
+                request.url.encodedPath=="/reading/bookapi/video_tab/multi_video_model/v1" &&
+                    request.header("x-ss-stub")!=null -> ""
+                request.url.encodedPath=="/novel/player/multi_video_model/player/v1" -> ""
+                request.url.encodedPath=="/novel/player/multi_video_model/v1" -> """{"code":100103,"data":null}"""
+                request.url.encodedPath=="/novel/player/multi_video_model/player/v1/" -> {
+                    // 兜底形态（POST player + Argus）走旧链路，路径带尾斜杠。
+                    val rows=JSONObject().put("video_0",JSONObject()
+                        .put("video_meta",JSONObject().put("vheight",1080).put("codec_type","h264"))
+                        .put("main_url","https://example.com/old-1080"))
+                    JSONObject().put("code",0).put("data",JSONObject()
+                        .put("video_model",JSONObject().put("video_list",rows))).toString()
+                }
+                else -> ""
             }
-            else throw AssertionError("unexpected "+request.url)
         }
         val result=repo.stream("123",1080)
         assertEquals("https://example.com/old-1080",result.url)
         assertEquals("1080P",result.quality)
-        assertTrue(requests.any { it.url.encodedPath=="/reading/bookapi/video_tab/multi_video_model/v1/" })
-        assertTrue(requests.any { it.url.encodedPath=="/novel/player/multi_video_model/v1/" })
-        // 通道顺序：tab GET → v5（两条路径中的任意一条）→ 批量 POST。
-        val paths=requests.mapNotNull { it.url.encodedPath }
-        val tabAt = paths.indexOf("/reading/bookapi/video_tab/multi_video_model/v1/")
-        val v5At = paths.indexOfFirst { it in MobilePlayback.MODEL_PATHS }
-        val batchAt = paths.indexOf("/novel/player/multi_video_model/v1/")
-        assertTrue(tabAt in 0 until v5At)
-        assertTrue(v5At in 0 until batchAt)
+        // 六形态轮换：GET 打头，POST 兜底；顺序即 PlaybackShapeMemory.order()。
+        assertTrue(requests.first().url.encodedPath=="/reading/bookapi/video_tab/multi_video_model/v1")
+        assertTrue(requests.any { it.url.encodedPath=="/novel/player/multi_video_model/player/v1/" })
+        // 成功的那条会被记住（下一次起播直接命中）。
+        assertEquals(PlaybackShape(PlaybackPath.POST_PLAYER, PlaybackSigner.ARGUS),PlaybackShapeMemory.current())
     }
 
     @Test fun legacyMissingCodecLabelKeepsQualityLimit() {

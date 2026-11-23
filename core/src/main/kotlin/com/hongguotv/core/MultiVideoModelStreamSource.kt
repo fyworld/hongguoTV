@@ -12,6 +12,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 /**
  * Primary channel: the playback model endpoint /novel/player/multi_video_model/v1/.
@@ -148,8 +149,14 @@ internal class MultiVideoModelStreamSource(
 
     /**
      * The full model-resolution flow shared by stream() and ladder(): upcoming cache,
-     * identity rotation, tab GET first, signed batch POST fallback, both response
-     * shapes (video_list and fallback_api). Only the final tier extraction differs.
+     * identity rotation, the six-shape rotation (path x signer), signed batch POST
+     * fallback, both response shapes (video_list and fallback_api). Only the final
+     * tier extraction differs.
+     *
+     * 2026-11-23（上游 41ba81c）：平台在「路径」与「签名规范」两条轴上反复切。
+     * 11-20 早只放平铺 v1、11-20 晚只放 GET、11-22 恢复 player、11-23 又只放
+     * GET（且只认 v5 签名，旧 Argus GET 被静默丢弃）。写死任何一条都要发版，
+     * 因此按 [PlaybackShapeMemory] 的顺序逐个形态尝试，成功即记住。
      */
     private fun resolvePlaybackModel(id: String, metadataAhead: List<String>, speculative: Boolean): Resolved {
         // Batched read (upstream streamLadder): the caller passes the next episodes so
@@ -166,8 +173,8 @@ internal class MultiVideoModelStreamSource(
             }
         }
         // Identity rotation moved BEFORE the preferred endpoint (upstream 94187f7):
-        // the tab GET is the first request of the round - a blocked identity wastes
-        // it. Rotating first lets the fresh identity serve the tab call directly.
+        // the first shape is the first request of the round - a blocked identity
+        // wastes it. Rotating first lets the fresh identity serve it directly.
         // Speculative reads never rotate (upstream 0.1.26): a background miss must
         // not burn the foreground's failure budget.
         if (!speculative) maybeRotateIdentity()
@@ -175,47 +182,127 @@ internal class MultiVideoModelStreamSource(
         // outcome lands in the error message, so a TV screenshot shows exactly
         // which host answered what (G:b=200/0B/h2 P:hl=200/17KB/h2 ...).
         val trace = PlaybackRequestTrace()
-        // GET video_tab FIRST（上游 0.1.35 / 2a1a4cd，2026-11-20 21:00 起）：匿名 POST
-        // 的两个变体（v1 与 :dr_scene/v1）已被平台整体静默关闭（200+0B），而
-        // GET /reading/bookapi/video_tab/multi_video_model/v1 仍能取到模型。
-        // 因此顺序反转为「先 GET tab，失败再退回 v5 POST」——v1.0.49 里这个顺序是
-        // v5 优先，平台 11-20 晚再次收紧后 v5 首位只会白烧一次配额与 8 秒超时。
-        // 2026-11-07 的探针结论依然成立：批量 POST 对每个身份都是空体，而同一身份的
-        // tab GET 能给出完整模型。metadataAhead 时 tab 仍排第一；失败后下面的批量
-        // POST 才是退路（POST 可用时一次请求覆盖三集）。
-        tabModel(id, speculative, trace)?.let {
-            // Any success (tab included) proves the identity works - reset the
-            // empty-round state so a later incident starts counting fresh.
-            resetIdentityHealing()
-            return Resolved(it)
-        }
-        // v5 通道（2026-11-16 事件 / 上游 0.1.32 d338994）：/novel/player/multi_video_model/
-        // player/v1 + gzip 请求体 + v5 签名。11-16 起曾是唯一可用通道，11-20 晚被
-        // 平台关闭；保留为退路（平台若回滚仍能自愈）。
-        mobileModel(id, trace)?.let {
-            resetIdentityHealing()
-            return Resolved(it)
+        // Foreground gets 8s, speculative 2s (upstream streamLadder). The budget is
+        // split across the shapes still untried - the first shape otherwise eats the
+        // whole allowance on timeout and the rest never get a chance (upstream 116608a).
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(if (speculative) 2_000L else 8_000L)
+        // Speculative reads try ONE shape only (upstream: attempts < 1 on the legacy
+        // loop): a background read must not drain the foreground's quota.
+        val shapes = PlaybackShapeMemory.order().let { if (speculative) it.take(1) else it }
+        var last: IOException? = null
+        for ((index, shape) in shapes.withIndex()) {
+            if (Thread.currentThread().isInterrupted) throw IOException("请求已取消")
+            val left = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()).coerceAtLeast(1)
+            val budget = (left / (shapes.size - index)).coerceAtLeast(600L)
+            val client = http.newBuilder()
+                .callTimeout(budget, TimeUnit.MILLISECONDS)
+                .readTimeout(minOf(budget, 4_000L), TimeUnit.MILLISECONDS)
+                .connectTimeout(minOf(budget, 4_000L), TimeUnit.MILLISECONDS)
+                .build()
+            try {
+                val model = requestShape(shape, id, client, trace)
+                // Success proves both the identity and this combination work; remember
+                // the shape (the app layer persists it) and reset the healing state.
+                PlaybackShapeMemory.success(shape)
+                resetIdentityHealing()
+                return fromModel(model)
+            } catch (error: IOException) {
+                if (Thread.currentThread().isInterrupted) throw error
+                PlaybackShapeMemory.failure(shape)
+                last = error
+            } catch (error: RuntimeException) {
+                PlaybackShapeMemory.failure(shape)
+                last = IOException("播放信息格式异常", error)
+            }
         }
         // MID-CALL fast rotation (upstream 0.1.26 refreshIdentity): when the shared
         // route map is EXHAUSTED (every route answered empty and is cooling = the
         // identity's per-host quota is spent - typically: the speculative prefetch
         // cooled the GET, the dead batch-POST path drained the rest), rotate the
-        // identity NOW and retry the tab GET on the fresh identity - the switch-
-        // episode foreground recovers within ONE call instead of erroring through
-        // two more ~25s rounds. Speculative reads never take this path.
+        // identity NOW and retry the remembered shape on the fresh identity - the
+        // switch-episode foreground recovers within ONE call instead of erroring
+        // through two more ~25s rounds. Speculative reads never take this path.
         if (!speculative && routes.exhausted()) {
             maybeRotateIdentity(force = true)
-            tabModel(id, false, trace)?.let {
-                resetIdentityHealing()
-                return Resolved(it)
+            val retry = http.newBuilder()
+                .callTimeout(3_000L, TimeUnit.MILLISECONDS)
+                .readTimeout(3_000L, TimeUnit.MILLISECONDS)
+                .build()
+            runCatching { requestShape(PlaybackShapeMemory.order().first(), id, retry, trace) }
+                .getOrNull()?.let {
+                    resetIdentityHealing()
+                    return fromModel(it)
+                }
+        }
+        // Speculative reads stop here (upstream 0.1.26: attempts < 1): one shape is
+        // all a background read may try; more would burn the quota the foreground
+        // still needs.
+        if (speculative) throw EmptyPlaybackResponseException("speculative")
+        // A fully-empty round counts toward identity rotation; tag the error once this
+        // failure period has already rotated (screenshot shows "已换身份仍失败").
+        // The trace summary rides along (upstream: trace.summary() + rotation).
+        val failure = last ?: IOException("播放接口暂不可用")
+        if (failure is EmptyPlaybackResponseException) {
+            throw if (noteEmptyRound()) EmptyPlaybackResponseException(trace.summary() + " rotated=1")
+            else EmptyPlaybackResponseException(trace.summary())
+        }
+        throw failure
+    }
+
+    /**
+     * One 形态 = one request. GET/POST × v5/Argus 四种组合按 [shape] 分派：
+     *  - GET + v5   → [MobilePlayback.getVideoTab]（上游 ff4d1d2：11-23 起唯一放行的组合）
+     *  - GET + Argus→ [tabModel] 旧六头签名 GET（保留给 legacy 与诊断）
+     *  - POST + v5  → [MobilePlayback.model]（gzip 体 + v5 签名）
+     *  - POST + Argus→ [argusPostModel] 旧六头签名 POST（含跨 host 路由健康与批量预取）
+     *
+     * 返回的是裸 video_model 行；外层统一交给 [fromModel] 处理 fallback_api。
+     */
+    private fun requestShape(
+        shape: PlaybackShape,
+        id: String,
+        client: OkHttpClient,
+        trace: PlaybackRequestTrace,
+        metadataAhead: List<String> = emptyList(),
+    ): JSONObject {
+        val identity = session.profile(client)
+        val segment = shape.path.segment
+        return when (shape.signer) {
+            PlaybackSigner.V5 -> when (shape.path) {
+                PlaybackPath.GET_VIDEO_TAB -> {
+                    val entry = MobilePlayback.getVideoTab(
+                        id, identity.values, client, MobilePlayback.signer, System.currentTimeMillis())
+                    entry.optJSONObject("video_model") ?: normalizeModel(entry.get("video_model"))
+                }
+                else -> {
+                    val entry = MobilePlayback.model(
+                        id, identity.values, client, MobilePlayback.signer,
+                        System.currentTimeMillis(), segment = segment)
+                    entry.optJSONObject("video_model") ?: throw IOException("播放信息没有可用资源")
+                }
+            }
+            PlaybackSigner.ARGUS -> when (shape.path) {
+                PlaybackPath.GET_VIDEO_TAB ->
+                    tabModel(id, speculative = false, trace = trace)
+                        ?: throw EmptyPlaybackResponseException("shape=${shape.label}")
+                else -> argusPostModel(id, metadataAhead, client, trace, segment)
             }
         }
-        // Speculative reads stop here (upstream 0.1.26: attempts < 1): the tab GET
-        // is the one route a background read may try; falling through to the POST
-        // path would burn the quota the foreground still needs.
-        if (speculative) throw EmptyPlaybackResponseException("speculative")
-        // Batch: current episode + up to two ahead (upstream streamLadder) - the
-        // response rows for the next episodes land in the upcoming cache.
+    }
+
+    /**
+     * 旧六头签名 POST（Argus），保留我们的批量预取与路由健康：
+     * [metadataAhead] 非空时一次请求覆盖当前集 + 后两集，响应行进 [upcoming] 缓存，
+     * 换集因此不再消耗请求（上游 streamLadder 的批量优化；上游新版形态轮换里
+     * 退化成单集，这里按功能对应保留）。
+     */
+    private fun argusPostModel(
+        id: String,
+        metadataAhead: List<String>,
+        client: OkHttpClient,
+        trace: PlaybackRequestTrace,
+        segment: String = PATH.trim('/'),
+    ): JSONObject {
         val ids = (listOf(id) + metadataAhead.take(2)).distinct()
         val payload = JSONObject()
             .put("biz_param", JSONObject()
@@ -228,43 +315,22 @@ internal class MultiVideoModelStreamSource(
                 .put("use_server_dns", false)
                 .put("video_platform", 1024))
             .put("mixed_video_id_map", JSONObject().put("1004", JSONArray(ids)))
-        val body = payload.toString().toByteArray(Charsets.UTF_8)
         // Registered identity: server-issued device_id/install_id + registration cookies.
         // Real signature (2026-11-11 event, upstream 269c6d8): the server validates
         // x-argus/x-ladon - AppApiTransport.sign() rebuilds them with the fqapp
         // Argus/Ladon ports over the final query and strips the placeholder chain.
-        val identity = session.profile(http)
-        val data = try {
-            requestPlayback(payload.toString(), identity, trace)
-        } catch (error: IOException) {
-            // MID-CALL rotation, second checkpoint (upstream 0.1.26 refreshIdentity
-            // lives INSIDE the attempt loop): the POST path just drained the last
-            // untried routes; when the whole map is now exhausted (every route
-            // answered EMPTY and is cooling = the identity's per-host quota is
-            // spent), rotate the identity and retry the tab GET on the fresh one -
-            // ONE call recovers instead of erroring through two more ~25s rounds.
-            // A network blip never triggers this (exhausted() requires every
-            // route's empty mark, not a timeout).
-            if (routes.exhausted()) {
-                maybeRotateIdentity(force = true)
-                tabModel(id, false, trace)?.let {
-                    resetIdentityHealing()
-                    return Resolved(it)
-                }
-            }
-            if (error is EmptyPlaybackResponseException) {
-                // A fully-empty round counts toward rotation; tag the error once this
-                // failure period has rotated (screenshot shows "已换身份仍失败").
-                // The trace summary rides along (upstream: trace.summary() + rotation).
-                throw if (noteEmptyRound()) EmptyPlaybackResponseException(trace.summary() + " rotated=1")
-                else EmptyPlaybackResponseException(trace.summary())
-            }
-            throw error
-        }
-        resetIdentityHealing()
+        val identity = session.profile(client)
+        val data = requestPlayback(payload.toString(), identity, trace, client, segment)
         val map = data.optJSONObject("data") ?: throw IOException("播放信息为空")
-        upcoming.store(map, ids)
-        val model = resolveModel(map, id)
+        if (ids.size > 1) upcoming.store(map, ids)
+        return resolveModel(map, id)
+    }
+
+    /**
+     * 裸 video_model 行 → [Resolved]：有 inline video_list 直接用；只有 fallback_api 时
+     * 走明文 GET（video_info.data）并处理 bytevc2 兼容重取。
+     */
+    private fun fromModel(model: JSONObject): Resolved {
         if (hasVideoList(model)) return Resolved(model)
         // Second shape: only a fallback_api URL; plain GET (no signature) -> video_info.data.
         val fallback = fallbackUrl(model)
@@ -312,32 +378,6 @@ internal class MultiVideoModelStreamSource(
     }
 
     /**
-     * v5 播放模型通道：新接口 + gzip + v5 签名（见 [MobilePlayback]）。
-     *
-     * 只取目标集，不做跨 host 重试——v5 通道要么直接给模型，要么明确失败，此时
-     * 交给旧链路（它有完整的 host/身份自愈）。空响应按"该身份被屏蔽"计数，让
-     * 后续的轮换阈值照常推进。
-     */
-    private fun mobileModel(id: String, trace: PlaybackRequestTrace?): JSONObject? = try {
-        val identity = session.profile(http)
-        val entry = MobilePlayback.model(id, identity.values, http, MobilePlayback.signer, System.currentTimeMillis())
-        trace?.response(PlaybackRequestTrace.Stage.POST, v5Host, 200, entry.toString().toByteArray(Charsets.UTF_8).size, okhttp3.Protocol.HTTP_2)
-        entry.optJSONObject("video_model") ?: normalizeModel(entry.get("video_model"))
-    } catch (error: EmptyPlaybackResponseException) {
-        trace?.failed(PlaybackRequestTrace.Stage.POST, v5Host, error)
-        noteEmptyRound()
-        null
-    } catch (error: AppApiRejectedException) {
-        trace?.failed(PlaybackRequestTrace.Stage.POST, v5Host, error)
-        null
-    } catch (error: IOException) {
-        trace?.failed(PlaybackRequestTrace.Stage.POST, v5Host, error)
-        null
-    } catch (error: RuntimeException) {
-        null
-    }
-
-    /**
      * The official client's current playback-model endpoint:
      * GET /reading/bookapi/video_tab/multi_video_model/v1/ (2026-11-02).
      *
@@ -355,8 +395,13 @@ internal class MultiVideoModelStreamSource(
      * the unsigned GET started returning empty bodies while the same request signed
      * returns full data.
      */
-    private fun tabModel(id: String, speculative: Boolean = false, trace: PlaybackRequestTrace? = null): JSONObject? {
-        val identity = session.profile(http)
+    private fun tabModel(
+        id: String,
+        speculative: Boolean = false,
+        trace: PlaybackRequestTrace? = null,
+        client: OkHttpClient = http,
+    ): JSONObject? {
+        val identity = session.profile(client)
         val extra = mapOf(
             "video_id" to id, "video_id_type" to "0", "device_level" to "1",
             "need_all_video_definition" to "1", "need_mp4_align" to "0",
@@ -385,7 +430,7 @@ internal class MultiVideoModelStreamSource(
                     }
                     .get()
                     .build()
-                val text = RequestScope.execute(http.newCall(request)) { response ->
+                val text = RequestScope.execute(client.newCall(request)) { response ->
                     if (!response.isSuccessful) throw IOException("video_tab HTTP ${response.code}")
                     val body = response.body?.string().orEmpty()
                     trace?.response(PlaybackRequestTrace.Stage.GET, host, response.code, body.toByteArray(Charsets.UTF_8).size, response.protocol)
@@ -523,7 +568,16 @@ internal class MultiVideoModelStreamSource(
      * plan - a route that just answered empty is skipped for 30s, and the route that
      * last succeeded is tried first.
      */
-    private fun requestPlayback(payload: String, identity: PlaybackDeviceSession.Profile, trace: PlaybackRequestTrace? = null): JSONObject {
+    private fun requestPlayback(
+        payload: String,
+        identity: PlaybackDeviceSession.Profile,
+        trace: PlaybackRequestTrace? = null,
+        client: OkHttpClient = http,
+        segment: String = PATH,
+    ): JSONObject {
+        // 旧链路常量 PATH 带尾斜杠（平台实测过的形态）；形态矩阵传进来的是不带斜杠的
+        // segment，这里统一补成「/xxx/」。
+        val path = "/" + segment.trim('/') + "/"
         var lastError: IOException? = null
         val plan = routes.plan().filter { !it.get }.take(3)
         for ((attempt, route) in plan.withIndex()) {
@@ -531,10 +585,25 @@ internal class MultiVideoModelStreamSource(
                 // Each attempt signs fresh (new _rticket + timestamp-bound headers) on a
                 // rotated host; retries force a new TCP+TLS connection.
                 val host = route.host
-                val data = transport.requestUrl(
-                    "https://$host$PATH",
-                    payload.toByteArray(Charsets.UTF_8),
-                    signedPlaybackHeaders(PATH, identity, payload.toByteArray(Charsets.UTF_8), host))
+                val body = payload.toByteArray(Charsets.UTF_8)
+                val signed = transport.sign("https://$host$path", identity.values, body, playbackUa)
+                val headers = signed.headers.toMutableMap()
+                if (identity.cookie.isNotBlank()) headers["Cookie"] = identity.cookie
+                headers["Connection"] = "close"
+                val data = RequestScope.execute(client.newCall(
+                    Request.Builder().url(signed.url).apply { headers.forEach { (k, v) -> header(k, v) } }
+                        .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                        .build())) { response ->
+                    if (!response.isSuccessful) throw IOException("App 接口请求失败（HTTP ${response.code}）")
+                    val text = response.body?.string() ?: throw IOException("App 接口响应为空")
+                    if (text.isEmpty()) throw AppApiEmptyResponseException()
+                    val parsed = try { JSONObject(text) } catch (e: org.json.JSONException) {
+                        throw IOException("App 接口返回了无法解析的内容", e)
+                    }
+                    val code = parsed.optInt("code", parsed.optInt("Code", 0))
+                    if (code != 0) throw AppApiRejectedException(code)
+                    parsed
+                }
                 routes.success(route)
                 return data
             } catch (e: EmptyPlaybackResponseException) {
@@ -557,20 +626,6 @@ internal class MultiVideoModelStreamSource(
             }
         }
         throw lastError ?: IOException("播放接口返回空数据")
-    }
-
-    /** Build the signed headers for a POST playback call on the given host. */
-    private fun signedPlaybackHeaders(
-        path: String,
-        identity: PlaybackDeviceSession.Profile,
-        body: ByteArray,
-        host: String,
-    ): Map<String, String> {
-        val signed = transport.sign("https://$host$path", identity.values, body, playbackUa)
-        val headers = signed.headers.toMutableMap()
-        if (identity.cookie.isNotBlank()) headers["Cookie"] = identity.cookie
-        headers["Connection"] = "close"
-        return headers
     }
 
     /** Three response shapes: data[vid].video_model, data.video_model, single-key entry. */

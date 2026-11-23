@@ -302,6 +302,10 @@ class MainActivity: Activity() {
     }
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
+        // 播放形态记忆（上游 41ba81c）：恢复上次成功的「路径 × 签名」组合，成功后写回。
+        // 平台 2026-11 在 GET/POST × v5/Argus 六种形态间反复切，跨重启记住能省掉
+        // 每次冷启动从头试错的那几次空响应（配额敏感时表现为「换集卡住」）。
+        initPlaybackShape()
         window.decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
         // Decoder capability probe + learned runtime failures (upstream 2026-11-14 port).
@@ -325,8 +329,18 @@ class MainActivity: Activity() {
         message(base(),"正在读取本机记录…")
         loadLibrary()
     }
-    private fun showLibraryError(problem: Throwable) {
-        val body=base(); error(body,problem) { message(base(),"正在读取本机记录…"); loadLibrary() }
+    /** 播放形态记忆（上游 41ba81c）：恢复上次成功的一条，并把它写回偏好。 */
+    private fun initPlaybackShape() {
+        val prefs=getSharedPreferences("native-playback-v1", MODE_PRIVATE)
+        com.hongguotv.core.PlaybackShapeMemory.restore(
+            com.hongguotv.core.PlaybackShape.parse(prefs.getString("playback-shape", null)))
+        com.hongguotv.core.PlaybackShapeMemory.onChange={ shape ->
+            prefs.edit().apply {
+                if(shape==null) remove("playback-shape") else putString("playback-shape", shape.label)
+            }.apply()
+        }
+    }
+    private fun showLibraryError(problem: Throwable) {        val body=base(); error(body,problem) { message(base(),"正在读取本机记录…"); loadLibrary() }
     }
     private fun loadLibrary() {
         libraryLoadError=null

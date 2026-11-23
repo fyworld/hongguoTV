@@ -19,11 +19,25 @@ import org.junit.Test
  * Identity-blocklist self-healing (upstream b597f28) + bytevc2 compat model
  * (upstream 265472f) for MultiVideoModelStreamSource.
  *
- * A "round" is one stream() call: tab endpoint (empty = blocked identity) then
- * the old POST path with its 3-attempt retry. Two fully-empty rounds arm the
+ * A "round" is one stream() call: it walks the six-shape matrix
+ * (PlaybackShapeMemory.order(), `get-v5` first by default), then does the mid-call
+ * identity rotation when the route map is exhausted. Two fully-empty rounds arm the
  * rotation; the third round rotates BEFORE its requests go out.
+ *
+ * 2026-11-23（上游 41ba81c）：路径按「tab 前缀 / POST 前缀」匹配，因为 v5 GET 用的是
+ * 无尾斜杠的官方路径，而旧 Argus GET 仍带尾斜杠——两者是同一端点。
  */
 class MultiVideoModelRotationTest {
+
+    @org.junit.Before fun resetShapeMemory() = PlaybackShapeMemory.reset()
+
+    /** Tab endpoint (either trailing slash: v5 GET vs legacy Argus GET). */
+    private fun Request.isTabPath() = url.encodedPath.startsWith(
+        "/reading/bookapi/video_tab/multi_video_model/v1")
+
+    /** POST playback endpoint (player variant or flat v1). */
+    private fun Request.isPostPath() = url.encodedPath.startsWith(
+        "/novel/player/multi_video_model/")
 
     /** Always-blocked fixture: registration OK, tab + POST both empty forever. */
     private fun blockedHttp(): OkHttpClient = OkHttpClient.Builder()
@@ -45,10 +59,10 @@ class MultiVideoModelRotationTest {
         val http = blockedHttp()
         val source = source(http, session)
 
-        // Round 1: tab empty + POST empty (3 attempts) drains the route map; the
-        // MID-CALL rotation (upstream 0.1.26 refreshIdentity) fires INSIDE this
-        // round (registrations=2), the fresh identity's tab call also comes back
-        // empty, and the surfaced error is already tagged rotated=1.
+        // Round 1: the whole shape matrix comes back empty; the route map is drained
+        // (POST shapes) so the MID-CALL rotation fires (registrations=2), the fresh
+        // identity's first shape also comes back empty, and the surfaced error is
+        // already tagged rotated=1.
         val first = assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertTrue(first.detail.orEmpty().contains("rotated=1"))
         assertEquals(2, registrations.get())
@@ -72,11 +86,10 @@ class MultiVideoModelRotationTest {
         val http = OkHttpClient.Builder()
             .addInterceptor { chain ->
                 val request = chain.request()
-                val path = request.url.encodedPath
                 when {
-                    path == "/service/2/device_register/" ->
+                    request.url.encodedPath == "/service/2/device_register/" ->
                         respond(request, """{"device_id":"333","install_id":"444"}""", setCookie = true)
-                    path == MultiVideoModelStreamSource.TAB_PATH -> {
+                    request.isTabPath() -> {
                         val fresh = registrations.get() == 2 && recoveredOnce.compareAndSet(false, true)
                         respond(request, if (fresh) tabModel() else "")
                     }
@@ -87,15 +100,15 @@ class MultiVideoModelRotationTest {
             .build()
         val source = source(http, session)
 
-        // Round 1: tab empty + POST empty drains the route map; the MID-CALL
-        // rotation fires (fresh identity, registrations=2) and the tab call
-        // succeeds on it - ONE call recovers. Success resets the healing state.
+        // Round 1: matrix empty drains the route map; the MID-CALL rotation fires
+        // (fresh identity, registrations=2) and the tab call succeeds on it - ONE
+        // call recovers. Success resets the healing state.
         val recovered = source.stream("123", 1080, ContentType.SHORT)
         assertEquals("https://example.test/video", recovered.url)
         assertEquals(2, registrations.get()) // rotation preceded the successful tab call
-        // New incident counts fresh: the route map is exhausted again after round 2,
-        // the mid-call rotation fires inside it (registrations=3), the new identity
-        // is also blocked, and the error is tagged rotated=1.
+        // New incident counts fresh: round 2 drains the map again, the mid-call
+        // rotation fires inside it (registrations=3), the new identity is also
+        // blocked, and the error is tagged rotated=1.
         val second = assertThrows(EmptyPlaybackResponseException::class.java) { source.stream("123", 1080, ContentType.SHORT) }
         assertTrue(second.detail.orEmpty().contains("rotated=1"))
         assertEquals(3, registrations.get())
@@ -128,12 +141,11 @@ class MultiVideoModelRotationTest {
         val http = OkHttpClient.Builder()
             .addInterceptor { chain ->
                 val request = chain.request()
-                when (request.url.encodedPath) {
-                    "/service/2/device_register/" -> respond(request, """{"device_id":"333","install_id":"444"}""", setCookie = true)
-                    MultiVideoModelStreamSource.TAB_PATH -> respond(request, "")
-                    MultiVideoModelStreamSource.PATH -> respond(request, fallbackOnlyModel())
-                    // v5 通道（2026-11-16）先打；空正文 = 新通道不可用，回到 0.1.31 链路。
-                    in MobilePlayback.MODEL_PATHS -> respond(request, "")
+                when {
+                    request.url.encodedPath == "/service/2/device_register/" ->
+                        respond(request, """{"device_id":"333","install_id":"444"}""", setCookie = true)
+                    request.isTabPath() -> respond(request, "")
+                    request.isPostPath() -> respond(request, fallbackOnlyModel())
                     else -> {
                         fallbackRequests.add(request)
                         // Original fallback: all bytevc2. Compat request: returns h264.
@@ -162,12 +174,11 @@ class MultiVideoModelRotationTest {
         val http = OkHttpClient.Builder()
             .addInterceptor { chain ->
                 val request = chain.request()
-                when (request.url.encodedPath) {
-                    "/service/2/device_register/" -> respond(request, """{"device_id":"333","install_id":"444"}""", setCookie = true)
-                    MultiVideoModelStreamSource.TAB_PATH -> respond(request, "")
-                    MultiVideoModelStreamSource.PATH -> respond(request, fallbackOnlyModel())
-                    // v5 通道（2026-11-16）先打；空正文 = 新通道不可用，回到 0.1.31 链路。
-                    in MobilePlayback.MODEL_PATHS -> respond(request, "")
+                when {
+                    request.url.encodedPath == "/service/2/device_register/" ->
+                        respond(request, """{"device_id":"333","install_id":"444"}""", setCookie = true)
+                    request.isTabPath() -> respond(request, "")
+                    request.isPostPath() -> respond(request, fallbackOnlyModel())
                     else -> {
                         fallbackRequests.add(request)
                         respond(request, mixedModel())
@@ -230,7 +241,7 @@ class MultiVideoModelRotationTest {
                 .put("video_meta", JSONObject().put("definition", "720p").put("codec_type", "bytevc2"))))))
         .toString()
 
-    /** Tab-endpoint success body (identity works again). */
+    /** Tab-endpoint success body (identity works again) for either GET signature. */
     private fun tabModel() = JSONObject()
         .put("code", 0)
         .put("data", JSONObject().put("video_model_data", JSONObject().put("123", JSONObject()
