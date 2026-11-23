@@ -24,24 +24,26 @@ internal object PlaybackConfigSelfCheck {
     /** 最多试两个形态：首选可用就 1 次请求，避免自检本身烧配额。 */
     private const val MAX_SHAPES = 2
 
-    fun run(http: OkHttpClient, device: Map<String, String>): Boolean {
+    fun run(http: OkHttpClient, device: Map<String, String>, config: PlaybackConfig): Boolean {
         val client = http.newBuilder()
             .connectTimeout(3, TimeUnit.SECONDS)
             .readTimeout(4, TimeUnit.SECONDS)
             .callTimeout(6, TimeUnit.SECONDS)
             .build()
-        for (shape in PlaybackShape.all.take(MAX_SHAPES)) {
-            val endpoint = shape.path.resolve()
+        val signer = MobilePlayback.signerFor(config)
+        for (shape in PlaybackShape.allFor(config).take(MAX_SHAPES)) {
+            val endpoint = shape.path.resolve(config)
             val entry = runCatching {
                 when (shape.path) {
                     PlaybackPath.GET_VIDEO_TAB -> MobilePlayback.getVideoTab(
-                        PROBE_VIDEO_ID, device, client, MobilePlayback.signer,
-                        System.currentTimeMillis(), host = endpoint.host, segment = endpoint.segment)
+                        PROBE_VIDEO_ID, device, client, signer,
+                        System.currentTimeMillis(), host = endpoint.host, segment = endpoint.segment,
+                        config = config)
                     else -> MobilePlayback.model(
-                        PROBE_VIDEO_ID, device, client, MobilePlayback.signer,
+                        PROBE_VIDEO_ID, device, client, signer,
                         System.currentTimeMillis(), segment = endpoint.segment,
                         host = endpoint.host, drScene = endpoint.drScene,
-                        deviceLevel = endpoint.deviceLevel)
+                        deviceLevel = endpoint.deviceLevel, config = config)
                 }
             }.getOrNull() ?: continue
             val model = entry.optJSONObject("video_model") ?: continue

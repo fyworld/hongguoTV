@@ -38,15 +38,20 @@ enum class PlaybackPath(
 }
 
 /**
- * 该路径当前的**运行时端点**：优先取配置（`configs/playback.json`），
- * 配置里没有这条就回退到 enum 内置值（等价于改配置前的硬编码行为）。
+ * 该路径在**指定配置**下的运行时端点：配置里没有这条就回退到 enum 内置值
+ * （等价于改配置前的硬编码行为）。
+ *
+ * 显式传配置是为了让「配置自检」能用候选配置发请求，而不去改全局状态。
  */
-fun PlaybackPath.resolve(): PlaybackEndpoint =
-    PlaybackConfigStore.current().endpointFor(this)
+fun PlaybackPath.resolve(config: PlaybackConfig): PlaybackEndpoint =
+    config.endpointFor(this)
         ?: PlaybackEndpoint(
             id = label, method = method, host = host, segment = segment,
             signer = "v5", drScene = drScene, deviceLevel = deviceLevel,
         )
+
+/** 当前生效配置下的端点（线上调用）。 */
+fun PlaybackPath.resolve(): PlaybackEndpoint = resolve(PlaybackConfigStore.current())
 
 /** 播放请求的签名规范：v5（x-khronos/x-ss-stub）与旧 Argus（x-argus/x-ladon）。 */
 enum class PlaybackSigner(val label: String) {
@@ -82,17 +87,20 @@ data class PlaybackShape(val path: PlaybackPath, val signer: PlaybackSigner) {
                 PlaybackShape(PlaybackPath.POST_PRELOAD, PlaybackSigner.ARGUS),
             )
 
-        /** 当前生效顺序：配置的 `shapeOrder` 优先（未列出的保持内置顺序排在其后）。 */
-        val all: List<PlaybackShape>
-            get() {
-                val configured = PlaybackConfigStore.current().shapeOrder
-                if (configured.isEmpty()) return BUILTIN_ALL
-                val byLabel = BUILTIN_ALL.associateBy { it.label }
-                val ordered = configured.mapNotNull { byLabel[it] }
-                return ordered + BUILTIN_ALL.filter { it.label !in configured }
-            }
+        /** 指定配置下的形态顺序：`shapeOrder` 优先（未列出的保持内置顺序排在其后）。 */
+        fun allFor(config: PlaybackConfig): List<PlaybackShape> {
+            val configured = config.shapeOrder
+            if (configured.isEmpty()) return BUILTIN_ALL
+            val byLabel = BUILTIN_ALL.associateBy { it.label }
+            val ordered = configured.mapNotNull { byLabel[it] }
+            return ordered + BUILTIN_ALL.filter { it.label !in configured }
+        }
 
-        fun parse(value: String?): PlaybackShape? = all.firstOrNull { it.label == value }
+        /** 当前生效顺序（线上调用）。 */
+        val all: List<PlaybackShape> get() = allFor(PlaybackConfigStore.current())
+
+        fun parse(value: String?): PlaybackShape? = allFor(PlaybackConfig.defaults()).firstOrNull { it.label == value }
+            ?: all.firstOrNull { it.label == value }
     }
 }
 

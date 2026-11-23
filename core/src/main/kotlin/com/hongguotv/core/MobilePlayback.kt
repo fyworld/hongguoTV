@@ -49,14 +49,24 @@ internal fun interface MobilePlaybackSigner {
 internal object MobilePlayback {
     private val v5Signer = Signer.sharedV5 { System.currentTimeMillis() }
 
-    val signer = MobilePlaybackSigner { url, body, _ ->
+    /**
+     * 用**指定配置**构造签名器。
+     *
+     * 自检时传候选配置，不去改全局 [PlaybackConfigStore.current]——这样自检与线上请求
+     * 完全隔离，不会出现「自检窗口内并发播放拿到候选配置」的副作用。
+     */
+    fun signerFor(config: PlaybackConfig): MobilePlaybackSigner = MobilePlaybackSigner { url, body, _ ->
         val parsed = url.toHttpUrl()
         val values = parsed.queryParameterNames.associateWith { parsed.queryParameter(it)!! }
         val now = values.getValue("_rticket").toLong()
         val request = v5Signer.signPlaybackV5(
-            parsed.newBuilder().query(null).build().toString(), values, body, now)
+            parsed.newBuilder().query(null).build().toString(), values, body, now,
+            field21 = config.medusaField21)
         MobileSignedRequest(request.url, request.headers)
     }
+
+    /** 线上默认签名器：每次调用读当前生效配置（热更新后下一次请求即生效）。 */
+    val signer: MobilePlaybackSigner get() = signerFor(PlaybackConfigStore.current())
 
     private fun ensureActive() {
         if (Thread.currentThread().isInterrupted) throw IOException("请求已取消")
@@ -73,8 +83,8 @@ internal object MobilePlayback {
      * 2026-11-24：静态字段改为读 [PlaybackConfigStore]（可热更新），
      * `iid / cdid / device_id` 三个设备相关字段仍在运行时注入。
      */
-    private fun currentAppQuery(device: Map<String, String>): LinkedHashMap<String, String> {
-        val query = LinkedHashMap(PlaybackConfigStore.current().appQuery)
+    private fun currentAppQuery(device: Map<String, String>, config: PlaybackConfig): LinkedHashMap<String, String> {
+        val query = LinkedHashMap(config.appQuery)
         query["iid"] = device.getValue("iid")
         query["cdid"] = device.getValue("cdid")
         query["device_id"] = device.getValue("device_id")
@@ -101,6 +111,7 @@ internal object MobilePlayback {
         host: String = MODEL_BASE,
         drScene: String? = null,
         deviceLevel: Int = 1,
+        config: PlaybackConfig = PlaybackConfigStore.current(),
     ): JSONObject {
         require(id.matches(Regex("[0-9]{1,30}")))
         ensureActive()
@@ -122,11 +133,11 @@ internal object MobilePlayback {
         GZIPOutputStream(output).use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
         val bytes = output.toByteArray()
         val url = "$host/${segment.trimStart('/')}".toHttpUrl().newBuilder().apply {
-            currentAppQuery(device).forEach { (k, v) -> addQueryParameter(k, v) }
+            currentAppQuery(device, config).forEach { (k, v) -> addQueryParameter(k, v) }
             addQueryParameter("_rticket", now.toString())
         }.build()
         val request = Request.Builder().url(url)
-            .header("User-Agent", postUserAgent())
+            .header("User-Agent", postUserAgent(config))
             .header("Accept", "application/json")
             .header("Content-Encoding", "gzip")
             .header("x-ss-stub", MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02X".format(it) })
@@ -137,7 +148,7 @@ internal object MobilePlayback {
         request.post(bytes.toRequestBody("application/json; charset=utf-8".toMediaType()))
         val transport = http.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
         return RequestScope.execute(transport.newCall(request.build())) { response ->
-            readModel(response, id, emptyDetail = "stage=mobile-model")
+            readModel(response, id, emptyDetail = "stage=mobile-model", config = config)
         }
     }
 
@@ -159,11 +170,12 @@ internal object MobilePlayback {
         now: Long,
         host: String = GET_TAB_BASE,
         segment: String = GET_TAB_SEGMENT,
+        config: PlaybackConfig = PlaybackConfigStore.current(),
     ): JSONObject {
         require(id.matches(Regex("[0-9]{1,30}")))
         ensureActive()
         val url = "$host/${segment.trimStart('/')}".toHttpUrl().newBuilder().apply {
-            currentAppQuery(device).forEach { (k, v) -> addQueryParameter(k, v) }
+            currentAppQuery(device, config).forEach { (k, v) -> addQueryParameter(k, v) }
             addQueryParameter("video_id", id)
             addQueryParameter("video_id_type", "0")
             addQueryParameter("device_level", "1")
@@ -177,7 +189,7 @@ internal object MobilePlayback {
         }.build()
         val signed = signer.sign(url.toString(), ByteArray(0), device)
         val request = Request.Builder().url(signed.url).get()
-            .header("User-Agent", PlaybackConfigStore.current().uaGetTab)
+            .header("User-Agent", config.uaGetTab)
             .header("Accept", "application/json; charset=utf-8")
             .header("Accept-Language", "zh-CN,zh;q=0.9")
             .apply {
@@ -189,7 +201,7 @@ internal object MobilePlayback {
             }
         val transport = http.newBuilder().cookieJar(CookieJar.NO_COOKIES).build()
         return RequestScope.execute(transport.newCall(request.build())) { response ->
-            readModel(response, id, emptyDetail = "shape=get")
+            readModel(response, id, emptyDetail = "shape=get", config = config)
         }
     }
 
@@ -205,6 +217,7 @@ internal object MobilePlayback {
         response: okhttp3.Response,
         id: String,
         emptyDetail: String,
+        config: PlaybackConfig,
     ): JSONObject {
         if (!response.isSuccessful) throw IOException("播放接口 HTTP ${response.code}")
         val body = response.body ?: throw IOException("播放信息格式异常")
@@ -221,7 +234,7 @@ internal object MobilePlayback {
         val code = root.optInt("Code", root.optInt("code", 0))
         if (code != 0) throw AppApiRejectedException(code)
         if (!root.has("data")) throw IOException("播放信息为空")
-        val model = PlaybackResponse.modelOf(root, id, PlaybackConfigStore.current())
+        val model = PlaybackResponse.modelOf(root, id, config)
             ?: throw IOException("播放信息未包含指定剧集")
         if ((model.optJSONObject("video_list")?.length() ?: 0) == 0 &&
             (model.optJSONArray("video_list")?.length() ?: 0) == 0 && !model.has("fallback_api"))
@@ -233,8 +246,8 @@ internal object MobilePlayback {
      * POST 形态的 UA：配置给了就用配置（可热更新），否则用系统 `http.agent`。
      * 上游 ef328f3 已证明 UA 不敏感，所以默认走系统值，最不显眼。
      */
-    private fun postUserAgent(): String {
-        val configured = PlaybackConfigStore.current().uaPost
+    private fun postUserAgent(config: PlaybackConfig): String {
+        val configured = config.uaPost
         return if (configured.isNotBlank()) configured
         else System.getProperty("http.agent", "okhttp/4.12.0")
     }

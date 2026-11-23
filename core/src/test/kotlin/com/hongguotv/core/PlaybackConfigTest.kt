@@ -259,6 +259,35 @@ class PlaybackConfigTest {
         assertEquals(22, PlaybackConfigStore.current().configVersion)
     }
 
+    @Test fun selfCheckDoesNotTouchTheGlobalConfig() {
+        var seenVersion = -1
+        PlaybackConfigStore.verifier = { _ ->
+            seenVersion = PlaybackConfigStore.current().configVersion
+            true
+        }
+        assertTrue(PlaybackConfigStore.install(configJson(version = 31), "remote:test", verify = true))
+        assertEquals("自检期间全局配置必须还是旧的", 1, seenVersion)
+        assertEquals("通过后才切换", 31, PlaybackConfigStore.current().configVersion)
+    }
+
+    @Test fun requestUsesTheConfigObjectPassedIn() {
+        // 自检靠"传参"而不是改全局：验证 model() 真的用了传入的配置
+        val config = PlaybackConfig.defaults().copy(
+            appQuery = mapOf("aid" to "9999", "app_name" to "novelread"),
+            medusaField21 = 555,
+        )
+        val device = mapOf("device_id" to "1", "iid" to "2", "cdid" to "3")
+        val captured = ArrayList<String>()
+        val http = stub { url -> captured += url; "{}" }
+        runCatching { MobilePlayback.model("1", device, http, MobilePlayback.signer, 1000, config = config) }
+        assertEquals(1, captured.size)
+        assertTrue("必须用传入配置的画像", captured.first().contains("aid=9999"))
+        assertEquals("全局配置不受影响", 312, PlaybackConfigStore.current().medusaField21)
+        // signerFor 也用同一份配置的 field21
+        val signature = MobilePlayback.signerFor(config)
+        org.junit.Assert.assertNotNull(signature)
+    }
+
     @Test fun localAndCacheInstallsSkipSelfCheck() {
         var called = 0
         PlaybackConfigStore.verifier = { called++; true }

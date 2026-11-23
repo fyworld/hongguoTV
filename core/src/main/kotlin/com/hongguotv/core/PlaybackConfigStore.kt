@@ -93,14 +93,14 @@ object PlaybackConfigStore {
      * 自检失败 → 该配置不上线，保持旧配置（日志 `playback config self-check failed`）。
      */
     fun useBuiltInSelfCheck(http: OkHttpClient) {
-        verifier = { _ ->
+        verifier = { config ->
             runCatching {
                 val client = http.newBuilder()
                     .connectTimeout(3, TimeUnit.SECONDS)
                     .readTimeout(4, TimeUnit.SECONDS)
                     .build()
                 val device = PlaybackDeviceSession.shared.profile(client).values
-                PlaybackConfigSelfCheck.run(client, device)
+                PlaybackConfigSelfCheck.run(client, device, config)
             }.getOrDefault(false)
         }
     }
@@ -154,12 +154,10 @@ object PlaybackConfigStore {
                 return false
             }
             if (check != null) {
-                // 候选配置临时生效，自检才能按新画像/新路径发请求；失败立刻回滚。
-                // 窗口内并发的播放请求会用到候选配置——若它确实是坏的，那些请求本来也会失败。
-                active = parsed
+                // 自检用**参数传递**的候选配置发请求（见 MobilePlayback.signerFor / config 参数），
+                // 不切换全局 active —— 自检期间线上请求仍走旧配置，彻底消除并发窗口。
                 val ok = runCatching { check(parsed) }.getOrDefault(false)
                 if (!ok) {
-                    active = previous
                     log.warning("playback config self-check failed: v${parsed.configVersion} from $from")
                     return false
                 }

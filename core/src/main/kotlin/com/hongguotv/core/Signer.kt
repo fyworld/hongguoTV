@@ -290,7 +290,7 @@ internal class Signer(
      * 设备信息字段与 AesV3 常量表全部换新，载荷首字节 0xCA，长度 248 字节起。
      * 内嵌的 device_id / 版本 / channel 必须与 query 完全一致（服务端核对）。
      */
-    private fun medusaV5(url: String, body: ByteArray?, ts: Int, who: Map<String, String>): String {
+    private fun medusaV5(url: String, body: ByteArray?, ts: Int, who: Map<String, String>, field21: Int): String {
         val query = sm3(url.substringAfter('?').toByteArray(Charsets.UTF_8))
         val f13 = hashF13V5(query, body?.let { digest("MD5", it) } ?: ByteArray(16), ts)
         val flags = ByteArray(8)
@@ -311,7 +311,7 @@ internal class Signer(
             f(7, version), f(8,"v04.10.03-ml-android"), f(9, 0x040a0300,"sint"),
             f(10, flags), f(12, ts,"sint"), f(13, f13), f(14, query.copyOf(6)),
             f(15, proto(f(1,1,"sint"),f(2,1,"sint"),f(3,1,"sint"),f(5,1,"sint"))),
-            f(17, ts,"sint"), f(20,"none"), f(21,V5Constants.field21,"sint"), f(23, env),
+            f(17, ts,"sint"), f(20,"none"), f(21,field21,"sint"), f(23, env),
             f(24, """{"cmr":16777216,"cmr2":16777216,"un_h":11,"vpn":0,"kd":0,"dyn":"","do":1,"tk":true}"""),
         )
         val nonce = rand()
@@ -419,7 +419,13 @@ internal class Signer(
      * `values` 必须含 device_id / version_name / channel / os_version / device_type，
      * medusa 明文要把它们原样回写。
      */
-    fun signPlaybackV5(base: String, values: Map<String,String>, body: ByteArray?, now: Long = clock()): Request {
+    fun signPlaybackV5(
+        base: String,
+        values: Map<String,String>,
+        body: ByteArray?,
+        now: Long = clock(),
+        field21: Int = V5Constants.field21,
+    ): Request {
         val ts = (now / 1000).toInt()
         for (offset in 0..1023) {
             val ticket = now + offset
@@ -429,7 +435,7 @@ internal class Signer(
             val headers = linkedMapOf(
                 "x-khronos" to ts.toString(),
                 "x-helios" to helios(ts),
-                "x-medusa" to medusaV5(url, body, ts, values),
+                "x-medusa" to medusaV5(url, body, ts, values, field21),
             )
             if (body != null) {
                 headers["Content-Type"] = "application/json; charset=utf-8"
