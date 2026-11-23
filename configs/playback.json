@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "configVersion": 1,
+  "minAppVersion": 10053,
+  "notes": "基线：官方 7.4.5.32 请求画像 + medusa field21=312（与 APK 内置一致）",
+  "medusa": {
+    "field21": 312
+  },
+  "appQuery": {
+    "aid": "8662",
+    "app_name": "novelread",
+    "version_code": "74532",
+    "version_name": "7.4.5.32",
+    "update_version_code": "74532",
+    "manifest_version_code": "74532",
+    "os": "android",
+    "ssmix": "a",
+    "channel": "update_64",
+    "device_platform": "android",
+    "device_type": "25053RT47C",
+    "device_brand": "Redmi",
+    "os_version": "16",
+    "os_api": "36",
+    "ac": "wifi",
+    "language": "zh",
+    "host_abi": "arm64-v8a"
+  },
+  "ua": {
+    "getTab": "com.phoenix.read/73932 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)",
+    "post": ""
+  },
+  "endpoints": [
+    {
+      "id": "get",
+      "method": "GET",
+      "host": "https://api5-normal-sinfonlineb.fqnovel.com",
+      "segment": "reading/bookapi/video_tab/multi_video_model/v1",
+      "signer": "v5"
+    },
+    {
+      "id": "player",
+      "method": "POST",
+      "host": "https://api5-normal-sinfonlinea.fqnovel.com",
+      "segment": "novel/player/multi_video_model/player/v1",
+      "signer": "v5",
+      "deviceLevel": 1
+    },
+    {
+      "id": "preload",
+      "method": "POST",
+      "host": "https://reading.snssdk.com",
+      "segment": "novel/player/multi_video_model/preload/v1",
+      "signer": "v5",
+      "drScene": "preload",
+      "deviceLevel": 2
+    },
+    {
+      "id": "v1",
+      "method": "POST",
+      "host": "https://api5-normal-sinfonlinea.fqnovel.com",
+      "segment": "novel/player/multi_video_model/v1",
+      "signer": "v5",
+      "deviceLevel": 1
+    }
+  ],
+  "shapeOrder": [
+    "get-v5",
+    "player-v5",
+    "preload-v5",
+    "v1-argus",
+    "get-argus",
+    "v1-v5",
+    "player-argus",
+    "preload-argus"
+  ],
+  "budgetFloorMs": 600
+}

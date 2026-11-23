@@ -213,9 +213,9 @@ class PlaybackConfigTest {
      */
     @Test fun shippedConfigFileParsesAndMatchesBuiltin() {
         val candidates = listOf(
-            File("../../configs/playback.json"),
-            File("../configs/playback.json"),
-            File("configs/playback.json"),
+            File("../configs/playback.json"),          // 模块内运行：kotlin-tv/core → kotlin-tv/configs
+            File("configs/playback.json"),             // 仓库根运行
+            File("../../configs/playback.json"),       // 兼容旧布局
         )
         val file = candidates.firstOrNull { it.isFile }
         org.junit.Assume.assumeTrue(
