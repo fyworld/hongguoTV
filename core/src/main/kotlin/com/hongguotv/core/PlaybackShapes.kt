@@ -18,15 +18,35 @@ enum class PlaybackPath(
     val host: String = MobilePlayback.MODEL_BASE,
     val drScene: String? = null,
     val deviceLevel: Int = 1,
+    val method: String = "POST",
 ) {
-    GET_VIDEO_TAB("get", "reading/bookapi/video_tab/multi_video_model/v1"),
+    GET_VIDEO_TAB(
+        "get", "reading/bookapi/video_tab/multi_video_model/v1",
+        host = MobilePlayback.GET_TAB_BASE, method = "GET",
+    ),
     POST_PLAYER("player", "novel/player/multi_video_model/player/v1"),
     POST_PRELOAD(
         "preload", "novel/player/multi_video_model/preload/v1",
         host = MobilePlayback.PRELOAD_BASE, drScene = "preload", deviceLevel = 2,
     ),
     POST_V1("v1", "novel/player/multi_video_model/v1"),
+    ;
+
+    companion object {
+        fun byLabel(label: String?): PlaybackPath? = entries.firstOrNull { it.label == label }
+    }
 }
+
+/**
+ * 该路径当前的**运行时端点**：优先取配置（`configs/playback.json`），
+ * 配置里没有这条就回退到 enum 内置值（等价于改配置前的硬编码行为）。
+ */
+fun PlaybackPath.resolve(): PlaybackEndpoint =
+    PlaybackConfigStore.current().endpointFor(this)
+        ?: PlaybackEndpoint(
+            id = label, method = method, host = host, segment = segment,
+            signer = "v5", drScene = drScene, deviceLevel = deviceLevel,
+        )
 
 /** 播放请求的签名规范：v5（x-khronos/x-ss-stub）与旧 Argus（x-argus/x-ladon）。 */
 enum class PlaybackSigner(val label: String) {
@@ -44,8 +64,13 @@ data class PlaybackShape(val path: PlaybackPath, val signer: PlaybackSigner) {
     val label: String = "${path.label}-${signer.label}"
 
     companion object {
-        /** 默认顺序：近期验证过的组合优先，其余作为兜底矩阵。 */
-        val all: List<PlaybackShape> =
+        /**
+         * 内置矩阵（4 路径 × 2 签名，按历史验证过的优先级排列）。
+         *
+         * 2026-11-24：运行时顺序可由 `configs/playback.json` 的 `order` 调整
+         * （见 [all]），这样平台换优先路径时不用发版。
+         */
+        private val BUILTIN_ALL: List<PlaybackShape> =
             listOf(
                 PlaybackShape(PlaybackPath.GET_VIDEO_TAB, PlaybackSigner.V5),
                 PlaybackShape(PlaybackPath.POST_PLAYER, PlaybackSigner.V5),
@@ -56,6 +81,16 @@ data class PlaybackShape(val path: PlaybackPath, val signer: PlaybackSigner) {
                 PlaybackShape(PlaybackPath.POST_PLAYER, PlaybackSigner.ARGUS),
                 PlaybackShape(PlaybackPath.POST_PRELOAD, PlaybackSigner.ARGUS),
             )
+
+        /** 当前生效顺序：配置的 `shapeOrder` 优先（未列出的保持内置顺序排在其后）。 */
+        val all: List<PlaybackShape>
+            get() {
+                val configured = PlaybackConfigStore.current().shapeOrder
+                if (configured.isEmpty()) return BUILTIN_ALL
+                val byLabel = BUILTIN_ALL.associateBy { it.label }
+                val ordered = configured.mapNotNull { byLabel[it] }
+                return ordered + BUILTIN_ALL.filter { it.label !in configured }
+            }
 
         fun parse(value: String?): PlaybackShape? = all.firstOrNull { it.label == value }
     }

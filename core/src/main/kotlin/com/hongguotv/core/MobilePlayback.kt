@@ -69,18 +69,17 @@ internal object MobilePlayback {
      * 判断「是不是当前官方客户端」。用旧的 `vivo_8662_64 / PGT-AN10 / os 12` 画像，
      * 即使签名完全正确也一律 200+0B。
      * `_rticket` 由调用方追加在末尾（与上游同序）。
+     *
+     * 2026-11-24：静态字段改为读 [PlaybackConfigStore]（可热更新），
+     * `iid / cdid / device_id` 三个设备相关字段仍在运行时注入。
      */
-    private fun currentAppQuery(device: Map<String, String>): LinkedHashMap<String, String> =
-        linkedMapOf(
-            "aid" to "8662", "app_name" to "novelread",
-            "version_code" to "74532", "version_name" to "7.4.5.32",
-            "update_version_code" to "74532", "manifest_version_code" to "74532",
-            "os" to "android", "ssmix" to "a", "channel" to "update_64",
-            "device_platform" to "android", "device_type" to "25053RT47C",
-            "device_brand" to "Redmi", "os_version" to "16", "os_api" to "36",
-            "ac" to "wifi", "language" to "zh", "host_abi" to "arm64-v8a",
-            "iid" to device.getValue("iid"), "cdid" to device.getValue("cdid"),
-            "device_id" to device.getValue("device_id"))
+    private fun currentAppQuery(device: Map<String, String>): LinkedHashMap<String, String> {
+        val query = LinkedHashMap(PlaybackConfigStore.current().appQuery)
+        query["iid"] = device.getValue("iid")
+        query["cdid"] = device.getValue("cdid")
+        query["device_id"] = device.getValue("device_id")
+        return query
+    }
 
     /**
      * 取一集的播放模型（POST 形态，v5 签名 + gzip 体）。
@@ -127,7 +126,7 @@ internal object MobilePlayback {
             addQueryParameter("_rticket", now.toString())
         }.build()
         val request = Request.Builder().url(url)
-            .header("User-Agent", okhttpUserAgent())
+            .header("User-Agent", postUserAgent())
             .header("Accept", "application/json")
             .header("Content-Encoding", "gzip")
             .header("x-ss-stub", MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02X".format(it) })
@@ -153,6 +152,8 @@ internal object MobilePlayback {
      * 与 POST 的三处差异（上游原样）：UA 用 73932 + 25053RT47C；Accept 带 charset +
      * Accept-Language；**必须去掉 x-ss-stub / Content-Type / Content-Encoding**
      * （空字节只是签名输入，GET 没有请求体，带上这些头会被当成伪造特征）。
+     *
+     * [host] / [segment] 由形态配置提供（`configs/playback.json`），默认值即内置基线。
      */
     fun getVideoTab(
         id: String,
@@ -160,10 +161,12 @@ internal object MobilePlayback {
         http: OkHttpClient,
         signer: MobilePlaybackSigner,
         now: Long,
+        host: String = GET_TAB_BASE,
+        segment: String = GET_TAB_SEGMENT,
     ): JSONObject {
         require(id.matches(Regex("[0-9]{1,30}")))
         ensureActive()
-        val url = "$GET_TAB_BASE/${GET_TAB_SEGMENT.trimStart('/')}".toHttpUrl().newBuilder().apply {
+        val url = "$host/${segment.trimStart('/')}".toHttpUrl().newBuilder().apply {
             currentAppQuery(device).forEach { (k, v) -> addQueryParameter(k, v) }
             addQueryParameter("video_id", id)
             addQueryParameter("video_id_type", "0")
@@ -178,7 +181,7 @@ internal object MobilePlayback {
         }.build()
         val signed = signer.sign(url.toString(), ByteArray(0), device)
         val request = Request.Builder().url(signed.url).get()
-            .header("User-Agent", GET_TAB_UA)
+            .header("User-Agent", PlaybackConfigStore.current().uaGetTab)
             .header("Accept", "application/json; charset=utf-8")
             .header("Accept-Language", "zh-CN,zh;q=0.9")
             .apply {
@@ -234,8 +237,15 @@ internal object MobilePlayback {
         return JSONObject().put("video_model", model)
     }
 
-    /** 系统 http.agent（Android 上就是 `okhttp/x.y.z`）；上游 ef328f3 已证明 UA 不敏感。 */
-    private fun okhttpUserAgent(): String = System.getProperty("http.agent", "okhttp/4.12.0")
+    /**
+     * POST 形态的 UA：配置给了就用配置（可热更新），否则用系统 `http.agent`。
+     * 上游 ef328f3 已证明 UA 不敏感，所以默认走系统值，最不显眼。
+     */
+    private fun postUserAgent(): String {
+        val configured = PlaybackConfigStore.current().uaPost
+        return if (configured.isNotBlank()) configured
+        else System.getProperty("http.agent", "okhttp/4.12.0")
+    }
 
     /** POST 形态的默认域名（a 域）。 */
     const val MODEL_BASE = "https://api5-normal-sinfonlinea.fqnovel.com"

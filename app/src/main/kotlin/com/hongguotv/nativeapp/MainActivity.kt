@@ -306,6 +306,9 @@ class MainActivity: Activity() {
         // 平台 2026-11 在 GET/POST × v5/Argus 六种形态间反复切，跨重启记住能省掉
         // 每次冷启动从头试错的那几次空响应（配额敏感时表现为「换集卡住」）。
         initPlaybackShape()
+        // 播放接口热更新（2026-11-24）：画像 / 路径 / medusa 常量都能远端下发，
+        // 平台再换参数时不必重新发版（详见 core/PlaybackConfig.kt）。
+        initPlaybackConfig()
         window.decorView.systemUiVisibility=View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         library=Library(this); artwork=ArtworkLoader(this); tvTools=TvTools(this); root=FrameLayout(this).apply { setBackgroundColor(bg) }; setContentView(root)
         // Decoder capability probe + learned runtime failures (upstream 2026-11-14 port).
@@ -330,8 +333,7 @@ class MainActivity: Activity() {
         loadLibrary()
     }
     /** 播放形态记忆（上游 41ba81c）：恢复上次成功的一条，并把它写回偏好。 */
-    private fun initPlaybackShape() {
-        val prefs=getSharedPreferences("native-playback-v1", MODE_PRIVATE)
+    private fun initPlaybackShape() {        val prefs=getSharedPreferences("native-playback-v1", MODE_PRIVATE)
         com.hongguotv.core.PlaybackShapeMemory.restore(
             com.hongguotv.core.PlaybackShape.parse(prefs.getString("playback-shape", null)))
         com.hongguotv.core.PlaybackShapeMemory.onChange={ shape ->
@@ -339,6 +341,24 @@ class MainActivity: Activity() {
                 if(shape==null) remove("playback-shape") else putString("playback-shape", shape.label)
             }.apply()
         }
+    }
+    /**
+     * 播放接口配置热更新（2026-11-24）。
+     *
+     * 顺序：内置基线 → 本地缓存文件 → 启动后台拉远端（24h 节流）。
+     * 远端配置里的画像 / 路径 / medusa 常量变了，下次启动即生效；播放空响应时
+     * core 还会后台强制拉一次（5 分钟节流），所以平台换参数不用等发版。
+     */
+    private fun initPlaybackConfig() {
+        val store=com.hongguotv.core.PlaybackConfigStore
+        val code=runCatching {
+            val info=packageManager.getPackageInfo(packageName,0)
+            if(android.os.Build.VERSION.SDK_INT>=28) info.longVersionCode.toInt() else @Suppress("DEPRECATION") info.versionCode
+        }.getOrDefault(0)
+        store.setAppVersion(code)
+        store.bindCache(java.io.File(filesDir,"playback-config.json"))
+        store.remoteEnabled=true
+        io.submit { runCatching { store.refresh(okhttp3.OkHttpClient()) } }
     }
     private fun showLibraryError(problem: Throwable) {        val body=base(); error(body,problem) { message(base(),"正在读取本机记录…"); loadLibrary() }
     }

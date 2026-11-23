@@ -15,8 +15,11 @@ internal object V5Constants {
      * 同身份 / 同时间戳」，只替换这一个字段做 A/B：377 → 200/0B，312 → 正常返回模型，
      * 且可重复命中。该字段在官方 SDK 里的语义未知（不是设备/会话值），
      * 但必须与 7.4.5.32 官方请求一致才能通过签名校验。
+     *
+     * 2026-11-24 起改为从 [PlaybackConfigStore] 读取（可由 `configs/playback.json`
+     * 热更新），内置基线仍是 312；配置缺失/非法时自动回退，行为与改前一致。
      */
-    const val field21 = 312
+    val field21: Int get() = PlaybackConfigStore.current().medusaField21
 
     val signKey = hex("b23c2a470a20d105dc3f8c4438f8272ed46d6c89ffdcdedd5108698d26e9489d")
     val sbox = hex(

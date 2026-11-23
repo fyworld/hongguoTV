@@ -193,7 +193,8 @@ internal class MultiVideoModelStreamSource(
         for ((index, shape) in shapes.withIndex()) {
             if (Thread.currentThread().isInterrupted) throw IOException("请求已取消")
             val left = TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()).coerceAtLeast(1)
-            val budget = (left / (shapes.size - index)).coerceAtLeast(600L)
+            val budget = (left / (shapes.size - index))
+                .coerceAtLeast(PlaybackConfigStore.current().budgetFloorMs)
             val client = http.newBuilder()
                 .callTimeout(budget, TimeUnit.MILLISECONDS)
                 .readTimeout(minOf(budget, 4_000L), TimeUnit.MILLISECONDS)
@@ -243,6 +244,9 @@ internal class MultiVideoModelStreamSource(
         // The trace summary rides along (upstream: trace.summary() + rotation).
         val failure = last ?: IOException("播放接口暂不可用")
         if (failure is EmptyPlaybackResponseException) {
+            // 2026-11-24 热更新自愈：整轮形态都空，说明平台可能又换了画像/路径/常量。
+            // 后台拉一次远端配置（不阻塞本次失败返回），下一次起播就用上新配置。
+            PlaybackConfigStore.healAfterEmptyAsync(http)
             throw if (noteEmptyRound()) EmptyPlaybackResponseException(trace.summary() + " rotated=1")
             else EmptyPlaybackResponseException(trace.summary())
         }
@@ -266,12 +270,15 @@ internal class MultiVideoModelStreamSource(
         metadataAhead: List<String> = emptyList(),
     ): JSONObject {
         val identity = session.profile(client)
-        val segment = shape.path.segment
+        // 端点参数优先取配置（host / 路径 / dr_scene / device_level 都可能被平台换掉）。
+        val endpoint = shape.path.resolve()
+        val segment = endpoint.segment
         return when (shape.signer) {
             PlaybackSigner.V5 -> when (shape.path) {
                 PlaybackPath.GET_VIDEO_TAB -> {
                     val entry = MobilePlayback.getVideoTab(
-                        id, identity.values, client, MobilePlayback.signer, System.currentTimeMillis())
+                        id, identity.values, client, MobilePlayback.signer, System.currentTimeMillis(),
+                        host = endpoint.host, segment = segment)
                     entry.optJSONObject("video_model") ?: normalizeModel(entry.get("video_model"))
                 }
                 else -> {
@@ -279,8 +286,8 @@ internal class MultiVideoModelStreamSource(
                     val entry = MobilePlayback.model(
                         id, identity.values, client, MobilePlayback.signer,
                         System.currentTimeMillis(), segment = segment,
-                        host = shape.path.host, drScene = shape.path.drScene,
-                        deviceLevel = shape.path.deviceLevel)
+                        host = endpoint.host, drScene = endpoint.drScene,
+                        deviceLevel = endpoint.deviceLevel)
                     entry.optJSONObject("video_model") ?: throw IOException("播放信息没有可用资源")
                 }
             }
