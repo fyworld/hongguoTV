@@ -77,38 +77,44 @@ class ShapeDiagProbeTest {
             }
         }.onFailure { println("GET+argus: FAIL ${it.javaClass.simpleName} ${it.message}") }
 
-        // 3) POST 两条路径 × 两种签名
-        val payload = """{"biz_param":{"detail_page_version":0,"device_level":1,"disable_digg_stat":false,"disable_video_relate_book":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$videoId"]}}"""
-        val gz = java.io.ByteArrayOutputStream()
-        GZIPOutputStream(gz).use { it.write(payload.toByteArray(Charsets.UTF_8)) }
-        val gzBytes = gz.toByteArray()
+        // 3) POST 各路径 × 两种签名（路径/host/请求体差异一律取自形态定义，别手抄）
+        val payloadBody = """{"biz_param":{"detail_page_version":0,"device_level":1,"disable_digg_stat":false,"disable_video_relate_book":false,"need_all_video_definition":true,"need_mp4_align":false,"use_os_player":false,"use_server_dns":false,"video_platform":1024},"mixed_video_id_map":{"1004":["$videoId"]}}"""
 
-        for (segment in listOf(MobilePlayback.PLAYER_SEGMENT, MobilePlayback.MODEL_SEGMENT)) {
+        for (path in PlaybackPath.entries) {
+            if (path == PlaybackPath.GET_VIDEO_TAB) continue // 上面已单独探
+            val endpoint = path.resolve()
             // v5
             runCatching {
                 val entry = MobilePlayback.model(videoId, identity.values, http, MobilePlayback.signer,
-                    System.currentTimeMillis(), segment = segment)
+                    System.currentTimeMillis(), segment = endpoint.segment, host = endpoint.host,
+                    drScene = endpoint.drScene, deviceLevel = endpoint.deviceLevel,
+                    body = endpoint.body)
                 val list = entry.getJSONObject("video_model").optJSONArray("video_list")
-                println("POST+v5  /$segment: OK tiers=${list?.length() ?: 0}")
-            }.onFailure { println("POST+v5  /$segment: FAIL ${it.javaClass.simpleName} ${it.message}") }
+                println("POST+v5    ${path.label} ${endpoint.host}${endpoint.absolutePath}: OK tiers=${list?.length() ?: 0}")
+            }.onFailure {
+                println("POST+v5    ${path.label} ${endpoint.host}${endpoint.absolutePath}: FAIL ${it.javaClass.simpleName} ${it.message}")
+            }
 
             // argus
             runCatching {
                 val host = MultiVideoModelStreamSource.PLAY_HOSTS[0]
-                val path = "/$segment/"
-                val signed = transport.sign("https://$host$path", identity.values, payload.toByteArray(Charsets.UTF_8), uaLegacy)
+                // 形态 segment 可能自带尾斜杠（video_model/v1/），统一成「/a/b/」再拼。
+                val argusPath = "/" + endpoint.segment.trim('/') + "/"
+                val signed = transport.sign("https://$host$argusPath", identity.values, payloadBody.toByteArray(Charsets.UTF_8), uaLegacy)
                 val headers = signed.headers.toMutableMap()
                 if (identity.cookie.isNotBlank()) headers["Cookie"] = identity.cookie
                 headers["Connection"] = "close"
                 val request = Request.Builder().url(signed.url)
                     .apply { headers.forEach { (k, v) -> header(k, v) } }
-                    .post(payload.toByteArray(Charsets.UTF_8).toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .post(payloadBody.toByteArray(Charsets.UTF_8).toRequestBody("application/json; charset=utf-8".toMediaType()))
                     .build()
                 http.newCall(request).execute().use { r ->
                     val bytes = r.body?.bytes() ?: ByteArray(0)
-                    println("POST+argus /$segment: HTTP ${r.code} bytes=${bytes.size}${if (bytes.isEmpty()) "  <-- EMPTY" else ""}")
+                    println("POST+argus ${path.label} /$host$argusPath: HTTP ${r.code} bytes=${bytes.size}${if (bytes.isEmpty()) "  <-- EMPTY" else ""}")
                 }
-            }.onFailure { println("POST+argus /$segment: FAIL ${it.javaClass.simpleName} ${it.message}") }
+            }.onFailure {
+                println("POST+argus ${path.label} ${endpoint.host}${endpoint.absolutePath}: FAIL ${it.javaClass.simpleName} ${it.message}")
+            }
         }
     }
 }

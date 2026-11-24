@@ -33,6 +33,8 @@ import org.json.JSONObject
  *    必须连同 medusa 明文 wire field 21（377→312）一起换掉才能取到模型。
  *    实测：同一路径下只换画像即 200/23846B；三条路径（player / preload / video_tab）
  *    当前都通，UA 也不敏感（okhttp UA 与官方 App UA 都能过）。
+ *  - **2026-11-24（上游 eb960ff）**：官方客户端改打 `POST /novel/player/video_model/v1/`，
+ *    旧 `multi_video_model` 系列退为空体。形态矩阵已预留该端点（见 [VIDEO_MODEL_SEGMENT]）。
  *
  * 与旧通道的差异（都必须保留，少一处就回到 0 字节）：
  *  - 请求体 gzip 压缩，签名绑定的是**压缩后**的字节，x-ss-stub 也是压缩后 MD5；
@@ -94,10 +96,11 @@ internal object MobilePlayback {
     /**
      * 取一集的播放模型（POST 形态，v5 签名 + gzip 体）。
      *
-     * [segment] 由调用方按形态指定（player/v1、preload/v1 或平铺 v1）。
+     * [segment] 由调用方按形态指定（player/v1、preload/v1、平铺 v1 或官方的 video_model/v1/）。
      * [host] 默认为 a 域；preload 变体走 `reading.snssdk.com`（官方现行端点）。
      * [drScene] 非空时写入请求体 `dr_scene`（preload 变体需要；平铺 v1 带上会掉空体）。
      * [deviceLevel] preload 变体用 2（官方），其余用 1（TV 侧协商兼容档位）。
+     * [body] 请求体形态：`map`（旧 `multi_video_model` 系列）或 `flat`（官方 `video_model/v1`）。
      *
      * 本函数只打一次：空响应/业务码/网络错误直接抛，路径轮换交给上层形态矩阵。
      */
@@ -111,24 +114,38 @@ internal object MobilePlayback {
         host: String = MODEL_BASE,
         drScene: String? = null,
         deviceLevel: Int = 1,
+        body: String = "map",
         config: PlaybackConfig = PlaybackConfigStore.current(),
     ): JSONObject {
         require(id.matches(Regex("[0-9]{1,30}")))
         ensureActive()
-        val bizParam = JSONObject()
-            .put("detail_page_version", 0)
-            .put("device_level", deviceLevel)
-            .put("disable_digg_stat", false)
-            .put("disable_video_relate_book", false)
-            .put("need_all_video_definition", true)
-            .put("need_mp4_align", false)
-            .put("use_os_player", false)
-            .put("use_server_dns", false)
-            .put("video_platform", 1024)
-        val payload = JSONObject()
-            .put("biz_param", bizParam)
-            .put("mixed_video_id_map", JSONObject().put("1004", JSONArray().put(id)))
-        if (drScene != null) payload.put("dr_scene", drScene)
+        val payload = if (body == "flat") {
+            // 官方 `video_model/v1`（上游 eb960ff）：扁平 snake_case 字段。
+            // 用旧的 biz_param/mixed_video_id_map 会被回 code=100001「video_id invalid」。
+            JSONObject()
+                .put("video_id", id)
+                .put("video_id_type", 0)
+                .put("device_level", deviceLevel)
+                .put("need_all_video_definition", true)
+                .put("need_mp4_align", false)
+                .put("use_os_player", false)
+                .put("video_platform", 1024)
+        } else {
+            val bizParam = JSONObject()
+                .put("detail_page_version", 0)
+                .put("device_level", deviceLevel)
+                .put("disable_digg_stat", false)
+                .put("disable_video_relate_book", false)
+                .put("need_all_video_definition", true)
+                .put("need_mp4_align", false)
+                .put("use_os_player", false)
+                .put("use_server_dns", false)
+                .put("video_platform", 1024)
+            JSONObject()
+                .put("biz_param", bizParam)
+                .put("mixed_video_id_map", JSONObject().put("1004", JSONArray().put(id)))
+                .also { if (drScene != null) it.put("dr_scene", drScene) }
+        }
         val output = ByteArrayOutputStream()
         GZIPOutputStream(output).use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
         val bytes = output.toByteArray()
@@ -263,6 +280,14 @@ internal object MobilePlayback {
 
     /** POST player 变体路径。 */
     const val PLAYER_SEGMENT = "novel/player/multi_video_model/player/v1"
+
+    /**
+     * 官方 7.4.5.32 起实际调用的模型端点（上游 eb960ff）。
+     *
+     * **带尾部斜杠**：官方 `RpcOperation("$POST /novel/player/video_model/v1/")` 原样，
+     * 也是 APK 内 FeatureInterceptor 抓到的路径。
+     */
+    const val VIDEO_MODEL_SEGMENT = "novel/player/video_model/v1/"
 
     /** 官方现行 preload 端点（体需 device_level=2 + dr_scene=preload）。 */
     const val PRELOAD_SEGMENT = "novel/player/multi_video_model/preload/v1"

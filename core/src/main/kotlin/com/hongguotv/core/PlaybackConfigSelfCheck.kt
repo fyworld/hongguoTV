@@ -43,7 +43,8 @@ internal object PlaybackConfigSelfCheck {
                         PROBE_VIDEO_ID, device, client, signer,
                         System.currentTimeMillis(), segment = endpoint.segment,
                         host = endpoint.host, drScene = endpoint.drScene,
-                        deviceLevel = endpoint.deviceLevel, config = config)
+                        deviceLevel = endpoint.deviceLevel, body = endpoint.body,
+                        config = config)
                 }
             }.getOrNull() ?: continue
             val model = entry.optJSONObject("video_model") ?: continue

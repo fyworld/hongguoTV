@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "configVersion": 1,
+  "configVersion": 2,
   "minAppVersion": 10053,
-  "notes": "基线：官方 7.4.5.32 请求画像 + medusa field21=312（与 APK 内置一致）",
+  "notes": "基线：官方 7.4.5.32 画像 + field21=312 + 官方新端点 video_model/v1（1.0.55）",
   "medusa": {
     "field21": 312
   },
@@ -30,6 +30,15 @@
     "post": ""
   },
   "endpoints": [
+    {
+      "id": "video-model",
+      "method": "POST",
+      "host": "https://api5-normal-sinfonlinea.fqnovel.com",
+      "segment": "novel/player/video_model/v1/",
+      "signer": "v5",
+      "deviceLevel": 1,
+      "body": "flat"
+    },
     {
       "id": "get",
       "method": "GET",
@@ -64,9 +73,11 @@
     }
   ],
   "shapeOrder": [
-    "get-v5",
-    "player-v5",
     "preload-v5",
+    "get-v5",
+    "video-model-v5",
+    "video-model-argus",
+    "player-v5",
     "v1-argus",
     "get-argus",
     "v1-v5",

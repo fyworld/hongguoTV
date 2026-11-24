@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Adapted from tsukiyo-zero/hongguoTV kotlin-tv 41ba81c (PlaybackShapes.kt); GPL-3.0-only.
+// 2026-11-24 再对齐 tsukiyo-zero/hongguoTV eb960ff（新增官方 video_model/v1 端点）。
 // See kotlin-tv/NOTICE.md.
 package com.hongguotv.core
 
@@ -8,6 +9,9 @@ package com.hongguotv.core
  *
  * 平台在 2026-11 反复切换：11-20 早只放 v1、11-20 晚只放 GET、11-22 恢复 player、
  * 11-23 再次只放 GET；同日晚上解禁但改按「请求画像」校验（见 [PlaybackSigner]）。
+ * 11-23 深夜官方客户端改用 `POST /novel/player/video_model/v1/`（上游 eb960ff
+ * 由 logcat FeatureInterceptor 与 APK 内 RpcOperation 双证），旧 `multi_video_model` 系列
+ * 全部退为空体 —— 因此它是矩阵里必须预留的一条。
  *
  * [host] / [drScene] / [deviceLevel] 是路径自带的请求体差异：
  * preload 变体是官方现行端点（`reading.snssdk.com`，体 device_level=2 + dr_scene=preload）。
@@ -19,7 +23,19 @@ enum class PlaybackPath(
     val drScene: String? = null,
     val deviceLevel: Int = 1,
     val method: String = "POST",
+    /** 请求体形态：`map`（biz_param + mixed_video_id_map）或 `flat`（扁平 snake_case）。 */
+    val body: String = "map",
 ) {
+    /**
+     * 官方 7.4.5.32 起实际调用的模型接口（上游 eb960ff）。
+     *
+     * 路径**带尾部斜杠**（官方 `RpcOperation("$POST /novel/player/video_model/v1/")`），
+     * 与旧端点不同，改配置时别把它去掉。
+     */
+    POST_VIDEO_MODEL(
+        "video-model", "novel/player/video_model/v1/",
+        host = MobilePlayback.MODEL_BASE, body = "flat",
+    ),
     GET_VIDEO_TAB(
         "get", "reading/bookapi/video_tab/multi_video_model/v1",
         host = MobilePlayback.GET_TAB_BASE, method = "GET",
@@ -47,7 +63,7 @@ fun PlaybackPath.resolve(config: PlaybackConfig): PlaybackEndpoint =
     config.endpointFor(this)
         ?: PlaybackEndpoint(
             id = label, method = method, host = host, segment = segment,
-            signer = "v5", drScene = drScene, deviceLevel = deviceLevel,
+            signer = "v5", drScene = drScene, deviceLevel = deviceLevel, body = body,
         )
 
 /** 当前生效配置下的端点（线上调用）。 */
@@ -70,16 +86,21 @@ data class PlaybackShape(val path: PlaybackPath, val signer: PlaybackSigner) {
 
     companion object {
         /**
-         * 内置矩阵（4 路径 × 2 签名，按历史验证过的优先级排列）。
+         * 内置矩阵（5 路径 × 2 签名 = 10 种形态，按历史验证过的优先级排列）。
+         *
+         * 2026-11-24（上游 0.1.39 dcbda1f）：preload 置顶——11-23 恢复播放的就是
+         * `preload + v5`，新鲜安装不该先去试一条当天被关的路径。
          *
          * 2026-11-24：运行时顺序可由 `configs/playback.json` 的 `order` 调整
          * （见 [all]），这样平台换优先路径时不用发版。
          */
         private val BUILTIN_ALL: List<PlaybackShape> =
             listOf(
-                PlaybackShape(PlaybackPath.GET_VIDEO_TAB, PlaybackSigner.V5),
-                PlaybackShape(PlaybackPath.POST_PLAYER, PlaybackSigner.V5),
                 PlaybackShape(PlaybackPath.POST_PRELOAD, PlaybackSigner.V5),
+                PlaybackShape(PlaybackPath.GET_VIDEO_TAB, PlaybackSigner.V5),
+                PlaybackShape(PlaybackPath.POST_VIDEO_MODEL, PlaybackSigner.V5),
+                PlaybackShape(PlaybackPath.POST_VIDEO_MODEL, PlaybackSigner.ARGUS),
+                PlaybackShape(PlaybackPath.POST_PLAYER, PlaybackSigner.V5),
                 PlaybackShape(PlaybackPath.POST_V1, PlaybackSigner.ARGUS),
                 PlaybackShape(PlaybackPath.GET_VIDEO_TAB, PlaybackSigner.ARGUS),
                 PlaybackShape(PlaybackPath.POST_V1, PlaybackSigner.V5),

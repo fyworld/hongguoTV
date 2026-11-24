@@ -113,6 +113,43 @@ class MobilePlaybackTest {
         assertEquals(listOf("/${MobilePlayback.MODEL_SEGMENT}"), hits)
     }
 
+    @Test fun officialVideoModelEndpointUsesFlatBodyAndTrailingSlash() {
+        // 上游 eb960ff：官方 7.4.5.32 起改打 /novel/player/video_model/v1/（带尾斜杠）；
+        // 实测它的请求体是**扁平 snake_case**（旧 map 体会被回 code=100001 video_id invalid），
+        // 响应则是 `data.video_model` 直接给完整模型（字符串）。
+        var path: String? = null
+        val http = http(model(false, false)) { request ->
+            path = request.url.encodedPath
+            val body = Buffer().apply { request.body!!.writeTo(this) }.readByteArray()
+            val payload = JSONObject(GZIPInputStream(body.inputStream()).reader().readText())
+            assertEquals("123", payload.getString("video_id"))
+            assertEquals(0, payload.getInt("video_id_type"))
+            assertEquals(1, payload.getInt("device_level"))
+            assertTrue(payload.getBoolean("need_all_video_definition"))
+            assertEquals(1024, payload.getInt("video_platform"))
+            // 旧的两段式字段必须不存在，否则服务端判 invalid param。
+            assertFalse(payload.has("biz_param"))
+            assertFalse(payload.has("mixed_video_id_map"))
+            assertFalse(payload.has("dr_scene"))
+        }
+        MobilePlayback.model(
+            "123", device, http, signer, 1000,
+            segment = MobilePlayback.VIDEO_MODEL_SEGMENT, body = "flat")
+        assertEquals("/novel/player/video_model/v1/", path)
+    }
+
+    @Test fun flatEndpointResponseModelIsParsedFromDataVideoModel() {
+        // 官方 video_model/v1 的响应：data.video_model 是 JSON 字符串（不是 per-episode map）。
+        val inner = JSONObject("""{"video_list":[{"main_url":"https://example.test/v"}]}""")
+        val body = JSONObject().put("code", 0).put("data", JSONObject()
+            .put("video_height", 720).put("video_model", inner.toString())).toString()
+        val parsed = MobilePlayback.model(
+            "123", device, http(body), signer, 1000,
+            segment = MobilePlayback.VIDEO_MODEL_SEGMENT, body = "flat")
+            .getJSONObject("video_model")
+        assertEquals(1, parsed.getJSONArray("video_list").length())
+    }
+
     @Test fun getVideoTabUsesV5SignatureAndServiceEndpoint() {
         var signedBytes: ByteArray? = null
         val signing = MobilePlaybackSigner { url, bytes, identity ->

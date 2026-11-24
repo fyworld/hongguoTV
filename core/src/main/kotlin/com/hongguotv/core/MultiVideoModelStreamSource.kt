@@ -149,9 +149,9 @@ internal class MultiVideoModelStreamSource(
 
     /**
      * The full model-resolution flow shared by stream() and ladder(): upcoming cache,
-     * identity rotation, the six-shape rotation (path x signer), signed batch POST
-     * fallback, both response shapes (video_list and fallback_api). Only the final
-     * tier extraction differs.
+     * identity rotation, the shape rotation (path x signer, 10 combinations),
+     * signed batch POST fallback, both response shapes (video_list and fallback_api).
+     * Only the final tier extraction differs.
      *
      * 2026-11-23（上游 41ba81c）：平台在「路径」与「签名规范」两条轴上反复切。
      * 11-20 早只放平铺 v1、11-20 晚只放 GET、11-22 恢复 player、11-23 又只放
@@ -202,11 +202,18 @@ internal class MultiVideoModelStreamSource(
                 .build()
             try {
                 val model = requestShape(shape, id, client, trace)
+                // 2026-11-24（上游 33e4aa9）：先确认这条形态真能出片源，再记住它。
+                // 以前是「拿到非空 JSON 就记成功」，于是一条只回空画质/失效 fallback 的形态
+                // 会被置顶，下一次起播先撞它、再空转，播放恢复过早停止。
+                val resolved = fromModel(model)
+                if (ladderTiers(resolved.model, resolved.seed).isEmpty()) {
+                    throw IOException("播放信息没有电视可播放的清晰度")
+                }
                 // Success proves both the identity and this combination work; remember
                 // the shape (the app layer persists it) and reset the healing state.
                 PlaybackShapeMemory.success(shape)
                 resetIdentityHealing()
-                return fromModel(model)
+                return resolved
             } catch (error: IOException) {
                 if (Thread.currentThread().isInterrupted) throw error
                 PlaybackShapeMemory.failure(shape)
@@ -254,10 +261,11 @@ internal class MultiVideoModelStreamSource(
     }
 
     /**
-     * One 形态 = one request. GET/POST × v5/Argus 四种组合按 [shape] 分派：
+     * One 形态 = one request. GET/POST × v5/Argus 按 [shape] 分派：
      *  - GET + v5   → [MobilePlayback.getVideoTab]（上游 ff4d1d2：11-23 起唯一放行的组合）
      *  - GET + Argus→ [tabModel] 旧六头签名 GET（保留给 legacy 与诊断）
-     *  - POST + v5  → [MobilePlayback.model]（gzip 体 + v5 签名）
+     *  - POST + v5  → [MobilePlayback.model]（gzip 体 + v5 签名；路径由形态给，
+     *                 含 11-24 官方新端点 `video_model/v1/`，上游 eb960ff）
      *  - POST + Argus→ [argusPostModel] 旧六头签名 POST（含跨 host 路由健康与批量预取）
      *
      * 返回的是裸 video_model 行；外层统一交给 [fromModel] 处理 fallback_api。
@@ -287,7 +295,7 @@ internal class MultiVideoModelStreamSource(
                         id, identity.values, client, MobilePlayback.signer,
                         System.currentTimeMillis(), segment = segment,
                         host = endpoint.host, drScene = endpoint.drScene,
-                        deviceLevel = endpoint.deviceLevel)
+                        deviceLevel = endpoint.deviceLevel, body = endpoint.body)
                     entry.optJSONObject("video_model") ?: throw IOException("播放信息没有可用资源")
                 }
             }

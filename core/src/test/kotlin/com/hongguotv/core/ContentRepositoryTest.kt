@@ -85,8 +85,10 @@ class ContentRepositoryTest {
         // eight api5/api3 domains return 200 + 0 bytes); the official client reads
         // GET /reading/bookapi/video_tab/multi_video_model/v1/ with snake_case params
         // (missing any returns 100103).
-        // 2026-11-23 (上游 ff4d1d2 / 41ba81c): 默认形态顺序仍是 `get-v5` 打头 ——
-        // 平台 11-23 起只放行「GET video_tab + v5 签名」，其余形态作兜底。
+        // 本条验的是 GET 形态本身（请求头/参数/一次到底）。默认矩阵首位在 0.1.39 后
+        // 改成了 `preload-v5`（见 PlaybackShapesTest），这里显式把 get-v5 置顶，
+        // 免得顺序调整把「GET 端点是否可用」这条用例一起带走。
+        PlaybackShapeMemory.restore(PlaybackShape(PlaybackPath.GET_VIDEO_TAB, PlaybackSigner.V5))
         val requests=mutableListOf<Request>()
         val repo=repository { request ->
             requests+=request
@@ -119,6 +121,9 @@ class ContentRepositoryTest {
     }
 
     @Test fun videoTabFailureFallsBackThroughTheShapeMatrix() {
+        // 显式从 get-v5 起走矩阵：默认首位已改为 preload-v5（0.1.39 dcbda1f），
+        // 这里要验的是「前面的形态全失败 → POST player + Argus 兜底」这条链路。
+        PlaybackShapeMemory.restore(PlaybackShape(PlaybackPath.GET_VIDEO_TAB, PlaybackSigner.V5))
         // Any shape failure (business code, empty body, shape mismatch, network error)
         // moves to the next shape in PlaybackShapeMemory.order(); the LAST shape in the
         // matrix (POST player + Argus) keeps the old POST flow and its retry semantics.

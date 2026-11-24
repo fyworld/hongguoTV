@@ -70,9 +70,10 @@ data class PlaybackConfig(
             "os_version", "os_api", "ac", "language", "host_abi", "pv_player",
         )
 
-        private val ENDPOINT_IDS = setOf("get", "player", "preload", "v1")
+        private val ENDPOINT_IDS = setOf("video-model", "get", "player", "preload", "v1")
         private val SHAPE_LABELS = ENDPOINT_IDS.flatMap { id -> listOf("$id-v5", "$id-argus") }.toSet()
-        private val SEGMENT = Regex("/?[A-Za-z0-9_]+(/[A-Za-z0-9_]+){1,6}")
+        /** 路径段：`a/b/c`，允许官方端点那样的**尾部斜杠**（`video_model/v1/`）。 */
+        private val SEGMENT = Regex("/?[A-Za-z0-9_]+(/[A-Za-z0-9_]+){1,6}/?")
         private const val MAX_BYTES = 64 * 1024
         private const val MAX_QUERY_VALUE = 64
 
@@ -83,9 +84,9 @@ data class PlaybackConfig(
          */
         fun defaults(): PlaybackConfig = PlaybackConfig(
             schema = SCHEMA,
-            configVersion = 1,
+            configVersion = 2,
             minAppVersion = 0,
-            notes = "builtin baseline (2026-11-23 74532 profile + field21=312)",
+            notes = "builtin baseline (2026-11-24 74532 profile + field21=312 + video_model/v1)",
             medusaField21 = 312,
             appQuery = linkedMapOf(
                 "aid" to "8662", "app_name" to "novelread",
@@ -99,6 +100,9 @@ data class PlaybackConfig(
             uaGetTab = MobilePlayback.GET_TAB_UA,
             uaPost = "",
             endpoints = listOf(
+                PlaybackEndpoint(
+                    "video-model", "POST", MobilePlayback.MODEL_BASE,
+                    MobilePlayback.VIDEO_MODEL_SEGMENT, body = "flat"),
                 PlaybackEndpoint("get", "GET", MobilePlayback.GET_TAB_BASE, MobilePlayback.GET_TAB_SEGMENT),
                 PlaybackEndpoint("player", "POST", MobilePlayback.MODEL_BASE, MobilePlayback.PLAYER_SEGMENT),
                 PlaybackEndpoint(
@@ -107,8 +111,9 @@ data class PlaybackConfig(
                 PlaybackEndpoint("v1", "POST", MobilePlayback.MODEL_BASE, MobilePlayback.MODEL_SEGMENT),
             ),
             shapeOrder = listOf(
-                "get-v5", "player-v5", "preload-v5", "v1-argus",
-                "get-argus", "v1-v5", "player-argus", "preload-argus",
+                "preload-v5", "get-v5", "video-model-v5", "video-model-argus",
+                "player-v5", "v1-argus", "get-argus", "v1-v5",
+                "player-argus", "preload-argus",
             ),
             responsePick = listOf(
                 "data.1004.{id}.video_model",
@@ -177,7 +182,9 @@ data class PlaybackConfig(
                 require(drScene == null || drScene.length <= 32) { "drScene 过长" }
                 val level = o.optInt("deviceLevel", 1)
                 require(level in 1..4) { "deviceLevel 非法" }
-                endpoints += PlaybackEndpoint(id, method, host.trimEnd('/'), segment, signer, drScene, level)
+                val body = o.optString("body", "map").lowercase()
+                require(body == "map" || body == "flat") { "body 非法：$body" }
+                endpoints += PlaybackEndpoint(id, method, host.trimEnd('/'), segment, signer, drScene, level, body)
             }
             require(endpoints.isNotEmpty()) { "endpoints 为空" }
             require(endpoints.any { it.method == "POST" }) { "至少需要一条 POST 形态" }
@@ -251,6 +258,13 @@ data class PlaybackEndpoint(
     val signer: String = "v5",
     val drScene: String? = null,
     val deviceLevel: Int = 1,
+    /**
+     * 请求体形态（2026-11-24，官方 `video_model/v1/` 起出现第二种）：
+     *  - `map`（默认）：`biz_param` + `mixed_video_id_map.1004[id]`，旧 `multi_video_model` 系列；
+     *  - `flat`：扁平 snake_case（`video_id` / `video_id_type` / `device_level` …），
+     *    官方现行 `video_model/v1` 只认这种——用 `map` 体会被回 `code=100001 invalid param`。
+     */
+    val body: String = "map",
 ) {
     val absolutePath: String get() = "/${segment.trimStart('/')}"
 }

@@ -35,6 +35,13 @@ class MultiVideoModelRotationTest {
     private fun Request.isTabPath() = url.encodedPath.startsWith(
         "/reading/bookapi/video_tab/multi_video_model/v1")
 
+    /**
+     * 矩阵首位形态的路径（0.1.39 dcbda1f 起是 preload + v5）。
+     * 中途换身份后的「补一次首选形态」打的就是它，桩要放行这一条。
+     */
+    private fun Request.isPreferredShapePath() =
+        url.encodedPath.startsWith("/novel/player/multi_video_model/preload/v1")
+
     /** POST playback endpoint (player variant or flat v1). */
     private fun Request.isPostPath() = url.encodedPath.startsWith(
         "/novel/player/multi_video_model/")
@@ -79,9 +86,8 @@ class MultiVideoModelRotationTest {
     fun successfulPlaybackResetsIdentityRotationStateForTheNextIncident() {
         val registrations = AtomicInteger()
         val session = PlaybackDeviceSession { registrations.incrementAndGet(); DeviceRegister.Registered("333", "444") }
-        // The tab endpoint serves the ROTATED identity once (registrations==2, first
-        // tab call after rotation), then blocks again - modeling the upstream finding
-        // that a fresh identity recovers instantly but can be re-blocked later.
+        // 首选形态（preload+v5）对轮换后的新身份放行一次（registrations==2 之后的
+        // 第一次补打），之后继续屏蔽 —— 复现上游「新身份即时恢复、但会被再次屏蔽」。
         val recoveredOnce = AtomicBoolean(false)
         val http = OkHttpClient.Builder()
             .addInterceptor { chain ->
@@ -89,7 +95,7 @@ class MultiVideoModelRotationTest {
                 when {
                     request.url.encodedPath == "/service/2/device_register/" ->
                         respond(request, """{"device_id":"333","install_id":"444"}""", setCookie = true)
-                    request.isTabPath() -> {
+                    request.isPreferredShapePath() -> {
                         val fresh = registrations.get() == 2 && recoveredOnce.compareAndSet(false, true)
                         respond(request, if (fresh) tabModel() else "")
                     }

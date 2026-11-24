@@ -13,6 +13,7 @@ class PlaybackShapesTest {
     private val getV5 = PlaybackShape(PlaybackPath.GET_VIDEO_TAB, PlaybackSigner.V5)
     private val playerV5 = PlaybackShape(PlaybackPath.POST_PLAYER, PlaybackSigner.V5)
     private val v1Argus = PlaybackShape(PlaybackPath.POST_V1, PlaybackSigner.ARGUS)
+    private val preloadV5 = PlaybackShape(PlaybackPath.POST_PRELOAD, PlaybackSigner.V5)
 
     @After
     fun reset() {
@@ -22,8 +23,8 @@ class PlaybackShapesTest {
 
     @Test
     fun coversAllPathAndSignerCombinations() {
-        // 4 条路径 × 2 种签名 = 8 种形态，缺一种就少一条兜底。
-        assertEquals(8, PlaybackShape.all.size)
+        // 5 条路径 × 2 种签名 = 10 种形态，缺一种就少一条兜底。
+        assertEquals(10, PlaybackShape.all.size)
         assertEquals(PlaybackShape.all.size, PlaybackShape.all.map { it.label }.toSet().size)
         PlaybackPath.entries.forEach { path ->
             PlaybackSigner.entries.forEach { signer ->
@@ -33,6 +34,21 @@ class PlaybackShapesTest {
                 )
             }
         }
+    }
+
+    @Test
+    fun officialVideoModelPathKeepsTrailingSlash() {
+        // 上游 eb960ff：官方客户端 11-23 深夜改打 /novel/player/video_model/v1/，
+        // 尾部斜杠是官方 RpcOperation 原文，别在改配置时抹掉。
+        val endpoint = PlaybackPath.POST_VIDEO_MODEL.resolve()
+        assertEquals("/novel/player/video_model/v1/", endpoint.absolutePath)
+        assertEquals("api5-normal-sinfonlinea.fqnovel.com", endpoint.host.substringAfter("//"))
+        assertTrue(endpoint.absolutePath.endsWith("/"))
+        // 实测这个端点只认扁平请求体（旧 map 体回 100001），必须由端点定义带出来。
+        assertEquals("flat", endpoint.body)
+        assertEquals("map", PlaybackPath.POST_PLAYER.resolve().body)
+        // 旧端点不带尾斜杠，两者是不同的 path 特征。
+        assertEquals("/novel/player/multi_video_model/v1", PlaybackPath.POST_V1.resolve().absolutePath)
     }
 
     @Test
@@ -49,8 +65,10 @@ class PlaybackShapesTest {
     fun defaultOrderStartsWithRecentlyVerifiedCombination() {
         PlaybackShapeMemory.restore(null)
         val order = PlaybackShapeMemory.order()
-        // 平台 11-23 起只放行 GET video_tab + v5 签名（上游 ff4d1d2 实测 200/22KB）。
-        assertEquals(getV5, order.first())
+        // 11-23 恢复播放的是 preload + v5（上游 0.1.39 dcbda1f 把它置顶），新鲜安装先试它；
+        // GET + v5 仍排在第二位——11-23 白天它是唯一活着的那条。
+        assertEquals(preloadV5, order.first())
+        assertEquals(getV5, order[1])
         assertEquals(PlaybackShape.all.size, order.size)
     }
 
