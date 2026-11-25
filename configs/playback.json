@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "configVersion": 2,
-  "minAppVersion": 10053,
-  "notes": "基线：官方 7.4.5.32 画像 + field21=312 + 官方新端点 video_model/v1（1.0.55）",
+  "configVersion": 3,
+  "minAppVersion": 10056,
+  "notes": "基线：官方 7.4.5.32 画像 + field21=312 + 单集 video_model/v1 @ reading.snssdk.com（single 体，1.0.56）",
   "medusa": {
     "field21": 312
   },
@@ -33,11 +33,11 @@
     {
       "id": "video-model",
       "method": "POST",
-      "host": "https://api5-normal-sinfonlinea.fqnovel.com",
+      "host": "https://reading.snssdk.com",
       "segment": "novel/player/video_model/v1/",
       "signer": "v5",
-      "deviceLevel": 1,
-      "body": "flat"
+      "deviceLevel": 2,
+      "body": "single"
     },
     {
       "id": "get",
@@ -73,9 +73,9 @@
     }
   ],
   "shapeOrder": [
+    "video-model-v5",
     "preload-v5",
     "get-v5",
-    "video-model-v5",
     "video-model-argus",
     "player-v5",
     "v1-argus",
@@ -91,7 +91,10 @@
       "data.video_model_data.{id}.video_model",
       "data.video_model"
     ],
-    "require": ["video_list", "fallback_api"]
+    "require": [
+      "video_list",
+      "fallback_api"
+    ]
   },
   "budgetFloorMs": 600
 }

@@ -27,14 +27,17 @@ enum class PlaybackPath(
     val body: String = "map",
 ) {
     /**
-     * 官方 7.4.5.32 起实际调用的模型接口（上游 eb960ff）。
+     * 官方 7.4.5.32 的单集模型接口（上游 eb960ff → d859244）。
      *
      * 路径**带尾部斜杠**（官方 `RpcOperation("$POST /novel/player/video_model/v1/")`），
      * 与旧端点不同，改配置时别把它去掉。
+     *
+     * 2026-11-25 起域名与请求体都变了：`reading.snssdk.com`（与 preload 同域）+
+     * `video_id`/`biz_param`（`device_level=2`）。同路径打 fqnovel 网关只回 720P 单档。
      */
     POST_VIDEO_MODEL(
         "video-model", "novel/player/video_model/v1/",
-        host = MobilePlayback.MODEL_BASE, body = "flat",
+        host = MobilePlayback.PRELOAD_BASE, deviceLevel = 2, body = "single",
     ),
     GET_VIDEO_TAB(
         "get", "reading/bookapi/video_tab/multi_video_model/v1",
@@ -88,17 +91,18 @@ data class PlaybackShape(val path: PlaybackPath, val signer: PlaybackSigner) {
         /**
          * 内置矩阵（5 路径 × 2 签名 = 10 种形态，按历史验证过的优先级排列）。
          *
-         * 2026-11-24（上游 0.1.39 dcbda1f）：preload 置顶——11-23 恢复播放的就是
-         * `preload + v5`，新鲜安装不该先去试一条当天被关的路径。
+         * 2026-11-25（上游 d859244 / 0.1.40）：`video-model-v5` 置顶——单集模型是当前唯一
+         * 能取到 1080P 多档的形态；`preload-v5` 仍活着但只回 720P 单档，退第二位。
+         * 11-24 之前这条是 `preload-v5` 打头（11-23 是靠它恢复的）。
          *
          * 2026-11-24：运行时顺序可由 `configs/playback.json` 的 `order` 调整
          * （见 [all]），这样平台换优先路径时不用发版。
          */
         private val BUILTIN_ALL: List<PlaybackShape> =
             listOf(
+                PlaybackShape(PlaybackPath.POST_VIDEO_MODEL, PlaybackSigner.V5),
                 PlaybackShape(PlaybackPath.POST_PRELOAD, PlaybackSigner.V5),
                 PlaybackShape(PlaybackPath.GET_VIDEO_TAB, PlaybackSigner.V5),
-                PlaybackShape(PlaybackPath.POST_VIDEO_MODEL, PlaybackSigner.V5),
                 PlaybackShape(PlaybackPath.POST_VIDEO_MODEL, PlaybackSigner.ARGUS),
                 PlaybackShape(PlaybackPath.POST_PLAYER, PlaybackSigner.V5),
                 PlaybackShape(PlaybackPath.POST_V1, PlaybackSigner.ARGUS),

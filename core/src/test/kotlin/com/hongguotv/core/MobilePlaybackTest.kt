@@ -150,6 +150,50 @@ class MobilePlaybackTest {
         assertEquals(1, parsed.getJSONArray("video_list").length())
     }
 
+    @Test fun currentSingleModelUsesVideoIdPlusBizParamOnReadingHost() {
+        // 上游 d859244（0.1.40，2026-11-25）：单集 `video_model/v1/` 走 reading.snssdk.com，
+        // 体是 `video_id` + `biz_param`（device_level=2），响应 `data.video_model` 直接给模型
+        //（字符串或对象都可能）。这是当前唯一能取到 1080P 多档的形态。
+        var path: String? = null
+        var host: String? = null
+        val inner = JSONObject("""{"video_list":[{"main_url":"https://example.test/v"}]}""")
+        val body = JSONObject().put("code", 0)
+            .put("data", JSONObject().put("video_id", "123").put("video_model", inner.toString())).toString()
+        val http = http(body) { request ->
+            path = request.url.encodedPath
+            host = request.url.host
+            val bytes = Buffer().apply { request.body!!.writeTo(this) }.readByteArray()
+            val payload = JSONObject(GZIPInputStream(bytes.inputStream()).reader().readText())
+            assertEquals("123", payload.getString("video_id"))
+            val biz = payload.getJSONObject("biz_param")
+            assertEquals(2, biz.getInt("device_level"))
+            assertTrue(biz.getBoolean("need_all_video_definition"))
+            assertEquals(1024, biz.getInt("video_platform"))
+            // 单集体不能带批量字段 / 预加载场景标记
+            assertFalse(payload.has("mixed_video_id_map"))
+            assertFalse(payload.has("dr_scene"))
+        }
+        val parsed = MobilePlayback.model(
+            "123", device, http, signer, 1000,
+            segment = MobilePlayback.VIDEO_MODEL_SEGMENT, host = MobilePlayback.PRELOAD_BASE,
+            deviceLevel = 2, body = "single")
+            .getJSONObject("video_model")
+        assertEquals(1, parsed.getJSONArray("video_list").length())
+        assertEquals("/novel/player/video_model/v1/", path)
+        assertEquals("reading.snssdk.com", host)
+    }
+
+    @Test fun currentSingleModelRejectsAnotherEpisodesResponse() {
+        // data.video_id 回显的不是请求的集 → 必须换形态，绝不播错集（上游 d859244）。
+        val mismatched = """{"code":0,"data":{"video_id":"456","video_model":{"video_list":[{}]}}}"""
+        assertThrows(IOException::class.java) {
+            MobilePlayback.model(
+                "123", device, http(mismatched), signer, 1000,
+                segment = MobilePlayback.VIDEO_MODEL_SEGMENT, host = MobilePlayback.PRELOAD_BASE,
+                deviceLevel = 2, body = "single")
+        }
+    }
+
     @Test fun getVideoTabUsesV5SignatureAndServiceEndpoint() {
         var signedBytes: ByteArray? = null
         val signing = MobilePlaybackSigner { url, bytes, identity ->

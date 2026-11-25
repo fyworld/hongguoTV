@@ -36,15 +36,16 @@ class MultiVideoModelRotationTest {
         "/reading/bookapi/video_tab/multi_video_model/v1")
 
     /**
-     * 矩阵首位形态的路径（0.1.39 dcbda1f 起是 preload + v5）。
+     * 矩阵首位形态的路径（0.1.40 d859244 起是单集 `video_model/v1/` + v5，走 reading 域）。
      * 中途换身份后的「补一次首选形态」打的就是它，桩要放行这一条。
      */
     private fun Request.isPreferredShapePath() =
-        url.encodedPath.startsWith("/novel/player/multi_video_model/preload/v1")
+        url.encodedPath.startsWith("/novel/player/video_model/v1")
 
-    /** POST playback endpoint (player variant or flat v1). */
-    private fun Request.isPostPath() = url.encodedPath.startsWith(
-        "/novel/player/multi_video_model/")
+    /** POST 播放端点：旧 `multi_video_model` 系列与 11-25 的单集 `video_model` 端点。 */
+    private fun Request.isPostPath() =
+        url.encodedPath.startsWith("/novel/player/multi_video_model/") ||
+            url.encodedPath.startsWith("/novel/player/video_model/")
 
     /** Always-blocked fixture: registration OK, tab + POST both empty forever. */
     private fun blockedHttp(): OkHttpClient = OkHttpClient.Builder()
@@ -86,7 +87,7 @@ class MultiVideoModelRotationTest {
     fun successfulPlaybackResetsIdentityRotationStateForTheNextIncident() {
         val registrations = AtomicInteger()
         val session = PlaybackDeviceSession { registrations.incrementAndGet(); DeviceRegister.Registered("333", "444") }
-        // 首选形态（preload+v5）对轮换后的新身份放行一次（registrations==2 之后的
+        // 首选形态（video-model+v5）对轮换后的新身份放行一次（registrations==2 之后的
         // 第一次补打），之后继续屏蔽 —— 复现上游「新身份即时恢复、但会被再次屏蔽」。
         val recoveredOnce = AtomicBoolean(false)
         val http = OkHttpClient.Builder()

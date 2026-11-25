@@ -41,7 +41,7 @@ class PlaybackConfigTest {
         }.build()
 
     private fun configJson(
-        version: Int = 2,
+        version: Int = 3,
         field21: Int = 312,
         channel: String = "update_64",
         order: String = "[\"player-v5\",\"get-v5\"]",
@@ -88,7 +88,7 @@ class PlaybackConfigTest {
     @Test fun rejectsUnknownQueryKeysAndBadSchema() {
         assertFalse(PlaybackConfigStore.install(configJson().replace("\"aid\": \"8662\"", "\"hack\": \"1\""), "test"))
         assertFalse(PlaybackConfigStore.install(configJson().replace("\"schema\": 1", "\"schema\": 9"), "test"))
-        assertFalse(PlaybackConfigStore.install(configJson().replace("\"configVersion\": 2", "\"configVersion\": 0"), "test"))
+        assertFalse(PlaybackConfigStore.install(configJson().replace("\"configVersion\": 3", "\"configVersion\": 0"), "test"))
     }
 
     @Test fun rejectsDowngradeButAcceptsSameOrHigherVersion() {
@@ -102,7 +102,7 @@ class PlaybackConfigTest {
         PlaybackConfigStore.setAppVersion(10053)
         val future = configJson(version = 3).replace("\"minAppVersion\": 0", "\"minAppVersion\": 10099")
         assertFalse(PlaybackConfigStore.install(future, "test"))
-        assertEquals(2, PlaybackConfigStore.current().configVersion)
+        assertEquals(3, PlaybackConfigStore.current().configVersion)
     }
 
     // ---------- 生效点 ----------
@@ -248,7 +248,7 @@ class PlaybackConfigTest {
         PlaybackConfigStore.verifier = { called++; false }
         assertFalse(PlaybackConfigStore.install(configJson(version = 21, field21 = 400), "remote:test", verify = true))
         assertEquals("自检必须被调用", 1, called)
-        assertEquals("旧配置必须原样保留", 2, PlaybackConfigStore.current().configVersion)
+        assertEquals("旧配置必须原样保留", 3, PlaybackConfigStore.current().configVersion)
         assertEquals(312, PlaybackConfigStore.current().medusaField21)
     }
 
@@ -266,7 +266,7 @@ class PlaybackConfigTest {
             true
         }
         assertTrue(PlaybackConfigStore.install(configJson(version = 31), "remote:test", verify = true))
-        assertEquals("自检期间全局配置必须还是旧的", 2, seenVersion)
+        assertEquals("自检期间全局配置必须还是旧的", 3, seenVersion)
         assertEquals("通过后才切换", 31, PlaybackConfigStore.current().configVersion)
     }
 
@@ -369,7 +369,7 @@ class PlaybackConfigTest {
             val json = base.replace("\"shapeOrder\"", "\"response\":{\"pick\":[\"$bad\"]},\"shapeOrder\"")
             assertFalse("应拒绝：$bad", PlaybackConfigStore.install(json, "test"))
         }
-        assertEquals(2, PlaybackConfigStore.current().configVersion)
+        assertEquals(3, PlaybackConfigStore.current().configVersion)
     }
 
     @Test fun requireFieldsFilterOutModelsWithoutResources() {

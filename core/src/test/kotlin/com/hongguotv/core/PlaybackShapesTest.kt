@@ -14,6 +14,7 @@ class PlaybackShapesTest {
     private val playerV5 = PlaybackShape(PlaybackPath.POST_PLAYER, PlaybackSigner.V5)
     private val v1Argus = PlaybackShape(PlaybackPath.POST_V1, PlaybackSigner.ARGUS)
     private val preloadV5 = PlaybackShape(PlaybackPath.POST_PRELOAD, PlaybackSigner.V5)
+    private val videoModelV5 = PlaybackShape(PlaybackPath.POST_VIDEO_MODEL, PlaybackSigner.V5)
 
     @After
     fun reset() {
@@ -42,10 +43,13 @@ class PlaybackShapesTest {
         // 尾部斜杠是官方 RpcOperation 原文，别在改配置时抹掉。
         val endpoint = PlaybackPath.POST_VIDEO_MODEL.resolve()
         assertEquals("/novel/player/video_model/v1/", endpoint.absolutePath)
-        assertEquals("api5-normal-sinfonlinea.fqnovel.com", endpoint.host.substringAfter("//"))
         assertTrue(endpoint.absolutePath.endsWith("/"))
-        // 实测这个端点只认扁平请求体（旧 map 体回 100001），必须由端点定义带出来。
-        assertEquals("flat", endpoint.body)
+        // 上游 d859244（0.1.40）：同一个路径换到 reading.snssdk.com，请求体改成
+        // `video_id` + `biz_param`（device_level=2）——同路径打 fqnovel 网关只回 720P 单档。
+        assertEquals("reading.snssdk.com", endpoint.host.substringAfter("//"))
+        assertEquals("single", endpoint.body)
+        assertEquals(2, endpoint.deviceLevel)
+        assertEquals(MobilePlayback.PRELOAD_BASE, endpoint.host)
         assertEquals("map", PlaybackPath.POST_PLAYER.resolve().body)
         // 旧端点不带尾斜杠，两者是不同的 path 特征。
         assertEquals("/novel/player/multi_video_model/v1", PlaybackPath.POST_V1.resolve().absolutePath)
@@ -65,10 +69,11 @@ class PlaybackShapesTest {
     fun defaultOrderStartsWithRecentlyVerifiedCombination() {
         PlaybackShapeMemory.restore(null)
         val order = PlaybackShapeMemory.order()
-        // 11-23 恢复播放的是 preload + v5（上游 0.1.39 dcbda1f 把它置顶），新鲜安装先试它；
-        // GET + v5 仍排在第二位——11-23 白天它是唯一活着的那条。
-        assertEquals(preloadV5, order.first())
-        assertEquals(getV5, order[1])
+        // 11-25（上游 d859244）起单集 video_model 是唯一能取到 1080P 多档的形态，排第一；
+        // preload 仍活着但只回 720P 单档，退第二；GET 仍是 11-23 白天唯一活着的那条，第三。
+        assertEquals(videoModelV5, order.first())
+        assertEquals(preloadV5, order[1])
+        assertEquals(getV5, order[2])
         assertEquals(PlaybackShape.all.size, order.size)
     }
 

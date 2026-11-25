@@ -84,9 +84,9 @@ data class PlaybackConfig(
          */
         fun defaults(): PlaybackConfig = PlaybackConfig(
             schema = SCHEMA,
-            configVersion = 2,
+            configVersion = 3,
             minAppVersion = 0,
-            notes = "builtin baseline (2026-11-24 74532 profile + field21=312 + video_model/v1)",
+            notes = "builtin baseline (2026-11-25 74532 profile + field21=312 + video_model/v1 @ reading.snssdk.com single body)",
             medusaField21 = 312,
             appQuery = linkedMapOf(
                 "aid" to "8662", "app_name" to "novelread",
@@ -101,8 +101,8 @@ data class PlaybackConfig(
             uaPost = "",
             endpoints = listOf(
                 PlaybackEndpoint(
-                    "video-model", "POST", MobilePlayback.MODEL_BASE,
-                    MobilePlayback.VIDEO_MODEL_SEGMENT, body = "flat"),
+                    "video-model", "POST", MobilePlayback.PRELOAD_BASE,
+                    MobilePlayback.VIDEO_MODEL_SEGMENT, deviceLevel = 2, body = "single"),
                 PlaybackEndpoint("get", "GET", MobilePlayback.GET_TAB_BASE, MobilePlayback.GET_TAB_SEGMENT),
                 PlaybackEndpoint("player", "POST", MobilePlayback.MODEL_BASE, MobilePlayback.PLAYER_SEGMENT),
                 PlaybackEndpoint(
@@ -111,7 +111,7 @@ data class PlaybackConfig(
                 PlaybackEndpoint("v1", "POST", MobilePlayback.MODEL_BASE, MobilePlayback.MODEL_SEGMENT),
             ),
             shapeOrder = listOf(
-                "preload-v5", "get-v5", "video-model-v5", "video-model-argus",
+                "video-model-v5", "preload-v5", "get-v5", "video-model-argus",
                 "player-v5", "v1-argus", "get-argus", "v1-v5",
                 "player-argus", "preload-argus",
             ),
@@ -183,7 +183,7 @@ data class PlaybackConfig(
                 val level = o.optInt("deviceLevel", 1)
                 require(level in 1..4) { "deviceLevel 非法" }
                 val body = o.optString("body", "map").lowercase()
-                require(body == "map" || body == "flat") { "body 非法：$body" }
+                require(body == "map" || body == "flat" || body == "single") { "body 非法：$body" }
                 endpoints += PlaybackEndpoint(id, method, host.trimEnd('/'), segment, signer, drScene, level, body)
             }
             require(endpoints.isNotEmpty()) { "endpoints 为空" }
@@ -259,10 +259,12 @@ data class PlaybackEndpoint(
     val drScene: String? = null,
     val deviceLevel: Int = 1,
     /**
-     * 请求体形态（2026-11-24，官方 `video_model/v1/` 起出现第二种）：
+     * 请求体形态（平台换过三次，每次都必须跟着换）：
      *  - `map`（默认）：`biz_param` + `mixed_video_id_map.1004[id]`，旧 `multi_video_model` 系列；
      *  - `flat`：扁平 snake_case（`video_id` / `video_id_type` / `device_level` …），
-     *    官方现行 `video_model/v1` 只认这种——用 `map` 体会被回 `code=100001 invalid param`。
+     *    11-24 那版官方 `video_model/v1` 只认这种；
+     *  - `single`：`video_id` + `biz_param`（11-25 官方现行，上游 d859244）——
+     *    同路径下只有这种能取到 1080P 多档。
      */
     val body: String = "map",
 ) {
