@@ -84,9 +84,9 @@ data class PlaybackConfig(
          */
         fun defaults(): PlaybackConfig = PlaybackConfig(
             schema = SCHEMA,
-            configVersion = 3,
+            configVersion = 4,
             minAppVersion = 0,
-            notes = "builtin baseline (2026-11-25 74532 profile + field21=312 + video_model/v1 @ reading.snssdk.com single body)",
+            notes = "builtin baseline (2026-11-26 74532 profile + field21=312 + device_level=4 能力等级 + video_model/v1 @ reading.snssdk.com single body)",
             medusaField21 = 312,
             appQuery = linkedMapOf(
                 "aid" to "8662", "app_name" to "novelread",
@@ -102,12 +102,12 @@ data class PlaybackConfig(
             endpoints = listOf(
                 PlaybackEndpoint(
                     "video-model", "POST", MobilePlayback.PRELOAD_BASE,
-                    MobilePlayback.VIDEO_MODEL_SEGMENT, deviceLevel = 2, body = "single"),
+                    MobilePlayback.VIDEO_MODEL_SEGMENT, deviceLevel = 4, body = "single"),
                 PlaybackEndpoint("get", "GET", MobilePlayback.GET_TAB_BASE, MobilePlayback.GET_TAB_SEGMENT),
                 PlaybackEndpoint("player", "POST", MobilePlayback.MODEL_BASE, MobilePlayback.PLAYER_SEGMENT),
                 PlaybackEndpoint(
                     "preload", "POST", MobilePlayback.PRELOAD_BASE, MobilePlayback.PRELOAD_SEGMENT,
-                    drScene = "preload", deviceLevel = 2),
+                    drScene = "preload", deviceLevel = 4),
                 PlaybackEndpoint("v1", "POST", MobilePlayback.MODEL_BASE, MobilePlayback.MODEL_SEGMENT),
             ),
             shapeOrder = listOf(

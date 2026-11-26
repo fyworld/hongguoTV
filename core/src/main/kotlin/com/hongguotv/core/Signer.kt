@@ -32,6 +32,13 @@ internal class Signer(
     private val mobileV5: Boolean = false,
 ) {
     private val processStarted: Long = clock()
+    /**
+     * medusa 明文里的 f5/f16 设备令牌（上游 N3urda 69f219e）：24 字符 base64url nonce
+     * 前置 'A' 补足 25 位。官方包 f5 与 f16 是同一个值。
+     */
+    private val deviceToken: String =
+        processNonce.takeIf { it.length == 25 && it.startsWith("A") }
+            ?: ("A" + (processNonce + "AAAAAAAAAAAAAAAAAAAAAAAA").take(24))
     data class Request(val url: String, val headers: Map<String, String>, val body: ByteArray?)
 
     private fun rand() = (random() * 4294967296.0).toLong().toInt()
@@ -289,28 +296,51 @@ internal class Signer(
      * v5 medusa（官方 v04.10.03 / 2026-11-16 事件）：明文结构、magic、license、
      * 设备信息字段与 AesV3 常量表全部换新，载荷首字节 0xCA，长度 248 字节起。
      * 内嵌的 device_id / 版本 / channel 必须与 query 完全一致（服务端核对）。
+     *
+     * 2026-11-26（上游 N3urda 69f219e / 0.16.15）：官方 v04.10.03 客户端在 `env.device`
+     * 里带 **38 个字段**，我们此前只内联 14 个 —— 缺字段不会报错，只会让 v5 接口回
+     * HTTP 200 + 0 字节。补齐注册默认值、进程元数据、brand/type 回声、f5/f16 设备令牌，
+     * `env` 补 launch / pid / `{ts,-2,200}` 子消息与计数器块，flags 改 4480000000000000。
      */
     private fun medusaV5(url: String, body: ByteArray?, ts: Int, who: Map<String, String>, field21: Int): String {
         val query = sm3(url.substringAfter('?').toByteArray(Charsets.UTF_8))
         val f13 = hashF13V5(query, body?.let { digest("MD5", it) } ?: ByteArray(16), ts)
-        val flags = ByteArray(8)
+        val flags = hex("4480000000000000")
         fun v(key: String, fallback: String) = who[key] ?: device[key] ?: fallback
         val version = v("version_name", "7.4.3.32")
+        val brand = who["device_brand"]?.takeIf { it.isNotEmpty() }
+            ?: device["device_brand"]?.takeIf { it.isNotEmpty() } ?: "HONOR"
+        val type = v("device_type", "25053RT47C")
+        val envLaunch = (random() * 21).toInt() + 100
+        val envPid = (random() * 2000).toInt() + 10001
+        // 补齐设备信封中截至字段 38 的 36 个已观测字段（上游 69f219e 实测恢复空响应）。
         val deviceInfo = proto(
-            f(1,1,"sint"), f(2,2,"sint"), f(3,"8662"), f(4, v("device_id", "0")),
-            f(5, processNonce), f(6,"!noperm!"), f(12,"Asia/Shanghai,8"), f(13,"zh_CN"),
-            f(22, v("os_version", "16")), f(25, processStarted,"sint"),
-            f(30, v("device_type", "25053RT47C")), f(31,"HONOR"),
-            f(32, v("device_type", "25053RT47C")), f(34,"HONOR"),
+            f(1, 1, "sint"), f(2, 2, "sint"), f(3, "8662"), f(4, v("device_id", "0")),
+            f(5, deviceToken), f(6, "!noperm!"),
+            f(7, -888888, "sint"), f(8, -888888, "sint"), f(9, 3, "sint"), f(10, -888888, "sint"),
+            f(11, "!notset!"), f(12, "Asia/Shanghai,8"), f(13, "zh_CN"), f(14, 4, "sint"),
+            f(16, 0f, "float"), f(17, 0f, "float"), f(18, 0f, "float"),
+            f(19, 0f, "float"), f(20, 0f, "float"), f(21, 0f, "float"),
+            f(22, v("os_version", "16")), f(23, 41, "sint"), f(24, 36, "sint"),
+            f(25, processStarted, "sint"), f(26, processStarted, "sint"),
+            f(27, processStarted, "sint"), f(28, clock(), "sint"),
+            f(29, -1, "sint"), f(30, type), f(31, brand), f(32, type), f(33, type),
+            f(34, brand), f(35, brand), f(36, brand), f(38, 31, "sint"),
         )
-        val env = proto(f(6,"v04.10.03.04-bugfix"), f(8, v("channel", "update_64")),
-            f(12, deviceInfo), f(14, version))
+        val env = proto(
+            f(1, envLaunch, "sint"), f(2, 247235599, "sint"), f(3, 247235596, "sint"),
+            f(5, 7, "sint"), f(6, "v04.10.03.04-bugfix"), f(7, envPid, "sint"),
+            f(8, v("channel", "update_64")), f(12, deviceInfo),
+            f(13, proto(f(1, ts, "sint"), f(2, -2, "sint"), f(4, 200, "sint"))),
+            f(14, version),
+        )
         val message = proto(
             f(1, V5Constants.magic), f(2,5,"sint"), f(3, unsigned(rand()),"sint"),
             f(4,"8662"), f(5, v("device_id", "0")), f(6, V5Constants.license),
             f(7, version), f(8,"v04.10.03-ml-android"), f(9, 0x040a0300,"sint"),
             f(10, flags), f(12, ts,"sint"), f(13, f13), f(14, query.copyOf(6)),
-            f(15, proto(f(1,1,"sint"),f(2,1,"sint"),f(3,1,"sint"),f(5,1,"sint"))),
+            f(15, proto(f(1,305,"sint"),f(2,4,"sint"),f(3,694367,"sint"),f(5,1621072674,"sint"))),
+            f(16, deviceToken),
             f(17, ts,"sint"), f(20,"none"), f(21,field21,"sint"), f(23, env),
             f(24, """{"cmr":16777216,"cmr2":16777216,"un_h":11,"vpn":0,"kd":0,"dyn":"","do":1,"tk":true}"""),
         )

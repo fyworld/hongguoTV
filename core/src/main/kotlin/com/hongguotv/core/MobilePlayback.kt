@@ -103,7 +103,8 @@ internal object MobilePlayback {
      * [segment] 由调用方按形态指定（player/v1、preload/v1、平铺 v1 或官方的 video_model/v1/）。
      * [host] 默认为 a 域；preload 变体走 `reading.snssdk.com`（官方现行端点）。
      * [drScene] 非空时写入请求体 `dr_scene`（preload 变体需要；平铺 v1 带上会掉空体）。
-     * [deviceLevel] preload 变体用 2（官方），其余用 1（TV 侧协商兼容档位）。
+     * [deviceLevel] 官方现行端点（preload / video_model）用 4（TV 可解的 HEVC 档位，上游 N3urda e2f9ef9），
+     * 其余用 1（旧协议侧协商兼容档位）。
      * [body] 请求体形态：`map`（旧 `multi_video_model` 系列）、`flat`（11-24 那版扁平字段）
      * 或 `single`（11-25 官方现行：`video_id` + `biz_param`，见 [videoModelPayload]）。
      *
@@ -126,7 +127,7 @@ internal object MobilePlayback {
         ensureActive()
         val payload = if (body == "single") {
             // 官方现行 `video_model/v1/`（上游 d859244，2026-11-25）：单集 `video_id`
-            // + 与 preload 同款的 `biz_param`，`device_level=2`。
+            // + 与 preload 同款的 `biz_param`，`device_level` 由调用方给定（官方现行 4）。
             // 这一版必须打 `reading.snssdk.com`：同路径换回 fqnovel 网关只回 720P 单档。
             JSONObject()
                 .put("video_id", id)

@@ -66,6 +66,22 @@ class SignerV5Test {
         }
     }
 
+    @Test fun v5EnvelopeKeepsTheFullDeviceBlock() {
+        // 上游 N3urda 69f219e（0.16.15）：官方 v04.10.03 在 `env.device` 里发 38 个字段，
+        // 我们此前只内联 14 个 —— 缺字段不报错，只让 v5 接口回 HTTP 200 + 0 字节。
+        // 这条用例盯住「信封别瘦回去」：补齐后密文载荷明显变长（旧信封约 330B）。
+        val signer = Signer({ 1800000000000 }, random = { 0.5 },
+            processNonce = "AAAAAAAAAAAAAAAAAAAAAAAA", mobileV5 = true)
+        val values = mapOf(
+            "device_id" to "123", "iid" to "456", "version_name" to "7.4.5.32",
+            "channel" to "update_64", "os_version" to "16", "device_type" to "25053RT47C",
+            "device_brand" to "Redmi")
+        val request = signer.signPlaybackV5(
+            "https://example.test/model", values, byteArrayOf(1, 2, 3), 1800000000000)
+        val payload = java.util.Base64.getDecoder().decode(request.headers["x-medusa"])
+        assertTrue("v5 信封只有 ${payload.size}B，设备字段可能被删回 14 个", payload.size >= 400)
+    }
+
     @Test fun legacySigningIsUnaffectedByTheV5Mode() {
         // 旧链路（目录/账号/旧播放）必须保持原样：branch 仍是 low%3，v5 常量不参与。
         val signer = Signer(mobileV5 = false)

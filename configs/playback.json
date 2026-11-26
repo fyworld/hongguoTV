@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "configVersion": 3,
-  "minAppVersion": 10056,
-  "notes": "基线：官方 7.4.5.32 画像 + field21=312 + 单集 video_model/v1 @ reading.snssdk.com（single 体，1.0.56）",
+  "configVersion": 4,
+  "minAppVersion": 10057,
+  "notes": "基线：官方 7.4.5.32 画像 + field21=312 + device_level=4 能力等级 + 单集 video_model/v1 @ reading.snssdk.com（single 体，1.0.57）",
   "medusa": {
     "field21": 312
   },
@@ -36,7 +36,7 @@
       "host": "https://reading.snssdk.com",
       "segment": "novel/player/video_model/v1/",
       "signer": "v5",
-      "deviceLevel": 2,
+      "deviceLevel": 4,
       "body": "single"
     },
     {
@@ -61,7 +61,7 @@
       "segment": "novel/player/multi_video_model/preload/v1",
       "signer": "v5",
       "drScene": "preload",
-      "deviceLevel": 2
+      "deviceLevel": 4
     },
     {
       "id": "v1",

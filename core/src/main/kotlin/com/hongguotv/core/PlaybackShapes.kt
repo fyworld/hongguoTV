@@ -33,11 +33,15 @@ enum class PlaybackPath(
      * 与旧端点不同，改配置时别把它去掉。
      *
      * 2026-11-25 起域名与请求体都变了：`reading.snssdk.com`（与 preload 同域）+
-     * `video_id`/`biz_param`（`device_level=2`）。同路径打 fqnovel 网关只回 720P 单档。
+     * `video_id`/`biz_param`。同路径打 fqnovel 网关只回 720P 单档。
+     *
+     * 2026-11-26（上游 N3urda e2f9ef9 / 0.16.17）：能力等级 `device_level` 2 → 4。
+     * 同机同集 A/B：level 2 要多一次 VOD 编码协商、部分样本只给 bytevc2；level 4 直接给
+     * 5 档 HEVC。`video_platform` 保持 1024（level 4 + platform 3 对 preload 仍 100001）。
      */
     POST_VIDEO_MODEL(
         "video-model", "novel/player/video_model/v1/",
-        host = MobilePlayback.PRELOAD_BASE, deviceLevel = 2, body = "single",
+        host = MobilePlayback.PRELOAD_BASE, deviceLevel = 4, body = "single",
     ),
     GET_VIDEO_TAB(
         "get", "reading/bookapi/video_tab/multi_video_model/v1",
@@ -46,7 +50,7 @@ enum class PlaybackPath(
     POST_PLAYER("player", "novel/player/multi_video_model/player/v1"),
     POST_PRELOAD(
         "preload", "novel/player/multi_video_model/preload/v1",
-        host = MobilePlayback.PRELOAD_BASE, drScene = "preload", deviceLevel = 2,
+        host = MobilePlayback.PRELOAD_BASE, drScene = "preload", deviceLevel = 4,
     ),
     POST_V1("v1", "novel/player/multi_video_model/v1"),
     ;

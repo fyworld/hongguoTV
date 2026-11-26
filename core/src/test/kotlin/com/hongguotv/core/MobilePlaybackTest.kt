@@ -152,7 +152,7 @@ class MobilePlaybackTest {
 
     @Test fun currentSingleModelUsesVideoIdPlusBizParamOnReadingHost() {
         // 上游 d859244（0.1.40，2026-11-25）：单集 `video_model/v1/` 走 reading.snssdk.com，
-        // 体是 `video_id` + `biz_param`（device_level=2），响应 `data.video_model` 直接给模型
+        // 体是 `video_id` + `biz_param`（device_level=4），响应 `data.video_model` 直接给模型
         //（字符串或对象都可能）。这是当前唯一能取到 1080P 多档的形态。
         var path: String? = null
         var host: String? = null
@@ -166,7 +166,7 @@ class MobilePlaybackTest {
             val payload = JSONObject(GZIPInputStream(bytes.inputStream()).reader().readText())
             assertEquals("123", payload.getString("video_id"))
             val biz = payload.getJSONObject("biz_param")
-            assertEquals(2, biz.getInt("device_level"))
+            assertEquals(4, biz.getInt("device_level"))
             assertTrue(biz.getBoolean("need_all_video_definition"))
             assertEquals(1024, biz.getInt("video_platform"))
             // 单集体不能带批量字段 / 预加载场景标记
@@ -176,7 +176,7 @@ class MobilePlaybackTest {
         val parsed = MobilePlayback.model(
             "123", device, http, signer, 1000,
             segment = MobilePlayback.VIDEO_MODEL_SEGMENT, host = MobilePlayback.PRELOAD_BASE,
-            deviceLevel = 2, body = "single")
+            deviceLevel = 4, body = "single")
             .getJSONObject("video_model")
         assertEquals(1, parsed.getJSONArray("video_list").length())
         assertEquals("/novel/player/video_model/v1/", path)
@@ -190,7 +190,7 @@ class MobilePlaybackTest {
             MobilePlayback.model(
                 "123", device, http(mismatched), signer, 1000,
                 segment = MobilePlayback.VIDEO_MODEL_SEGMENT, host = MobilePlayback.PRELOAD_BASE,
-                deviceLevel = 2, body = "single")
+                deviceLevel = 4, body = "single")
         }
     }
 
@@ -227,8 +227,8 @@ class MobilePlaybackTest {
     }
 
     @Test fun preloadVariantCarriesOfficialHostLevelAndScene() {
-        // 官方现行端点（上游 N3urda ef328f3）：reading.snssdk.com + preload/v1，
-        // 体里 device_level=2 且带 dr_scene=preload。
+        // 官方现行端点（上游 N3urda ef328f3 / e2f9ef9）：reading.snssdk.com + preload/v1，
+        // 体里 device_level=4（能力等级）且带 dr_scene=preload，video_platform 保持 1024。
         var seen = 0
         MobilePlayback.model(
             "123", device, http(model(false, false)) { request ->
@@ -237,11 +237,12 @@ class MobilePlaybackTest {
                 assertEquals("/${MobilePlayback.PRELOAD_SEGMENT}", request.url.encodedPath)
                 val body = Buffer().apply { request.body!!.writeTo(this) }.readByteArray()
                 val payload = JSONObject(GZIPInputStream(body.inputStream()).reader().readText())
-                assertEquals(2, payload.getJSONObject("biz_param").getInt("device_level"))
+                assertEquals(4, payload.getJSONObject("biz_param").getInt("device_level"))
+                assertEquals(1024, payload.getJSONObject("biz_param").getInt("video_platform"))
                 assertEquals("preload", payload.getString("dr_scene"))
             }, signer, 1000,
             segment = MobilePlayback.PRELOAD_SEGMENT, host = MobilePlayback.PRELOAD_BASE,
-            drScene = "preload", deviceLevel = 2)
+            drScene = "preload", deviceLevel = 4)
         assertEquals(1, seen)
     }
 

@@ -45,10 +45,10 @@ class PlaybackShapesTest {
         assertEquals("/novel/player/video_model/v1/", endpoint.absolutePath)
         assertTrue(endpoint.absolutePath.endsWith("/"))
         // 上游 d859244（0.1.40）：同一个路径换到 reading.snssdk.com，请求体改成
-        // `video_id` + `biz_param`（device_level=2）——同路径打 fqnovel 网关只回 720P 单档。
+        // `video_id` + `biz_param`（device_level=4，上游 N3urda e2f9ef9）——同路径打 fqnovel 网关只回 720P 单档。
         assertEquals("reading.snssdk.com", endpoint.host.substringAfter("//"))
         assertEquals("single", endpoint.body)
-        assertEquals(2, endpoint.deviceLevel)
+        assertEquals(4, endpoint.deviceLevel)
         assertEquals(MobilePlayback.PRELOAD_BASE, endpoint.host)
         assertEquals("map", PlaybackPath.POST_PLAYER.resolve().body)
         // 旧端点不带尾斜杠，两者是不同的 path 特征。
@@ -60,7 +60,7 @@ class PlaybackShapesTest {
         // preload 是官方现行端点，自带 host / dr_scene / device_level（上游 N3urda ef328f3）。
         assertEquals(MobilePlayback.PRELOAD_BASE, PlaybackPath.POST_PRELOAD.host)
         assertEquals("preload", PlaybackPath.POST_PRELOAD.drScene)
-        assertEquals(2, PlaybackPath.POST_PRELOAD.deviceLevel)
+        assertEquals(4, PlaybackPath.POST_PRELOAD.deviceLevel)
         assertEquals(MobilePlayback.MODEL_BASE, PlaybackPath.POST_PLAYER.host)
         assertNull(PlaybackPath.POST_PLAYER.drScene)
     }
