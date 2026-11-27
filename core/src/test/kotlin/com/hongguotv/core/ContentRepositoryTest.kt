@@ -315,10 +315,28 @@ class ContentRepositoryTest {
     }
 
     @Test fun detailRejectsDuplicateEpisodes() {
+        // 2026-11-27 起：网页 vid 不完整/重复 → 回退 App 目录接口；这里让目录接口也失败，
+        // 因此仍然抛错（但错误语义变成「完整分集暂不可用」）。
         val repo=repository { request ->
             """<script>_ROUTER_DATA={"loaderData":{"detail_page":{"seriesDetail":{"series_id":"123","series_name":"测试","vid_list":["111","111"]}}}};</script>"""
         }
         assertThrows(IOException::class.java) { repo.detail("123") }
+    }
+
+    @Test fun detailFallsBackToAppDirectoryWhenWebVidsAreObfuscated() {
+        // 平台 2026-11-27 改版：网站只给 3 条 v1_xxx 预览 id，完整数字 id 来自 App 目录接口
+        val repo=repository { request ->
+            when {
+                request.url.encodedPath=="/detail" ->
+                    """<script>_ROUTER_DATA={"loaderData":{"detail_page":{"seriesDetail":{"series_id":"123","series_name":"测试剧集","episode_cnt":3,"vid_list":["v1_aaa","v1_bbb","v1_ccc"]}}}};</script>"""
+                request.url.encodedPath.endsWith("/directory/all_items/v/") ->
+                    """{"code":0,"data":{"item_data_list":[{"item_id":"111"},{"item_id":"222"},{"item_id":"333"}]}}"""
+                else -> throw AssertionError("unexpected "+request.url)
+            }
+        }
+        val result=repo.detail("123")
+        assertEquals(listOf("111","222","333"),result.episodes)
+        assertEquals("测试剧集",result.series.title)
     }
 
     @Test fun searchParsesWebsitePage() {

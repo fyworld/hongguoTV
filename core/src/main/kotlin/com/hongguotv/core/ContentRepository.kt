@@ -487,9 +487,10 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             .firstOrNull { it.length() > 0 && it.optJSONObject("seriesDetail") != null })
             ?: throw IOException("剧集详情暂不可用")
         val o = page.optJSONObject("seriesDetail") ?: throw IOException("剧集详情暂不可用")
-        val raw = o.optJSONArray("vid_list") ?: throw IOException("分集暂不可用")
-        val episodes = (0 until raw.length()).map { raw.getString(it) }
-        if (episodes.isEmpty() || episodes.any { !it.matches(Regex("[0-9]{1,30}")) } || episodes.distinct().size != episodes.size) throw IOException("分集数据异常")
+        // 2026-11-27：网站只给前 3 集、且 vid 被混淆成 v1_xxx。网页元数据照用，
+        // 完整分集目录改走 App 目录接口（见 EpisodeDirectory 的说明）。
+        val episodes = EpisodeDirectory.fromWeb(o)
+            ?: directoryEpisodes(id, EpisodeDirectory.expectedCount(o))
         val count = o.optInt("episode_cnt", episodes.size)
         val tags = o.optJSONArray("tags") ?: JSONArray()
         val series = Series(
@@ -500,6 +501,30 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
             o.str("episode_right_text").ifEmpty { if(count>0) "全 $count 集" else "" },
             (0 until minOf(tags.length(),5)).joinToString(" · ") { tags.optJSONObject(it)?.str("name") ?: tags.optString(it) })
         return Detail(series, episodes, type)
+    }
+
+    /** 浏览签名器（Argsus 六头）：目录接口不需要登录或播放设备注册，与上游一致。 */
+    private val browseSigner by lazy { Signer.shared { clock() } }
+
+    /**
+     * 完整分集目录（App API `/reading/bookapi/directory/all_items/v/`）。
+     *
+     * 网站 2026-11-27 起只暴露 3 条混淆预览 id，完整数字 id 只能从这里取。
+     * 双域名回退（a/b），各自 5s 连接 / 8s 读 / 10s 总超时；失败保留最后一次异常原因。
+     */
+    private fun directoryEpisodes(id: String, expectedCount: Int): List<String> {
+        var failure: IOException? = null
+        for (host in listOf("api5-normal-sinfonlinea.fqnovel.com", "api5-normal-sinfonlineb.fqnovel.com")) {
+            val signed = browseSigner.sign(
+                "https://$host/reading/bookapi/directory/all_items/v/",
+                VendorConstants.device + mapOf("book_id" to id, "need_version" to "true"))
+            try {
+                return EpisodeDirectory.parse(text(signed.url, signed.headers), expectedCount)
+            } catch (problem: IOException) {
+                failure = problem
+            }
+        }
+        throw IOException("完整分集暂不可用，请稍后重试", failure)
     }
 
     // ---------- stream: channel scheduler (App API first, public MP4 fallback) ----------
