@@ -548,10 +548,17 @@ class ContentRepository(val http: OkHttpClient = OkHttpClient.Builder().connectT
      * renditions, so metadata alone is not enough - a failed tier is learned and
      * the next lower one is tried without re-requesting the model.
      */
-    fun playbackTiers(id: String, maxQuality: Int = 1080, type: ContentType = ContentType.SHORT, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): List<StreamInfo> {
+    fun playbackTiers(
+        id: String,
+        maxQuality: Int = 1080,
+        type: ContentType = ContentType.SHORT,
+        metadataAhead: List<String> = emptyList(),
+        speculative: Boolean = false,
+        acceptable: (StreamInfo) -> Boolean = { true },
+    ): List<StreamInfo> {
         require(id.matches(Regex("[0-9]{1,30}")))
         require(metadataAhead.size <= 2 && metadataAhead.all { it.matches(Regex("[0-9]{1,30}")) })
-        return streams.ladder(id, maxQuality, type, metadataAhead, speculative)
+        return streams.ladder(id, maxQuality, type, metadataAhead, speculative, acceptable)
     }
 
     companion object {

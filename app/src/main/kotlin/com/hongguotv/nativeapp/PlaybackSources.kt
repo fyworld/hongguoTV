@@ -56,7 +56,13 @@ internal fun openStream(
     speculative: Boolean = false,
     supportsTrack: (VideoTracks.Track?) -> Boolean,
 ): OpenedStream? {
-    val ladder = repository.playbackTiers(id, maxQuality, type, metadataAhead, speculative)
+    // 上游 N3urda 1d44b62 / 0.16.21：把「这一档本机能播」提前告诉取模型链路。
+    // 首推模型只有 HEVC 1080P、而盒子没有 HEVC 解码器（或用户把画质上限压到 720P）时，
+    // 通道会拿 fallback_api 协商 codec_type=1/3 的兼容档，而不是把播不了的档位丢给播放器。
+    val ladder = repository.playbackTiers(
+        id, maxQuality, type, metadataAhead, speculative,
+        acceptable = { it.qualityValue <= maxQuality && supportsTier(it) },
+    )
     val pool = ladder.filter(supportsTier).ifEmpty { ladder }
     val pick =
         pool.filter { it.qualityValue in 1..maxQuality }.maxWithOrNull(betterTier)

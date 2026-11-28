@@ -23,7 +23,14 @@ class StreamSchedulerLadderTest {
         var refreshes = 0
         override fun stream(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>, speculative: Boolean): StreamInfo =
             throw UnsupportedOperationException()
-        override fun ladder(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>, speculative: Boolean): List<StreamInfo> {
+        override fun ladder(
+            id: String,
+            maxQuality: Int,
+            type: ContentType,
+            metadataAhead: List<String>,
+            speculative: Boolean,
+            acceptable: (StreamInfo) -> Boolean,
+        ): List<StreamInfo> {
             calls++
             return script.removeAt(0)()
         }

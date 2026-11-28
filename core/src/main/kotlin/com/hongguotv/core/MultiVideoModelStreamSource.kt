@@ -105,19 +105,49 @@ internal class MultiVideoModelStreamSource(
      * decoder capabilities (static probe + learned runtime failures) and opens the
      * first tier the box can actually decode - ONE model request covers the whole
      * verified-downgrade walk, no quota is burned per tier switch.
+     *
+     * [acceptable]（上游 N3urda 1d44b62 / 0.16.21）决定「这一档本机到底能不能播」，
+     * 通常是「画质 <= 用户上限 && 解码器支持」。首推模型里一个满足的档位都没有时，
+     * 不能把一堆播不了的档位交给播放器，而要按官方播放器的方式拿 `fallback_api`
+     * 协商 `codec_type=1/3` 的兼容档（见 [PlaybackNegotiation]）。
+     * 默认 `{ true }` 保持老调用方行为不变（非空即返回）。
      */
-    override fun ladder(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String>, speculative: Boolean): List<StreamInfo> {
+    override fun ladder(
+        id: String,
+        maxQuality: Int,
+        type: ContentType,
+        metadataAhead: List<String>,
+        speculative: Boolean,
+        acceptable: (StreamInfo) -> Boolean,
+    ): List<StreamInfo> {
         val resolved = resolvePlaybackModel(id, metadataAhead, speculative)
         val inline = ladderTiers(resolved.model, resolved.seed)
-        if (inline.isNotEmpty()) return inline
-        // All inline rows were bytevc2/bvc2 (VVC - no TV decoder). The official
-        // player has a compat path (upstream streamLadder / 265472f): read
-        // fallback_api, and when that model ALSO offers only bytevc2, re-request
-        // the same URL with codec_type=0&force_codec=h264. This is exactly how
-        // upstream plays these episodes at 540x960 HEVC ("960P") while we used
-        // to return an empty ladder and fall through to the 10s preview clip.
-        val compat = resolveFallbackTiers(resolved.model) ?: return emptyList()
-        return ladderTiers(compat.model, compat.seed)
+        if (inline.isNotEmpty() && inline.any(acceptable)) return inline
+        if (inline.isEmpty()) {
+            // All inline rows were bytevc2/bvc2 (VVC - no TV decoder). The official
+            // player has a compat path (upstream streamLadder / 265472f): read
+            // fallback_api, and when that model ALSO offers only bytevc2, re-request
+            // the same URL with codec_type=0&force_codec=h264. This is exactly how
+            // upstream plays these episodes at 540x960 HEVC ("960P") while we used
+            // to return an empty ladder and fall through to the 10s preview clip.
+            val compat = runCatching { resolveFallbackTiers(resolved.model) }.getOrNull()
+            if (compat != null) {
+                val tiers = ladderTiers(compat.model, compat.seed)
+                if (tiers.isNotEmpty()) return tiers
+            }
+        }
+        // 有档位但都不是本机能播的（HEVC-only 模型 + 无 HEVC 解码器的盒子，或用户的
+        // 画质上限压得比平台最小档还低）：按 codec_type=1 → 3 协商兼容档，
+        // 首推档位一并返回，播放器仍可自己挑（上游 0.16.21 合并语义）。
+        val negotiated = PlaybackNegotiation.negotiate(
+            fallbackUrl = fallbackUrl(resolved.model),
+            seed = resolved.seed,
+            acceptable = acceptable,
+            fetch = { url -> fallbackJson(url) },
+            tiers = { model, seed -> ladderTiers(model, seed) },
+        )
+        if (negotiated.isNotEmpty()) return (inline + negotiated).distinctBy { it.url }
+        return inline
     }
 
     /** fallback_api may be a plain URL, a JSONObject, or a one-element JSONArray. */

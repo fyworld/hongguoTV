@@ -37,8 +37,19 @@ interface StreamSource {
      * model keep working; the multi-video-model channel overrides with the full ladder
      * so the app can verify each tier against the device's real decoder capabilities
      * without re-requesting the model per tier switch.
+     *
+     * [acceptable]（上游 N3urda 1d44b62 / 0.16.21）：播放器视角的「这一档本机能播」判据
+     * （画质上限 + 解码能力）。多档模型里一个满足的都没有时，通道可以再协商兼容档；
+     * 默认 `{ true }` 让老调用方与没有多档模型的通道行为完全不变。
      */
-    fun ladder(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): List<StreamInfo> =
+    fun ladder(
+        id: String,
+        maxQuality: Int,
+        type: ContentType,
+        metadataAhead: List<String> = emptyList(),
+        speculative: Boolean = false,
+        acceptable: (StreamInfo) -> Boolean = { true },
+    ): List<StreamInfo> =
         listOf(stream(id, maxQuality, type, metadataAhead, speculative))
 
     /**
@@ -114,7 +125,14 @@ internal class StreamScheduler(private val sources: List<StreamSource>) {
      * identity" retries while upstream on the same emulator played 540x960 fine,
      * and a force-stop (which drops the in-memory identity) played on the first try.
      */
-    fun ladder(id: String, maxQuality: Int, type: ContentType, metadataAhead: List<String> = emptyList(), speculative: Boolean = false): List<StreamInfo> {
+    fun ladder(
+        id: String,
+        maxQuality: Int,
+        type: ContentType,
+        metadataAhead: List<String> = emptyList(),
+        speculative: Boolean = false,
+        acceptable: (StreamInfo) -> Boolean = { true },
+    ): List<StreamInfo> {
         var last: IOException? = null
         var refreshes = 0
         while (true) {
@@ -131,7 +149,7 @@ internal class StreamScheduler(private val sources: List<StreamSource>) {
                 // website channel for the legacy stream() path only.
                 if (source.name == "public-mp4") continue
                 try {
-                    val tiers = source.ladder(id, maxQuality, type, metadataAhead, speculative)
+                    val tiers = source.ladder(id, maxQuality, type, metadataAhead, speculative, acceptable)
                     if (tiers.isNotEmpty()) return tiers
                 } catch (e: IOException) {
                     last = e
